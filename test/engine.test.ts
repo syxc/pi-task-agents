@@ -90,8 +90,10 @@ async function waitFor(fn: () => unknown | Promise<unknown>): Promise<void> {
 }
 
 async function finish(engine: TaskEngine, child: MockChild, text = 'done'): Promise<void> {
+  const task = (await engine.query()).findLast((entry) => entry.childSessionPath === child.sessionPath);
+  assert.ok(task);
   child.calls.at(-1).resolve({ text, usage: { tokens: 1 }, verification: 'checked' });
-  await waitFor(async () => !(await engine.query({ status: 'running' })).length);
+  await waitFor(async () => (await engine.query({ task_id: task.task_id })).status === 'succeeded');
 }
 
 test('ACK, bounded admission, duplicate starts and frozen effective profiles', async (t) => {
@@ -111,6 +113,19 @@ test('ACK, bounded admission, duplicate starts and frozen effective profiles', a
   await finish(engine, children[0]);
   await waitFor(() => children[1]?.calls.length === 1);
   assert.equal((await engine.query({ task_id: a.task_id })).status, 'succeeded');
+  await engine.stop(b.task_id);
+});
+
+test('finishing a task does not wait for an already running queued successor', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 1 });
+  const a = await engine.start(input(), profile);
+  const b = await engine.start(input('queued successor'), profile);
+  await waitFor(() => children[0]?.calls.length === 1);
+  children[0].calls[0].resolve({ text: 'first complete' });
+  await waitFor(() => children[1]?.calls.length === 1);
+  await finish(engine, children[0]);
+  assert.equal((await engine.query({ task_id: a.task_id })).status, 'succeeded');
+  assert.equal((await engine.query({ task_id: b.task_id })).status, 'running');
   await engine.stop(b.task_id);
 });
 
