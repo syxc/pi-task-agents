@@ -1,0 +1,21 @@
+{
+  "maxConcurrency": 4,
+  "roles": {
+    "explore": {
+      "model": "openai-codex/gpt-6.1-terra",
+      "thinking": "medium"
+    },
+    "worker": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "verifier": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "xhigh"
+    },
+    "mavis": {
+      "model": "openai-codex/gpt-6.1-sol",
+      "thinking": "xhigh"
+    }
+  }
+}

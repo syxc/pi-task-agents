@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "repository": "https://github.com/MiniMax-AI/minimax-code",
+  "commit": "3c21163c85a9684030cb147bfef48c6284fa3c46",
+  "files": [
+    {
+      "source": "packages/agent-modules/background-task/src/errors.ts",
+      "target": "src/vendor/mcode-background-task/errors.ts",
+      "sha256": "3621569183caf999b1c1d99651c5b9169703c20aba3399a53e489fa634488d9b",
+      "adaptedSha256": "88bac2cced32b69bbf814b34c51bc4489aa281dd012cdd191fe92a4295d80131",
+      "transforms": [
+        "relative-import-js-to-ts-v1",
+        "background-task-error-fields-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/id.ts",
+      "target": "src/vendor/mcode-background-task/id.ts",
+      "sha256": "7ae18628dd8e53d007506575e4f91c22a17478f37ed8d5fbeb5ce0fcfb243f7f",
+      "adaptedSha256": "7ae18628dd8e53d007506575e4f91c22a17478f37ed8d5fbeb5ce0fcfb243f7f",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/in-memory-output-store.ts",
+      "target": "src/vendor/mcode-background-task/in-memory-output-store.ts",
+      "sha256": "bb04ff042717a2f05c48b4d6412dbfdc99a30208fc3402281e2fcfca11f6f83e",
+      "adaptedSha256": "eb4e5d8cde1b4de337e1e07e46730e1cb08a162bef02c28e38a4a21e80c10a13",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/in-memory-store.ts",
+      "target": "src/vendor/mcode-background-task/in-memory-store.ts",
+      "sha256": "63d876021102a21c78fc5225c749f8181b66c1e9fe073994434dcd23217b8210",
+      "adaptedSha256": "f62a7bf82d38be2614422b9cf84db23dec88d5231289f26bc07636a0b866cb3f",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/index.ts",
+      "target": "src/vendor/mcode-background-task/index.ts",
+      "sha256": "608cb820ee1fad8ada833c4d05b7e18003ebff8ec552ae7e92e60541ee49badd",
+      "adaptedSha256": "ffeedfe46bd6b82275c20488bf0b6a2f50888af4fce2478f7a7e4b02c2189a95",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/manager.ts",
+      "target": "src/vendor/mcode-background-task/manager.ts",
+      "sha256": "8adfab43b01020a042c00186f7643e5ab68f2d546ef3ca661c538b388a7ed45a",
+      "adaptedSha256": "c3b9f6a17fa7e1eb59c25c5f7d4811d4789746e6b38633806489c47e86643770",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/status.ts",
+      "target": "src/vendor/mcode-background-task/status.ts",
+      "sha256": "bc2232e8c959c2d99d4295616feef27155ece80eb47b8fde4669c112fa59c56c",
+      "adaptedSha256": "0216d2ff98322e5e5403056f49e41e899daa07e532af3aaf98f0da855a1ced0c",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    },
+    {
+      "source": "packages/agent-modules/background-task/src/types.ts",
+      "target": "src/vendor/mcode-background-task/types.ts",
+      "sha256": "25c9247fcab24ec2a974c3c7656df839fd315239540d7abc706f0cb95f0adb15",
+      "adaptedSha256": "25c9247fcab24ec2a974c3c7656df839fd315239540d7abc706f0cb95f0adb15",
+      "transforms": [
+        "relative-import-js-to-ts-v1"
+      ]
+    }
+  ],
+  "watch": [
+    {
+      "source": "packages/local-runtime-v2/assets/agents/explore/system-prompt.md.hbs",
+      "kind": "role",
+      "sha256": "415ef7363aeecfff42dd3ea1b19c0bc6334dfb6f795cff02bcab0fa1fe05eb87"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/worker/system-prompt.md.hbs",
+      "kind": "role",
+      "sha256": "2975f87d7702ff197dc11486ba17aaae52c5a698643041f93b65c2e7f0eb6456"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/verifier/system-prompt.md.hbs",
+      "kind": "role",
+      "sha256": "6da210091255b05ae04d3e207112d30ecd9a83c4a16e7fe0e3b1fca64fc3e304"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/mavis/system-prompt.md.hbs",
+      "kind": "role",
+      "sha256": "4b445d96014c6a5fcd81cce1a040370f2a873deb72199b5cca0ab37435f34b30"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/explore/agent.md",
+      "kind": "role",
+      "sha256": "afdcaef36843a42e709ad53740f589ba822eb646ed70f8edde15c4dbb60a2278"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/worker/agent.md",
+      "kind": "role",
+      "sha256": "f688b5172b419f83a5a63a2e8e44d81a3c8aa235ea249a8e747e121f052ef21b"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/verifier/agent.md",
+      "kind": "role",
+      "sha256": "fef012a4920cc22ed2532c106eb836b42772db448c659152e45ba5ddb281f1fa"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_default/prompt-session-branch.md.hbs",
+      "kind": "role",
+      "sha256": "3a209223c78dd78d4b990cae696233c876e95dea612228cabe063c63e39bd7ad"
+    },
+    {
+      "source": "packages/shared/src/subagent-roles.ts",
+      "kind": "host",
+      "sha256": "0757af3a81acfb3625ba32ccc6bef8dd39b094c13f09e336fbc853dab1040b23"
+    },
+    {
+      "source": "packages/agent-tools/src/desktop/canonical-tool-policy.ts",
+      "kind": "host",
+      "sha256": "754661a9b481eb2dc63f9cdd7e8816b9bd774bd28c713196a6f52cbcffe5207f"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-append.ts",
+      "kind": "host",
+      "sha256": "bb9df6dad27f1ca82a09845b1d266dfa180349758f0d2dce5e73da5167010f14"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-append-lifecycle.ts",
+      "kind": "host",
+      "sha256": "ef0c5eccad68fa571e91a0908f06ba296cd8151197f7fd20f199473cbc04f2aa"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-runner.ts",
+      "kind": "host",
+      "sha256": "a5f907db44f03c4b3c8db43c25b02b7c7290864272b65a2d799c3481cf626b2e"
+    }
+  ]
+}
