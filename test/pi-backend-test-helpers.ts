@@ -36,7 +36,8 @@ export async function fixture(t: TestContext, extra: Partial<PiChildFactoryOptio
       return { async *[Symbol.asyncIterator]() { const message = await result; yield { type: 'done', reason: message.stopReason, message }; }, result: () => result };
     } };
   const create = createPiChildFactory({ agentDir, modelRuntime: runtime, inheritedModel: model as any, ...extra,
-    sdk: { ...sdk, SettingsManager: { ...sdk.SettingsManager,
+    sdk: { ...sdk, SettingsManager: { ...sdk.SettingsManager, fromStorage: sdk.SettingsManager.fromStorage,
+      create: sdk.SettingsManager.create,
       inMemory(settings: any, options?: Parameters<typeof sdk.SettingsManager.inMemory>[1]) { return sdk.SettingsManager.inMemory({ ...settings, compaction: { enabled: false }, retry: { enabled: false } }, options); } },
       async createAgentSession(value: CreateAgentSessionOptions) {
         options = value;

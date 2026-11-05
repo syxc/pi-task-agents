@@ -16,6 +16,7 @@ export const modules = [
 export const watches = [
   'packages/local-runtime-v2/src/service/turn-system/execution/steering/steer-session.service.ts',
   'packages/local-runtime/src/background-task/turn-id.ts',
+  'packages/agent-tools/src/desktop/task-verification.ts',
   'LICENSE',
 ].map((source) => ({ source, kind: 'host' }));
 const root = fileURLToPath(new URL('../', import.meta.url));

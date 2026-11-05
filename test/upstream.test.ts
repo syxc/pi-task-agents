@@ -74,7 +74,7 @@ async function fixture() {
 }
 
 test('upstream monitoring stays within task protocol reference fixtures', () => {
-  assert.equal(watches.length, 3);
+  assert.equal(watches.length, 4);
   assert.ok(watches.every((entry) => entry.kind === 'host'));
   assert.equal(watches.some((entry) => /website|ptc|file-changes|web-fetch|mcp|assets\/agents/.test(entry.source)), false);
 });

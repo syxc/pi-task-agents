@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { chmod } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import type { AgentSessionEvent, ExtensionFactory, InlineExtension, CreateAgentSessionOptions, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import type { AgentSessionEvent, ExtensionFactory, InlineExtension, CreateAgentSessionOptions, ModelRuntime, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import type { AgentProfile, CreateChild, ChildSession, ChildResult, CreateChildOptions, ThinkingLevel, ChildPromptOptions } from './types.ts';
 import { childResources, type HostResources } from './resource-loader.ts';
 import { childMcpFactory } from './resource-mcp.ts';
@@ -12,11 +12,14 @@ import { filterConfiguredToolDefinitions, observedToolFacts, pluginToolNames, sd
 import { createChildSteering } from './child-steering.ts';
 import { acquireSessionLease, prepareSession } from './child-session-file.ts';
 import { createChildMessageWindow } from './child-message-window.ts';
+import { captureWorkspace } from './workspace-observation.ts';
+import type { WorkspaceSnapshot } from './workspace-observation.ts';
+import { buildVerification } from './task-verification.ts';
 
 type PiSdk = Pick<typeof import('@earendil-works/pi-coding-agent'),
   'ModelRuntime' | 'SessionManager' | 'SettingsManager' | 'DefaultResourceLoader' | 'createMcpExtension' | 'createAgentSession' |
   'ExtensionRunner' | 'ModelRegistry' | 'createExtensionRuntime'
-> & Partial<Pick<typeof import('@earendil-works/pi-coding-agent'), 'createCodemodeExtension' | 'createToolSearchExtension'>>
+> & Partial<Pick<typeof import('@earendil-works/pi-coding-agent'), 'createCodemodeExtension' | 'createToolSearchExtension' | 'getPackageDir'>>
   & { loadMcpConfig?: Parameters<typeof childMcpFactory>[0]['loadMcpConfig'];
     DefaultPackageManager?: typeof import('@earendil-works/pi-coding-agent')['DefaultPackageManager'] };
 type AssistantMessage = Extract<Extract<AgentSessionEvent, { type: 'message_end' }>['message'], { role: 'assistant' }>;
@@ -88,6 +91,18 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
   const seededProviders = new Set<string>();
   return async function createChild({ profile, cwd, sessionPath, onActivity, onProfileResolved }: CreateChildOptions): Promise<ChildSession> {
     const api = await (sdkPromise ??= Promise.resolve((sdk as PiSdk | undefined) ?? import('@earendil-works/pi-coding-agent')));
+    const required = { createAgentSession: api.createAgentSession, DefaultResourceLoader: api.DefaultResourceLoader,
+      'SessionManager.create': api.SessionManager?.create, 'SessionManager.open': api.SessionManager?.open,
+      'SettingsManager.inMemory': api.SettingsManager?.inMemory, ExtensionRunner: api.ExtensionRunner,
+      ModelRegistry: api.ModelRegistry, createExtensionRuntime: api.createExtensionRuntime,
+      ...(modelRuntime == null ? { 'ModelRuntime.create': api.ModelRuntime?.create } : {}),
+      ...(!resourceLoader && (profile.extensions === undefined || profile.skills === undefined)
+        ? { DefaultPackageManager: api.DefaultPackageManager, 'SettingsManager.fromStorage': api.SettingsManager?.fromStorage } : {}) };
+    const missing = Object.entries(required).filter(([, value]) => typeof value !== 'function').map(([name]) => name);
+    if (missing.length) throw new Error(`Pi SDK is missing required child-session APIs: ${missing.join(', ')}. Use a compatible Pi release and plugin version.`);
+    if (profile.mcp !== false && profile.mcpServers?.length !== 0 && typeof api.createMcpExtension !== 'function') {
+      throw new Error('Pi SDK native MCP support is unavailable. Use a compatible Pi release and plugin version.');
+    }
     const workDir = resolve(cwd), path = resolve(sessionPath);
     const requested = profile.tools ?? ['read', 'grep', 'find'];
     if (!Array.isArray(requested) || requested.some((name) => typeof name !== 'string' || !name.trim())) {
@@ -116,7 +131,9 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       if (seedInheritedProvider(runtime, inheritedModelRegistry, provider)) seededProviders.add(provider);
     }
     const model = profile.model ? runtime.getModel(profile.model.slice(0, slash), profile.model.slice(slash + 1)) : inheritedModel;
-    if (!model) throw new Error(profile.model ? `Unknown child model: ${profile.model}` : 'Child model requires an inherited host model');
+    if (!model) throw new Error(profile.model
+      ? `Unknown child model: ${profile.model}. Select an available model in Pi or omit roles.${profile.name}.model to inherit the current conversation.`
+      : 'Child model requires an inherited host model. Select a model in the parent conversation first.');
     // Accept only native Pi levels. Provider effort/managed protocol translation belongs to the SDK, not this plugin.
     const requestedThinking = profile.effort ?? profile.thinking ?? (profile.model ? undefined : inheritedThinking);
     if (requestedThinking !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(requestedThinking)) {
@@ -251,12 +268,17 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
           run.done = (async (): Promise<ChildResult> => {
             let returnedStatus: 'succeeded' | 'failed' | 'aborted' | undefined;
             let failure: unknown, cleanupSucceeded = true;
+            let before: WorkspaceSnapshot | undefined;
             try {
-              notify(onActivity, 'Running');
               if (profile.timeoutMs > 0) timer = setTimeout(() => {
                 run.failure = Object.assign(new Error('Child session timed out'), { name: 'TimeoutError' });
                 child!.abort().catch(() => {});
               }, profile.timeoutMs);
+              if (profile.name === 'verifier') {
+                notify(onActivity, 'Inspecting workspace metadata');
+                before = await captureWorkspace(workDir, [configDir, dirname(path)], run.controller.signal);
+              }
+              notify(onActivity, 'Running');
               await steering.prompt(session, run, text, { expandPromptTemplates: false, source: 'extension',
                 preflightResult: (result) => { if (result === 'handled') run.resolve(); } });
               if (run.aborted && !run.settled) await session.abort();
@@ -279,7 +301,10 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
             catch (error) { cleanupSucceeded = false; returnedStatus = undefined; failure = cleanupFailure(error); }
             const committed = messages.read(run);
             if (!committed.available && returnedStatus) { returnedStatus = undefined; failure = new Error('Child committed messages are unavailable'); }
+            const verification = before ? buildVerification(before, await captureWorkspace(workDir, [configDir, dirname(path)]),
+              committed.text, returnedStatus === 'succeeded') : undefined;
             const result: ChildResult = { text: redact(committed.text), usage: run.usage, eventCount: run.eventCount,
+              ...(verification ? { verification } : {}),
               outcome: returnedStatus ? { kind: 'returned', status: returnedStatus } : { kind: 'exception' },
               subTurnId: run.id, resolvedAgentName: profile.name };
             if (cleanupSucceeded) current = undefined;
@@ -319,7 +344,11 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
         if (thinkingLevel !== undefined && session.thinkingLevel !== thinkingLevel) {
           throw new Error(`Requested child thinking level ${thinkingLevel} is unsupported for ${profile.model ?? model.id}; Pi selected ${session.thinkingLevel}`);
         }
-        await session.bindExtensions({ mode: 'json', abortHandler: () => { child!.abort().catch(() => {}); },
+        // Pi shares its headless UI singleton; do not share extension-owned session caches.
+        const runner = session.extensionRunner;
+        const uiContext = runner ? Object.fromEntries(Object.entries(runner.getUIContext())) as ExtensionUIContext : undefined;
+        if (runner) runner.hasUI = () => false;
+        await session.bindExtensions({ ...(uiContext ? { uiContext } : {}), mode: 'json', abortHandler: () => { child!.abort().catch(() => {}); },
           shutdownHandler: () => { child!.abort().catch(() => {}); },
           onError: (error) => { if (!steering.staleInput()) extensionError = new Error(`Child extension failed: ${redact(error.error)}`); } });
         // Factories already ran during reload. Reject diagnostics only once native shutdown is owned and observable.

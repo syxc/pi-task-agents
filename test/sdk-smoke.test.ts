@@ -59,7 +59,8 @@ async function harness(mutate: Mutation = () => {}) {
         status: input.run_in_background ? 'queued' : 'succeeded', agent_name: role,
         resolved_agent_name: role, description: input.description!, created_at: '2025-01-01T00:00:00.000Z',
         output_bytes: 0, notify_completion: input.run_in_background === true, notification_pending: false,
-        final_text: input.run_in_background ? undefined : `${role.toUpperCase()}_READY`,
+        final_text: input.run_in_background ? undefined : `${role.toUpperCase()}_READY${role === 'verifier' ? '\nVERDICT: PASS' : ''}`,
+        ...(role === 'verifier' ? { verification: { modelVerdict: 'pass', fileChange: 'no_observed_change', observationNotes: ['owned fixture'] } } : {}),
       };
       tasks.set(summary.task_id, summary);
       result = taskResult(summary, input);
@@ -116,6 +117,20 @@ test('SDK smoke accepts actual public projections and proves continuation/sessio
   } finally { await h.cleanup(); }
 });
 
+test('SDK smoke accepts normal verifier formatting and truthful concurrent-change observation', async () => {
+  const h = await harness((name, result) => {
+    if (name === 'task' && result.details.agent_name === 'verifier') {
+      const text = 'Checks: contained arithmetic.\nEvidence: 2 + 2 = 4. VERIFIER_READY\nVERDICT: PASS';
+      result.content[0].text = result.content[0].text.replace(result.details.final_text, text);
+      result.details.final_text = text;
+      result.details.verification.fileChange = 'change_observed';
+      result.details.verification.changedFiles = ['concurrent-parent-history.jsonl'];
+    }
+  });
+  try { assert.equal((await runSdkSmoke(h)).status, 'passed'); }
+  finally { await h.cleanup(); }
+});
+
 test('live factory override preserves every parent context option except agentDir/modelRuntime', () => {
   const options = {
     agentDir: '/isolated-parent', modelRuntime: { old: true }, inheritedModel: { provider: 'offline', id: 'model' },
@@ -141,6 +156,10 @@ const invalidProjections: Array<[string, string, (result: TaskToolResult) => voi
   ['wrong foreground role', 'task', (r) => { r.details.agent_name = 'wrong'; }, /wrong/],
   ['failed foreground', 'task', (r) => { r.details.status = 'failed'; }, /succeeded/],
   ['empty foreground text', 'task', (r) => { r.details.final_text = ' '; }, /task final_text/],
+  ['missing verifier verification', 'task', (r) => { if (r.details.agent_name === 'verifier') delete r.details.verification; }, /verifier verification/],
+  ['wrong verifier verdict', 'task', (r) => { if (r.details.agent_name === 'verifier') r.details.verification.modelVerdict = 'fail'; }, /verifier modelVerdict/],
+  ['missing verifier text verdict', 'task', (r) => { if (r.details.agent_name === 'verifier') r.details.final_text = 'VERIFIER_READY'; }, /verifier report verdict/],
+  ['invalid verifier observation', 'task', (r) => { if (r.details.agent_name === 'verifier') r.details.verification.fileChange = 'clean'; }, /verifier verification/],
   ['flattened query', 'task_query', (r) => { r.details = r.details.task as Record<string, unknown>; }, /task_query.details.task/],
   ['missing query status', 'task_query', (r) => { delete (r.details.task as Record<string, unknown>).status; }, /invalid task_query status/],
   ['unknown query status', 'task_query', (r) => { (r.details.task as Record<string, unknown>).status = 'done'; }, /invalid task_query status/],

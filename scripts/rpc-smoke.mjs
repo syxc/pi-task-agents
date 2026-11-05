@@ -11,7 +11,6 @@ const extension = process.env.PI_TASK_EXTENSION || fileURLToPath(new URL('../src
 const proc = spawn(process.env.PI_EXECUTABLE || 'pi', [
   '--mode', 'rpc', '--session-dir', run, '--offline', '--no-mcp', '--no-extensions', '--extension', extension,
   '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes',
-  '--provider', 'openai-codex', '--model', 'gpt-6.1-terra', '--thinking', 'medium',
 ], { cwd: run, stdio: ['pipe', 'pipe', 'pipe'] });
 let buffer = '';
 let taskId;

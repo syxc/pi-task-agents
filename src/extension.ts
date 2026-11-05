@@ -9,6 +9,7 @@ import { isRecord, notFound, projectedResult } from './tool-result-common.ts';
 import type { TaskToolResult } from './tool-result-common.ts';
 import { appendFailure, appendResult, knownAppendFailure, taskResult } from './tool-result-task.ts';
 import { OutputProjector, outputWait, queryResult, stopResult } from './tool-result-control.ts';
+import { renderRoles, roleOverview } from './task-presentation.ts';
 export type { TaskToolResult } from './tool-result-common.ts';
 
 const nonempty = () => Type.String({ minLength: 1 });
@@ -106,7 +107,8 @@ export function registerTaskAgents(
   }), async (params, id, signal, ctx) => {
     try {
       const task = await controller.send(params, id, signal, ctx);
-      return toolResult(task, ['failed', 'canceled', 'lost'].includes(task.status) || !!task.stopError);
+      const report = taskResult(task, { agent_name: task.agent_name });
+      return projectedResult('task_send', report.text, { ...task }, ['failed', 'canceled', 'lost'].includes(task.status) || !!task.stopError);
     } catch (error) {
       const facts = isRecord(error) ? error : undefined;
       return toolResult({ task_id: params.task_id, error_message: error instanceof Error ? error.message : String(error),
@@ -152,7 +154,7 @@ export function registerTaskAgents(
 
   register('task_agents', 'List configured role profiles, model, thinking and tool scopes. Built-in roles are explore, worker, verifier and mavis. Use agent:<name> for an exact custom profile that collides with a built-in.', object({}), async (params, id, signal, ctx) => {
     await controller.ensure(ctx);
-    return toolResult({ roles: controller.config.roles, diagnostics: controller.config.diagnostics });
+    return toolResult({ roles: roleOverview(controller.config.roles), diagnostics: controller.config.diagnostics });
   });
 
   pi.on('turn_start', () => outputProjector.reset());
@@ -190,8 +192,15 @@ export function registerTaskAgents(
       else if (command === 'stop' && id) result = await engine.stop(id, 'User requested cancellation');
       else if (command === 'show' && id) result = await engine.output(id, { offset: 0, limitBytes: 65536 });
       else if (command === 'resume') { controller.resume(); await controller.flush(); result = { status: 'notifications resumed' }; }
-      else if (command === 'roles') result = controller.config.roles;
-      else if (command === 'list') result = await engine.query();
+      else if (command === 'roles') {
+        pi.sendMessage({ customType: 'pi-task-agents:status', display: true,
+          content: [{ type: 'text', text: renderRoles(controller.config.roles) }] });
+        return;
+      }
+      else if (command === 'list') {
+        pi.sendMessage({ customType: 'pi-task-agents:status', display: true, content: queryResult(await engine.query()).content });
+        return;
+      }
       else { ctx.ui.notify('Usage: /tasks list|roles|show <id>|stop <id>|stop-all|resume', 'warning'); return; }
       pi.sendMessage({ customType: 'pi-task-agents:status', display: true, content: toolResult(result).content });
     },

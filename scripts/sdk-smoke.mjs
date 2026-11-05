@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { resolve, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isVerificationReport, parseModelVerdict } from '../src/task-verification.ts';
 
 export function createSmokeChildFactory(factory, agentDir, modelRuntime) {
   return (options) => factory({ ...options, agentDir, modelRuntime });
@@ -67,7 +68,9 @@ export async function runSdkSmoke({ session, controller, delivered, errors }) {
 
   const roles = record((await call('task_agents', {})).roles, 'task_agents roles');
   const tokens = { explore: 'EXPLORE_READY', worker: 'WORKER_READY', verifier: 'VERIFIER_READY', mavis: 'MAVIS_READY' };
-  const firstPrompt = (token) => `No tools or file changes are needed. Reply with exactly ${token}.`;
+  const firstPrompt = (token) => token === tokens.verifier
+    ? `Verify this contained statement: 2 + 2 = 4. No tools, files or temporary artifacts are needed. Include ${token} in your normal verifier report and finish with VERDICT: PASS.`
+    : `No tools or file changes are needed. Reply with exactly ${token}.`;
   const tasks = await Promise.all(Object.entries(tokens).map(([agent_name, token]) => {
     record(roles[agent_name], `role ${agent_name}`);
     return call('task', { agent_name, description: `Validate ${agent_name} runtime`, prompt: firstPrompt(token), run_in_background: false });
@@ -79,7 +82,13 @@ export async function runSdkSmoke({ session, controller, delivered, errors }) {
     nonempty(task.sub_session_id, 'task sub_session_id');
     assert.equal(task.agent_name, role);
     assert.equal(task.status, 'succeeded', JSON.stringify(task));
-    assert.equal(nonempty(task.final_text, 'task final_text').trim(), tokens[role]);
+    const finalText = nonempty(task.final_text, 'task final_text');
+    assert.ok(finalText.includes(tokens[role]), `task final_text is missing ${tokens[role]}`);
+    if (role === 'verifier') {
+      assert.equal(parseModelVerdict(finalText), 'pass', 'verifier report verdict');
+      assert.ok(isVerificationReport(task.verification), 'verifier verification');
+      assert.equal(task.verification.modelVerdict, 'pass', 'verifier modelVerdict');
+    }
     const state = await query(task.task_id);
     assert.equal(state.status, 'succeeded');
     assert.equal(state.session_id, task.sub_session_id);
