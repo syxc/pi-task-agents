@@ -18,5 +18,8 @@ test/fixtures/mcode-task-steering/ and mcode-task-terminal/ support offline
 task-protocol tests. They are not a bundled host runtime.
 
 upstream.lock.json records vendor and task-reference hashes. The role prompts
-are maintained for this plugin. Child sessions, tools and resources use the
+are maintained for this plugin. src/task-verification.ts adapts the upstream
+verdict parser; test/fixtures/task-verification/upstream.ts.txt preserves the
+reference used by its differential tests. Workspace observations use bounded
+Pi-side metadata snapshots, not the MCode observation database. Child sessions, tools and resources use the
 host Pi SDK. This package does not reproduce the MCode host platform.

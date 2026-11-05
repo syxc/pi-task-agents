@@ -1298,7 +1298,11 @@ test('regression: internal cleanup confirmation rejects malformed or unrelated p
   const restored = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild });
   await restored.init();
   try {
-    assert.deepEqual(await restored.query({ task_id: first.task_id }), before);
+    const { cleanup_pending, ...historicalFailure } = before;
+    assert.equal(cleanup_pending, true);
+    const current = await restored.query({ task_id: first.task_id });
+    assert.deepEqual(current, historicalFailure);
+    assert.equal(current.cleanup_pending, undefined);
     assert.equal('cleanupConfirmed' in await restored.query({ task_id: first.task_id }), false);
     const next = await restored.start(input('confirmed clean owner'), profile);
     await waitFor(() => children[1]?.calls.length);

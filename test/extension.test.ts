@@ -103,7 +103,8 @@ test('failed task replies retain execution facts and set isError without making 
         assert.match(result.content[0].text, /^<task_error task_id="t1" session_id="child">/);
       } else {
         assert.deepEqual(result.details, facts);
-        assert.deepEqual(JSON.parse(result.content[0].text), facts);
+        assert.match(result.content[0].text, /^<task_error/);
+        assert.match(result.content[0].text, /partial/);
       }
     }
     const read = await f.execute('task_output', { task_id: 't1' });
@@ -272,6 +273,24 @@ test('task schema accepts raw effort and prepares blank optional model/effort wi
     await f.execute('task', input);
     assert.equal(Object.hasOwn(admitted, 'effort'), false);
     assert.equal(Object.hasOwn(admitted, 'model'), false);
+  } finally { await f.controller.shutdown(); }
+});
+
+test('role discovery and slash roles are compact without leaking instructions or internal snapshots', async () => {
+  const f = fixture();
+  try {
+    await f.controller.ensure(f.ctx);
+    const result = await f.execute('task_agents', {});
+    assert.equal(result.details.roles.worker.model, 'fake/model');
+    assert.equal(result.details.roles.worker.thinking, 'high');
+    assert.equal('instructions' in result.details.roles.worker, false);
+    assert.equal('timeoutMs' in result.details.roles.worker, false);
+    assert.equal(result.details.roles.worker.resources.mcp, 'off');
+    await f.commands.get('tasks').handler('roles', f.ctx);
+    assert.match(f.sent.at(-1)[0].content[0].text, /Role \| Model \| Thinking/);
+    assert.doesNotMatch(f.sent.at(-1)[0].content[0].text, /instructions|timeoutMs/);
+    await f.commands.get('tasks').handler('list', f.ctx);
+    assert.match(f.sent.at(-1)[0].content[0].text, /\[subagent\/succeeded\]/);
   } finally { await f.controller.shutdown(); }
 });
 

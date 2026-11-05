@@ -18,6 +18,7 @@ import type {
 
 interface TaskRuntime {
   accepting: boolean;
+  activity?: string;
   backgroundRunner?: boolean;
   shutdownReason?: string;
   sealed?: boolean;
@@ -127,9 +128,12 @@ export class TaskEngine {
   }
 
   summary(task: TaskRecord): TaskSummary {
-    const { output, cursor, input, profile, ...result } = task;
+    const { output, cursor, input, profile, legacyVerification, ...result } = task;
+    const runtime = this.runtimes.get(task.task_id);
     return { ...clone(result), ...(task.stopError ? { stopError: clone(this.safety.publicStopError(task)) } : {}),
-      output_bytes: Buffer.byteLength(output) };
+      output_bytes: Buffer.byteLength(output),
+      ...(this.safety.retains(task.session_id) || task.stopError && runtime ? { cleanup_pending: true } : {}),
+      ...(pending.has(task.status) && runtime?.activity ? { activity: runtime.activity } : {}) };
   }
 
   task(id: string): TaskRecord {
@@ -273,7 +277,11 @@ export class TaskEngine {
             }
           },
           onOutput: () => { if (session.active) this.changed(session.active); },
-          onActivity: () => { if (session.active) this.changed(session.active); },
+          onActivity: (activity) => {
+            const active = session.active;
+            const current = active && this.runtimes.get(active.task_id);
+            if (current && active) { current.activity = activity; this.changed(active); }
+          },
         }).catch((error) => {
           if (error?.cleanupChild?.sessionPath === task.childSessionPath) session.child = error.cleanupChild;
           throw error;

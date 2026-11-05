@@ -1,11 +1,12 @@
 import type { TaskInput, TaskSummary } from './types.ts';
 import { escapeAttribute, projectedResult } from './tool-result-common.ts';
 import type { TaskToolResult } from './tool-result-common.ts';
+import { verificationText } from './task-verification.ts';
 
 // Project persisted source facts only; legacy records may omit newer fields.
 export type TaskRunFacts = Pick<TaskSummary,
   'task_id' | 'session_id' | 'status' | 'agent_name' | 'final_text' | 'error' | 'cancel_reason' |
-  'sub_turn_id' | 'event_count' | 'resolved_agent_name' | 'requested_agent_name'>;
+  'sub_turn_id' | 'event_count' | 'resolved_agent_name' | 'requested_agent_name' | 'verification'>;
 
 export function formatParentReport(
   task: TaskRunFacts, requestedAgentName: string, status: string, errorMessage?: string,
@@ -14,6 +15,7 @@ export function formatParentReport(
     `run_status: ${status}`,
     `requested_agent_name: ${requestedAgentName}`,
     `resolved_agent_name: ${task.resolved_agent_name ?? 'missing'}`,
+    ...(task.verification ? [verificationText(task.verification)] : []),
     'final_text:', task.final_text ?? '', `error_message: ${errorMessage ?? ''}`,
   ].join('\n');
 }
@@ -46,6 +48,7 @@ export function taskResult(task: TaskRunFacts, input: Pick<TaskInput, 'agent_nam
     requested_agent_name: requestedAgentName,
     ...(task.resolved_agent_name ? { resolved_agent_name: task.resolved_agent_name } : {}),
     ...(task.final_text !== undefined ? { final_text: task.final_text } : {}),
+    ...(task.verification ? { verification: task.verification } : {}),
     ...(failed ? { error_message: errorMessage } : {}),
   }, failed);
 }

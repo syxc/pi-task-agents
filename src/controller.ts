@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { TaskEngine } from './engine.ts';
+import { verificationText } from './task-verification.ts';
+import { taskProgress } from './task-presentation.ts';
 import { loadConfig, resolveProfile } from './config.ts';
 import { createPiChildFactory } from './pi-backend.ts';
 import type { PiChildFactoryOptions } from './pi-backend.ts';
@@ -56,6 +58,7 @@ export class TaskController {
   private initializing: Promise<unknown> = Promise.resolve();
   private delivery: Promise<void> = Promise.resolve();
   private receiptTimer?: ReturnType<typeof setTimeout>;
+  private uiTimer?: ReturnType<typeof setTimeout>;
   private closing = false;
   private ctx?: ExtensionContext;
   private parentId?: string;
@@ -209,17 +212,29 @@ export class TaskController {
   }
 
   async updateUI(): Promise<void> {
+    clearTimeout(this.uiTimer);
+    this.uiTimer = undefined;
     const ctx = this.ctx;
     const engine = this.engine;
     if (!ctx?.hasUI || !engine || this.closing) return;
     const tasks = await engine.query();
-    if (engine !== this.engine) return;
-    const pending = tasks.filter((task) => isActiveTaskStatus(task.status));
+    if (engine !== this.engine || ctx !== this.ctx || this.closing) return;
+    const pending = tasks.filter((task) => isActiveTaskStatus(task.status) || task.cleanup_pending);
+    const cleanup = pending.filter(task => task.cleanup_pending).length;
+    const queued = pending.filter(task => task.status === 'queued').length;
+    const running = pending.length - queued;
     const cap = this.config.maxConcurrency;
     const capacity = typeof cap === 'number' && Number.isFinite(cap) ? `/${cap}` : '';
-    ctx.ui.setStatus('task-agents', pending.length ? `Agents ${pending.length}${capacity}` : undefined);
-    ctx.ui.setWidget('task-agents', pending.length ? pending.slice(-6).map((task) =>
-      `${task.status} · ${task.agent_name} · ${task.description || task.task_id}`) : undefined);
+    ctx.ui.setStatus('task-agents', pending.length ? `Agents ${running}${capacity}${queued ? ` · queued ${queued}` : ''}${cleanup ? ` · cleanup pending ${cleanup}` : ''}` : undefined);
+    const visible = pending.sort((a, b) => Number(a.status === 'queued') - Number(b.status === 'queued')).slice(0, 6);
+    ctx.ui.setWidget('task-agents', visible.length ? visible.map(task => taskProgress(task)) : undefined);
+    if (pending.length && !this.uiTimer) {
+      this.uiTimer = setTimeout(() => {
+        this.uiTimer = undefined;
+        this.updateUI().catch(error => { if (engine === this.engine && ctx === this.ctx && !this.closing) this.warn(error); });
+      }, 1000);
+      this.uiTimer.unref();
+    }
   }
 
   private async admit(
@@ -308,7 +323,8 @@ export class TaskController {
       if (this.inFlight.has(task.task_id) || (this.attempts.get(task.task_id) ?? 0) >= 3) continue;
       const result = await engine.output(task.task_id, { offset: 0, limitBytes: 32000 });
       if (!this.eligible(engine, epoch)) return;
-      const text = result.final_text || result.output || result.error || '(No text output)';
+      const body = result.final_text || result.output || result.error || '(No text output)';
+      const text = result.verification ? `${verificationText(result.verification)}\n\n${body}` : body;
       this.inFlight.set(task.task_id, Date.now());
       this.attempts.set(task.task_id, (this.attempts.get(task.task_id) ?? 0) + 1);
       try {
@@ -370,6 +386,8 @@ export class TaskController {
 
   private async closeOwner(preserve = false): Promise<void> {
     this.closing = true;
+    clearTimeout(this.uiTimer);
+    this.uiTimer = undefined;
     const owner = this.owner;
     if (owner) {
       owner.notify = undefined;

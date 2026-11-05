@@ -56,6 +56,14 @@ export interface TaskOutputOptions {
 
 export type ChildOutcome = { kind: 'returned'; status: 'succeeded' | 'failed' | 'aborted' } | { kind: 'exception' };
 
+export type ModelVerdict = 'pass' | 'fail' | 'partial';
+export interface VerificationReport {
+  modelVerdict?: ModelVerdict;
+  fileChange: 'no_observed_change' | 'change_observed' | 'uncertain' | 'recording_failed';
+  changedFiles?: string[];
+  observationNotes: string[];
+}
+
 export interface ChildResult {
   /** Internal producer provenance for terminal formatting; never public Task details. */
   outcome?: ChildOutcome;
@@ -63,6 +71,7 @@ export interface ChildResult {
   subTurnId?: string;
   resolvedAgentName?: string;
   text: string;
+  verification?: VerificationReport;
   usage?: Record<string, number>;
 }
 
@@ -119,6 +128,9 @@ export interface TaskRecord {
   notification_pending: boolean;
   notify_completion: boolean;
   final_text?: string;
+  /** Historical runtime completion facts, never a review verdict or file observation. */
+  legacyVerification?: { agentSettled: true; stopReason: string; toolErrors: number };
+  verification?: VerificationReport;
   error?: string;
   cancel_reason?: string;
   usage?: Record<string, number>;
@@ -127,8 +139,12 @@ export interface TaskRecord {
   stopError?: { code: string; message: string };
 }
 
-export type TaskSummary = Omit<TaskRecord, 'profile' | 'input' | 'output' | 'cursor'> & {
+export type TaskSummary = Omit<TaskRecord, 'profile' | 'input' | 'output' | 'cursor' | 'legacyVerification'> & {
   output_bytes: number;
+  /** Current runtime activity; never persisted or treated as task output. */
+  activity?: string;
+  /** Runtime ownership remains held even if the public stop status is terminal. */
+  cleanup_pending?: boolean;
 };
 
 export interface TaskOutput extends TaskSummary {

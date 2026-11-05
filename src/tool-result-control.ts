@@ -2,6 +2,8 @@ import type { TaskOutput, TaskSummary } from './types.ts';
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts';
 import { projectedResult } from './tool-result-common.ts';
 import type { TaskToolResult } from './tool-result-common.ts';
+import { verificationText } from './task-verification.ts';
+import { taskElapsed } from './task-presentation.ts';
 
 function executionMode(task: TaskSummary): string | undefined {
   return task.notify_completion === undefined ? undefined : task.notify_completion ? 'background' : 'foreground';
@@ -22,6 +24,9 @@ export function summarizeTask(task: TaskSummary): Record<string, unknown> {
     task_id: task.task_id, kind: 'subagent', status: task.status,
     output: undefined, timing: undefined,
     ...(task.stopError ? { stopError: task.stopError } : {}),
+    ...(task.verification ? { verification: task.verification } : {}),
+    ...(task.cleanup_pending ? { cleanup_pending: true } : {}),
+    ...(task.activity ? { activity: task.activity } : {}),
     ...(task.session_id ? { session_id: task.session_id } : {}),
     parent_task_id: null,
     ...(mode ? { execution_mode: mode } : {}),
@@ -39,7 +44,12 @@ export function renderTask(task: TaskSummary): string {
     ...(mode ? [`execution_mode=${mode}`] : []),
   ];
   return `- ${task.task_id} [subagent/${task.status}]${task.description ? ` ${task.description}` : ''}` +
-    (lineage.length ? ` (${lineage.join(' ')})` : '');
+    (lineage.length ? ` (${lineage.join(' ')})` : '') +
+    (task.verification ? ` [verdict=${task.verification.modelVerdict ?? 'missing'}; file_change=${task.verification.fileChange}]` : '') +
+    (taskElapsed(task) ? ` [elapsed=${taskElapsed(task)}]` : '') +
+    (task.activity ? ` ${task.activity}` : '') +
+    (task.cleanup_pending ? ' [cleanup pending]' : '') +
+    (task.stopError?.message || task.error || task.cancel_reason ? `: ${task.stopError?.message ?? task.error ?? task.cancel_reason}` : '');
 }
 
 export function queryResult(tasks: TaskSummary | TaskSummary[]): TaskToolResult {
@@ -87,13 +97,15 @@ export class OutputProjector {
     const waitHint = signal?.aborted || !wait.wait_ms_clamped || read.timed_out !== true ? '' :
       '<task_output_hint>Your requested wait_ms exceeded 30000 ms and was capped at 30000 ms (30 seconds). This output read reached its wait limit; the background task was not stopped. Use wait_ms=30000 or less for future reads.</task_output_hint>\n';
     const hint = signal?.aborted ? '' : this.pollingHint(read, parentId);
-    const text = `<task_output status="${read.status}">\n${receipt}${waitHint}${hint}${read.output || '(no output yet)'}\n</task_output>`;
+    const verification = read.verification ? `${verificationText(read.verification)}\n` : '';
+    const text = `<task_output status="${read.status}">\n${receipt}${waitHint}${hint}${verification}${read.output || '(no output yet)'}\n</task_output>`;
     return projectedResult('task_output', text, {
       task_id: read.task_id, status: read.status, timing: undefined, ...wait,
       ...(read.timed_out === undefined ? {} : { timed_out: read.timed_out }),
       ...(read.next_offset === undefined ? {} : { next_offset: read.next_offset }),
       ...(truncated === undefined ? {} : { truncated }),
       ...(read.final_text ? { summary: read.final_text } : {}),
+      ...(read.verification ? { verification: read.verification } : {}),
     });
   }
 

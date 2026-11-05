@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES } from './vendor/mcode-background-task/status.ts';
 import { isEventCount, isFactName, isTurnId } from './engine-facts.ts';
+import { isVerificationReport } from './task-verification.ts';
 
 function hasCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
@@ -41,6 +42,12 @@ function input(value: unknown): value is TaskInput {
     && (value.run_in_background === undefined || typeof value.run_in_background === 'boolean');
 }
 
+function legacyVerification(value: unknown): boolean {
+  return object(value) && Object.keys(value).every(key => ['agentSettled', 'stopReason', 'toolErrors'].includes(key))
+    && value.agentSettled === true && typeof value.stopReason === 'string' && value.stopReason.length > 0
+    && typeof value.toolErrors === 'number' && Number.isSafeInteger(value.toolErrors) && value.toolErrors >= 0;
+}
+
 function task(value: unknown): value is TaskRecord {
   if (!object(value)) return false;
   const requiredStrings = ['task_id', 'session_id', 'parent_id', 'childSessionPath', 'description',
@@ -49,6 +56,8 @@ function task(value: unknown): value is TaskRecord {
   return requiredStrings.every((key) => typeof value[key] === 'string')
     && optionalStrings.every((key) => value[key] === undefined || typeof value[key] === 'string')
     && profile(value.profile) && input(value.input)
+    && (value.verification === undefined || isVerificationReport(value.verification))
+    && (value.legacyVerification === undefined || legacyVerification(value.legacyVerification))
     && (value.sub_turn_id === undefined || isTurnId(value.sub_turn_id, value.task_id))
     && (value.event_count === undefined || isEventCount(value.event_count))
     && ['requested_agent_name', 'resolved_agent_name'].every((key) => value[key] === undefined || isFactName(value[key]))
@@ -124,6 +133,15 @@ export class TaskStore {
       catch (error) { if (!hasCode(error, 'ENOENT')) throw error; }
       if (loaded && (!object(loaded) || loaded.parentId !== this.parentId || loaded.version !== 1)) {
         throw new Error('Task store owner or version mismatch');
+      }
+      // The original plugin used this field for execution facts, not review verdicts.
+      if (object(loaded) && Array.isArray(loaded.tasks)) {
+        for (const task of loaded.tasks) {
+          if (object(task) && task.legacyVerification === undefined && legacyVerification(task.verification)) {
+            task.legacyVerification = task.verification;
+            delete task.verification;
+          }
+        }
       }
       if (loaded !== undefined && loaded !== null && !state(loaded)) throw new Error('Invalid task store state');
       return loaded ?? { version: 1, parentId: this.parentId, tasks: [], requests: {} };

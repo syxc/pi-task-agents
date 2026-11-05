@@ -1,9 +1,11 @@
 import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { ExtensionAPI, ExtensionContext, InlineExtension, LoadedMcpConfig } from '@earendil-works/pi-coding-agent';
 import type { AgentProfile } from './types.ts';
 import { childToolPolicy, isResourceName, isSelectorMcp, localPaths, normalizeSelector, normalizedSelectorName, sameFile } from './resource-selection.ts';
 
-type Sdk = Pick<typeof import('@earendil-works/pi-coding-agent'), 'createMcpExtension'> & {
+type Sdk = Pick<typeof import('@earendil-works/pi-coding-agent'), 'createMcpExtension'>
+  & Partial<Pick<typeof import('@earendil-works/pi-coding-agent'), 'getPackageDir'>> & {
   loadMcpConfig?: (options: { agentDir: string; cwd: string; projectTrusted: boolean }) => LoadedMcpConfig;
 };
 type Registration = ReturnType<ExtensionAPI['getMcpServers']>[number];
@@ -16,10 +18,14 @@ export async function childMcpFactory(sdk: Sdk, profile: AgentProfile, agentDir:
   }> {
   let load = sdk.loadMcpConfig;
   if (!load) {
-    // The root exports the config types, but not its loader. This sole non-root
-    // seam uses Pi's complete schema/trust/override validation, never a local parser.
-    const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
-    load = (await import(new URL('./extensions/mcp/config.js', entry).href)).loadMcpConfig;
+    // Host peers need not exist beside this plugin. Anchor the sole non-root
+    // config-loader seam to the SDK supplied by Pi, preserving its validation.
+    try {
+      const root = sdk.getPackageDir?.();
+      if (!root) throw new Error('Missing host SDK package directory');
+      load = (await import(pathToFileURL(resolve(root, 'dist/extensions/mcp/config.js')).href)).loadMcpConfig;
+    }
+    catch { throw new Error('Pi native MCP configuration API is unavailable. Update Pi and pi-task-agents to compatible versions.'); }
   }
   if (!load) throw new Error('Pi MCP config loader is unavailable');
   const config = !projectTrusted && await sameFile(resolve(agentDir, 'mcp.json'), resolve(cwd, '.pi/mcp.json'))

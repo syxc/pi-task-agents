@@ -1,8 +1,6 @@
 {
   "roles": {
-    "explore": {},
-    "worker": {},
-    "verifier": {},
-    "mavis": {}
+    "explore": { "model": "provider/model", "thinking": "medium" },
+    "worker": { "model": "provider/model", "thinking": "high" }
   }
 }

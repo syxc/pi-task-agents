@@ -89,6 +89,11 @@
       "sha256": "455c8e4c8f641688d59bc956b0a3b7ecb155c788e771a9021aa6e05fdca28bc3"
     },
     {
+      "source": "packages/agent-tools/src/desktop/task-verification.ts",
+      "kind": "host",
+      "sha256": "e67420c570e46cd86263da6e4ead4cb720f89b2a9f2673aaaafcfcf268e54ef5"
+    },
+    {
       "source": "LICENSE",
       "kind": "host",
       "sha256": "28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea"

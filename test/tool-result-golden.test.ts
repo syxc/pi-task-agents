@@ -81,7 +81,7 @@ test('query singleton/list/empty goldens expose only upstream summary fields', (
   const summary = { task_id: 't1', kind: 'subagent', status: 'succeeded', output: undefined, timing: undefined,
     session_id: 's1', parent_task_id: null, execution_mode: 'background', description: 'bounded work',
     created_at: 1735689600000, ended_at: 1735689601000 };
-  const line = '- t1 [subagent/succeeded] bounded work (session_id=s1 execution_mode=background)';
+  const line = '- t1 [subagent/succeeded] bounded work (session_id=s1 execution_mode=background) [elapsed=1s]';
   exact(queryResult(base), line, { task: summary });
   exact(queryResult([base]), line, { count: 1, tasks: [summary] });
   exact(queryResult([]), 'No local background tasks in this session.', { count: 0, tasks: [] });

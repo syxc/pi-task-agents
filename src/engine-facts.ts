@@ -1,6 +1,7 @@
 import { taskIdFromTurnId, taskTurnId } from './task-turn-id.ts';
 import { clone, freeze } from './engine-helpers.ts';
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts';
+import { isVerificationReport } from './task-verification.ts';
 import type { AgentProfile, TaskInput, TaskRecord } from './types.ts';
 
 export const isTurnId = (value: unknown, taskId: unknown): value is string => typeof value === 'string'
@@ -38,6 +39,7 @@ export function recordChildFacts(task: TaskRecord, source: unknown): void {
     throw new Error('Invalid resolved child agent name');
   }
   if (source.text !== undefined && typeof source.text !== 'string') throw new Error('Invalid child final text');
+  if (source.verification !== undefined && !isVerificationReport(source.verification)) throw new Error('Invalid child verification report');
   if (source.usage !== undefined && (!object(source.usage)
     || !Object.values(source.usage).every((amount) => typeof amount === 'number' && Number.isFinite(amount)))) {
     throw new Error('Invalid child usage');
@@ -46,6 +48,7 @@ export function recordChildFacts(task: TaskRecord, source: unknown): void {
   if (source.eventCount !== undefined) task.event_count = source.eventCount as number;
   if (source.resolvedAgentName !== undefined) task.resolved_agent_name = source.resolvedAgentName as string;
   if (source.text !== undefined) task.final_text = source.text as string;
+  if (source.verification !== undefined) task.verification = clone(source.verification);
   if (source.usage !== undefined) task.usage = clone(source.usage) as Record<string, number>;
 }
 

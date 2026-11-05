@@ -45,6 +45,20 @@ test('completion is sent once and stays pending until the persisted message rece
   await f.controller.shutdown();
 });
 
+test('background completion delivers verifier facts without treating a failed verdict as execution failure', async () => {
+  const f = fixture();
+  try {
+    await f.controller.ensure(f.ctx);
+    f.engines[0].tasks.push({ ...complete(), agent_name: 'verifier', final_text: 'VERDICT: FAIL',
+      verification: { modelVerdict: 'fail', fileChange: 'no_observed_change', observationNotes: ['best effort'] } });
+    await f.controller.flush();
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0][0].content, /model_verdict: fail/);
+    assert.match(f.sent[0][0].content, /file_change: no_observed_change/);
+    assert.equal(f.sent[0][0].details.status, 'succeeded');
+  } finally { await f.controller.shutdown(); }
+});
+
 test('recovery reconciles a durable custom message before attempting redelivery', async () => {
   const f = fixture([{ type: 'custom_message', customType: RESULT_TYPE, details: { task_id: 't1', parent_id: 'parent-a' } }]);
   await f.controller.ensure(f.ctx);
@@ -372,6 +386,39 @@ test('task UI omits absent or unbounded capacity instead of showing undefined or
       assert.equal(statuses.at(-1), cap === 4 ? 'Agents 1/4' : 'Agents 1');
     } finally { await f.controller.shutdown(); }
   }
+});
+
+test('task UI separates queued work from occupied capacity and includes current activity', async () => {
+  const f = fixture(), statuses = [], widgets = [];
+  f.ctx.hasUI = true;
+  f.ctx.ui = { setStatus: (_key, value) => statuses.push(value), setWidget: (_key, value) => widgets.push(value), notify() {} };
+  try {
+    await f.controller.ensure(f.ctx);
+    f.engines[0].tasks.push({ task_id: 'running', status: 'running', agent_name: 'worker', description: 'Build',
+      started_at: new Date(Date.now() - 5000).toISOString(), activity: 'bash: running' },
+    { task_id: 'queued', status: 'queued', agent_name: 'worker', description: 'Wait', created_at: new Date().toISOString() });
+    await f.controller.updateUI();
+    assert.equal(statuses.at(-1), 'Agents 1/4 · queued 1');
+    assert.match(widgets.at(-1).join('\n'), /bash: running/);
+    assert.ok(f.controller.uiTimer);
+    await f.controller.shutdown();
+    assert.equal(f.controller.uiTimer, undefined);
+  } finally { await f.controller.shutdown(); }
+});
+
+test('terminal cleanup holds stay visible and running tasks are not hidden behind the queue', async () => {
+  const f = fixture(), statuses = [], widgets = [];
+  f.ctx.hasUI = true;
+  f.ctx.ui = { setStatus: (_key, value) => statuses.push(value), setWidget: (_key, value) => widgets.push(value), notify() {} };
+  try {
+    await f.controller.ensure(f.ctx);
+    f.engines[0].tasks.push({ task_id: 'cleanup', status: 'canceled', agent_name: 'worker', description: 'Owned cleanup', cleanup_pending: true },
+      ...Array.from({ length: 8 }, (_, i) => ({ task_id: `q${i}`, status: 'queued', agent_name: 'worker', description: 'Waiting' })));
+    await f.controller.updateUI();
+    assert.equal(statuses.at(-1), 'Agents 1/4 · queued 8 · cleanup pending 1');
+    assert.match(widgets.at(-1)[0], /Owned cleanup/); assert.match(widgets.at(-1)[0], /cleanup pending/);
+    assert.equal(widgets.at(-1).length, 6);
+  } finally { await f.controller.shutdown(); }
 });
 
 test('owner factory reuse rejects trust changes until explicit reload', async () => {
