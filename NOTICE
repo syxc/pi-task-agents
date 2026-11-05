@@ -1,23 +1,22 @@
 pi-task-agents
 
-This package includes code and role prompts from MiniMax Code.
+This package adapts the background-task mechanism from MiniMax Code.
 Upstream: https://github.com/MiniMax-AI/minimax-code
-Initial revision: 3c21163c85a9684030cb147bfef48c6284fa3c46
+Revision: 3c21163c85a9684030cb147bfef48c6284fa3c46
 Copyright (c) 2026 MiniMax Code
 License: MIT (included in LICENSE)
 
-src/vendor/mcode-background-task/ contains eight files copied from
-packages/agent-modules/background-task/src: types.ts, status.ts, id.ts,
-errors.ts, manager.ts, in-memory-store.ts, in-memory-output-store.ts and index.ts.
-Relative import and export suffixes change from `.js` to `.ts`. One constructor
-parameter property in errors.ts becomes an explicit field and assignment.
-These changes permit native Node type stripping and preserve behavior.
+src/vendor/mcode-background-task/ contains eight files from
+packages/agent-modules/background-task/src. Relative import suffixes change
+from .js to .ts. The error constructor uses an explicit field instead of a
+parameter property. These changes support native Node type stripping.
 
-Role prompts are adapted from packages/local-runtime-v2/assets/agents/.
-Task contracts also reference packages/local-runtime/src/background-task,
-packages/local-runtime/src/api/local-task-append.ts and
-packages/shared/src/subagent-roles.ts.
+src/task-turn-id.ts preserves the upstream task-turn ID encoding.
+Task admission, continuation, terminal output and tool-result adapters also
+follow the upstream task protocol. The unchanged MIT reference sources in
+test/fixtures/mcode-task-steering/ and mcode-task-terminal/ support offline
+task-protocol tests. They are not a bundled host runtime.
 
-upstream.lock.json records the current revision, file hashes and watched
-contracts. The Pi SDK integration, scheduling, persistence and notification
-code are host adaptations. This package does not include a Pi runtime.
+upstream.lock.json records vendor and task-reference hashes. The role prompts
+are maintained for this plugin. Child sessions, tools and resources use the
+host Pi SDK. This package does not reproduce the MCode host platform.

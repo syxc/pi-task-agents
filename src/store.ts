@@ -4,6 +4,7 @@ import type { AgentProfile, TaskInput, TaskRecord, TaskState } from './types.ts'
 import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES } from './vendor/mcode-background-task/status.ts';
+import { isEventCount, isFactName, isTurnId } from './engine-facts.ts';
 
 function hasCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
@@ -17,15 +18,20 @@ function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item: unknown) => typeof item === 'string');
 }
 
-function thinking(value: unknown): value is AgentProfile['thinking'] {
-  return typeof value === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value);
+function thinking(value: unknown): value is string {
+  // Model compatibility belongs to the backend; provider effort labels are not Pi enums.
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function profile(value: unknown): value is AgentProfile {
-  return object(value) && typeof value.name === 'string' && typeof value.model === 'string'
-    && thinking(value.thinking) && typeof value.instructions === 'string'
-    && strings(value.tools) && strings(value.extensions) && strings(value.skills)
-    && typeof value.mcp === 'boolean' && typeof value.timeoutMs === 'number';
+  return object(value) && typeof value.name === 'string'
+    && (value.model === undefined || typeof value.model === 'string')
+    && (value.thinking === undefined || thinking(value.thinking))
+    && (value.effort === undefined || thinking(value.effort)) && typeof value.instructions === 'string'
+    && strings(value.tools)
+    && ['extensions', 'skills', 'skillSnapshot', 'nativeToolSnapshot', 'toolInventory', 'mcpServers', 'disallowedTools']
+      .every((key) => value[key] === undefined || strings(value[key]))
+    && (value.mcp === undefined || typeof value.mcp === 'boolean') && typeof value.timeoutMs === 'number';
 }
 
 function input(value: unknown): value is TaskInput {
@@ -43,10 +49,18 @@ function task(value: unknown): value is TaskRecord {
   return requiredStrings.every((key) => typeof value[key] === 'string')
     && optionalStrings.every((key) => value[key] === undefined || typeof value[key] === 'string')
     && profile(value.profile) && input(value.input)
+    && (value.sub_turn_id === undefined || isTurnId(value.sub_turn_id, value.task_id))
+    && (value.event_count === undefined || isEventCount(value.event_count))
+    && ['requested_agent_name', 'resolved_agent_name'].every((key) => value[key] === undefined || isFactName(value[key]))
     && typeof value.status === 'string'
     && [...ACTIVE_TASK_STATUSES, ...TERMINAL_TASK_STATUSES].some((status) => status === value.status)
     && typeof value.cursor === 'number' && Number.isSafeInteger(value.cursor) && value.cursor >= 0
     && typeof value.notification_pending === 'boolean' && typeof value.notify_completion === 'boolean'
+    && (value.mode === undefined || (typeof value.mode === 'string'
+      && ['activated', 'steered', 'duplicate'].includes(value.mode)))
+    && (value.accepted === undefined || typeof value.accepted === 'boolean')
+    && (value.stopError === undefined || (object(value.stopError)
+      && typeof value.stopError.code === 'string' && typeof value.stopError.message === 'string'))
     && (value.usage === undefined || (object(value.usage)
       && Object.values(value.usage).every((amount) => typeof amount === 'number')));
 }
@@ -54,7 +68,11 @@ function task(value: unknown): value is TaskRecord {
 function state(value: unknown): value is TaskState {
   return object(value) && value.version === 1 && typeof value.parentId === 'string'
     && Array.isArray(value.tasks) && value.tasks.every(task) && object(value.requests)
-    && Object.values(value.requests).every((id) => typeof id === 'string');
+    && Object.values(value.requests).every((id) => typeof id === 'string')
+    && (value.cleanupConfirmed === undefined || (strings(value.cleanupConfirmed)
+      && new Set(value.cleanupConfirmed).size === value.cleanupConfirmed.length
+      && value.cleanupConfirmed.every((id) => Array.isArray(value.tasks) && value.tasks.some((item: unknown) =>
+        task(item) && item.task_id === id && item.stopError?.code === 'CHILD_CLEANUP_FAILED'))));
 }
 
 const alive = (pid: number): boolean => {

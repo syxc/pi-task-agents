@@ -79,69 +79,19 @@
   ],
   "watch": [
     {
-      "source": "packages/local-runtime-v2/assets/agents/explore/system-prompt.md.hbs",
-      "kind": "role",
-      "sha256": "415ef7363aeecfff42dd3ea1b19c0bc6334dfb6f795cff02bcab0fa1fe05eb87"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/worker/system-prompt.md.hbs",
-      "kind": "role",
-      "sha256": "2975f87d7702ff197dc11486ba17aaae52c5a698643041f93b65c2e7f0eb6456"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/verifier/system-prompt.md.hbs",
-      "kind": "role",
-      "sha256": "6da210091255b05ae04d3e207112d30ecd9a83c4a16e7fe0e3b1fca64fc3e304"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/mavis/system-prompt.md.hbs",
-      "kind": "role",
-      "sha256": "4b445d96014c6a5fcd81cce1a040370f2a873deb72199b5cca0ab37435f34b30"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/explore/agent.md",
-      "kind": "role",
-      "sha256": "afdcaef36843a42e709ad53740f589ba822eb646ed70f8edde15c4dbb60a2278"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/worker/agent.md",
-      "kind": "role",
-      "sha256": "f688b5172b419f83a5a63a2e8e44d81a3c8aa235ea249a8e747e121f052ef21b"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/verifier/agent.md",
-      "kind": "role",
-      "sha256": "fef012a4920cc22ed2532c106eb836b42772db448c659152e45ba5ddb281f1fa"
-    },
-    {
-      "source": "packages/local-runtime-v2/assets/agents/_default/prompt-session-branch.md.hbs",
-      "kind": "role",
-      "sha256": "3a209223c78dd78d4b990cae696233c876e95dea612228cabe063c63e39bd7ad"
-    },
-    {
-      "source": "packages/shared/src/subagent-roles.ts",
+      "source": "packages/local-runtime-v2/src/service/turn-system/execution/steering/steer-session.service.ts",
       "kind": "host",
-      "sha256": "0757af3a81acfb3625ba32ccc6bef8dd39b094c13f09e336fbc853dab1040b23"
+      "sha256": "1187c463bb1e23acbd30a46132b153a9405e6b86addbea1c842dfcef3a7200f5"
     },
     {
-      "source": "packages/agent-tools/src/desktop/canonical-tool-policy.ts",
+      "source": "packages/local-runtime/src/background-task/turn-id.ts",
       "kind": "host",
-      "sha256": "754661a9b481eb2dc63f9cdd7e8816b9bd774bd28c713196a6f52cbcffe5207f"
+      "sha256": "455c8e4c8f641688d59bc956b0a3b7ecb155c788e771a9021aa6e05fdca28bc3"
     },
     {
-      "source": "packages/local-runtime/src/api/local-task-append.ts",
+      "source": "LICENSE",
       "kind": "host",
-      "sha256": "bb9df6dad27f1ca82a09845b1d266dfa180349758f0d2dce5e73da5167010f14"
-    },
-    {
-      "source": "packages/local-runtime/src/api/local-task-append-lifecycle.ts",
-      "kind": "host",
-      "sha256": "ef0c5eccad68fa571e91a0908f06ba296cd8151197f7fd20f199473cbc04f2aa"
-    },
-    {
-      "source": "packages/local-runtime/src/api/local-task-runner.ts",
-      "kind": "host",
-      "sha256": "a5f907db44f03c4b3c8db43c25b02b7c7290864272b65a2d799c3481cf626b2e"
+      "sha256": "28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea"
     }
   ]
 }

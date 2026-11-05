@@ -1,9 +1,12 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { TaskEngine } from './engine.ts';
 import { loadConfig, resolveProfile } from './config.ts';
 import { createPiChildFactory } from './pi-backend.ts';
+import type { PiChildFactoryOptions } from './pi-backend.ts';
+import { closeDetachedOwners, forgetOwner, getOwner, retainOwner } from './controller-owners.ts';
+import type { ControllerOwner } from './controller-owners.ts';
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts';
 import type {
   ConfigLoadOptions,
@@ -17,14 +20,14 @@ import type {
 
 export const RESULT_TYPE = 'pi-task-agents:result';
 
-type ParentAPI = Pick<ExtensionAPI, 'sendMessage' | 'appendEntry'>;
+type ParentAPI = Pick<ExtensionAPI, 'sendMessage' | 'appendEntry' | 'getThinkingLevel'>;
 type ConfigLoader = (options: ConfigLoadOptions) => Promise<TaskAgentsConfig>;
 
 export interface TaskControllerOptions {
   agentDir: string;
   Engine?: TaskEngineConstructor;
   configLoader?: ConfigLoader;
-  childFactory?: (options: { agentDir: string }) => CreateChild;
+  childFactory?: (options: PiChildFactoryOptions) => CreateChild;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -44,7 +47,8 @@ export class TaskController {
   private readonly agentDir: string;
   private readonly Engine: TaskEngineConstructor;
   private readonly configLoader: ConfigLoader;
-  private readonly childFactory: (options: { agentDir: string }) => CreateChild;
+  private readonly childFactory: (options: PiChildFactoryOptions) => CreateChild;
+  private owner?: ControllerOwner;
   private readonly inFlight = new Map<string, number>();
   private readonly attempts = new Map<string, number>();
   private readonly admissions = new Set<AbortController>();
@@ -63,7 +67,7 @@ export class TaskController {
 
   constructor(pi: ParentAPI, options: TaskControllerOptions) {
     this.pi = pi;
-    this.agentDir = options.agentDir;
+    this.agentDir = resolve(options.agentDir);
     this.Engine = options.Engine ?? TaskEngine;
     this.configLoader = options.configLoader ?? loadConfig;
     this.childFactory = options.childFactory ?? createPiChildFactory;
@@ -75,10 +79,11 @@ export class TaskController {
     const init = this.initializing.then(async () => {
       if (generation !== this.generation) throw canceled();
       if (this.engine && this.parentId === id) {
+        this.checkOwnerContext(this.owner!, ctx);
         this.ctx = ctx;
         return this.engine;
       }
-      await this.closeOwner();
+      await this.closeOwner(true);
       this.ctx = ctx;
       this.parentId = id;
       const pause = ctx.sessionManager.getEntries().findLast(
@@ -91,21 +96,37 @@ export class TaskController {
         projectTrusted: ctx.isProjectTrusted?.() === true,
       });
       if (generation !== this.generation) throw canceled();
-      const engine = new this.Engine({
-        rootDir: join(this.agentDir, 'task-agents', 'sessions'),
-        parentId: id,
-        cwd: ctx.cwd,
-        maxConcurrency: this.config.maxConcurrency,
-        createChild: this.childFactory({ agentDir: this.agentDir }),
-        notify: () => { this.flush().catch((error: unknown) => this.warn(error)); },
-        onChange: () => { this.updateUI().catch(() => {}); },
-      });
-      await engine.init();
-      if (generation !== this.generation) {
-        await engine.close();
-        throw canceled();
+      const rootDir = join(this.agentDir, 'task-agents', 'sessions');
+      let owner = getOwner(rootDir, id);
+      if (owner) {
+        if (owner.attached) throw new Error('Task owner is already attached');
+        this.checkOwnerContext(owner, ctx);
       }
-      this.engine = engine;
+      if (!owner) {
+        const handle = {} as ControllerOwner;
+        const engine = new this.Engine({
+          rootDir, parentId: id, cwd: ctx.cwd, maxConcurrency: this.config.maxConcurrency,
+          createChild: (options) => handle.createChild(options),
+          notify: () => handle.notify?.(),
+          onChange: () => handle.onChange?.(),
+        });
+        Object.assign(handle, { rootDir, parentId: id, cwd: resolve(ctx.cwd), engine,
+          config: this.config, projectTrusted: ctx.isProjectTrusted?.() === true,
+          createChild: this.makeChildFactory(ctx) });
+        await engine.init();
+        if (generation !== this.generation) {
+          await engine.close();
+          throw canceled();
+        }
+        retainOwner(handle);
+        owner = handle;
+      }
+      owner.attached = this;
+      owner.notify = () => { this.flush().catch((error: unknown) => this.warn(error)); };
+      owner.onChange = () => { this.updateUI().catch(() => {}); };
+      this.owner = owner;
+      this.config = owner.config;
+      const engine = this.engine = owner.engine;
       for (const diagnostic of this.config.diagnostics) this.warn(diagnostic);
       await this.reconcile();
       await this.updateUI();
@@ -113,6 +134,21 @@ export class TaskController {
     });
     this.initializing = init.catch(() => {});
     return init;
+  }
+
+  private checkOwnerContext(owner: ControllerOwner, ctx: ExtensionContext): void {
+    // The factory owns cached SDK state. Context changes require explicit
+    // teardown rather than silently reusing stale trust or discarding its cache.
+    if (owner.cwd !== resolve(ctx.cwd) || owner.projectTrusted !== (ctx.isProjectTrusted?.() === true)) {
+      throw new Error('Task owner working directory or project trust changed; reload task agents before continuing');
+    }
+  }
+
+  private makeChildFactory(ctx: ExtensionContext): CreateChild {
+    return this.childFactory({ agentDir: this.agentDir,
+      inheritedModel: ctx.model, inheritedThinking: this.pi.getThinkingLevel(),
+      inheritedModelRegistry: ctx.modelRegistry,
+      projectTrusted: ctx.isProjectTrusted?.() === true });
   }
 
   warn(error: unknown): void {
@@ -179,7 +215,9 @@ export class TaskController {
     const tasks = await engine.query();
     if (engine !== this.engine) return;
     const pending = tasks.filter((task) => isActiveTaskStatus(task.status));
-    ctx.ui.setStatus('task-agents', pending.length ? `Agents ${pending.length}/${this.config.maxConcurrency}` : undefined);
+    const cap = this.config.maxConcurrency;
+    const capacity = typeof cap === 'number' && Number.isFinite(cap) ? `/${cap}` : '';
+    ctx.ui.setStatus('task-agents', pending.length ? `Agents ${pending.length}${capacity}` : undefined);
     ctx.ui.setWidget('task-agents', pending.length ? pending.slice(-6).map((task) =>
       `${task.status} · ${task.agent_name} · ${task.description || task.task_id}`) : undefined);
   }
@@ -210,9 +248,18 @@ export class TaskController {
   }
 
   start(input: TaskInput, toolCallId: string, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<TaskSummary> {
-    return this.admit(ctx, signal, (engine, combined) => engine.start(
-      input, resolveProfile(this.config, input), { requestId: toolCallId, signal: combined },
-    ));
+    return this.admit(ctx, signal, (engine, combined) => {
+      const selected = resolveProfile(this.config, input);
+      let profile = selected;
+      if (selected.model === undefined) {
+        if (!ctx.model) throw new Error('Parent model is unavailable for task inheritance');
+        // Resolve inheritance at admission, not child dispatch or reload. Queued
+        // work and later continuations must retain the model of this task.
+        profile = { ...selected, model: `${ctx.model.provider}/${ctx.model.id}`,
+          thinking: selected.thinking ?? (selected.effort === undefined ? this.pi.getThinkingLevel() : undefined) };
+      }
+      return engine.start(input, profile, { requestId: toolCallId, signal: combined });
+    });
   }
 
   append(
@@ -222,6 +269,17 @@ export class TaskController {
     ctx: ExtensionContext,
   ): Promise<TaskSummary> {
     return this.admit(ctx, signal, (engine, combined) => engine.append(
+      input.task_id, input.content, { requestId: toolCallId, signal: combined },
+    ));
+  }
+
+  send(
+    input: { task_id: string; content: string },
+    toolCallId: string,
+    signal: AbortSignal | undefined,
+    ctx: ExtensionContext,
+  ): Promise<TaskSummary> {
+    return this.admit(ctx, signal, (engine, combined) => engine.send(
       input.task_id, input.content, { requestId: toolCallId, signal: combined },
     ));
   }
@@ -292,11 +350,17 @@ export class TaskController {
     this.suppressed = false;
   }
 
-  async stopAll(reason = 'Parent canceled'): Promise<void> {
+  pause(): void {
     this.cancelEpoch++;
-    for (const admission of this.admissions) admission.abort();
     if (!this.suppressed) this.pi.appendEntry('pi-task-agents:paused', { paused: true });
     this.suppressed = true;
+    clearTimeout(this.receiptTimer);
+    this.receiptTimer = undefined;
+  }
+
+  async stopAll(reason = 'Parent canceled'): Promise<void> {
+    this.pause();
+    for (const admission of this.admissions) admission.abort();
     const engine = this.engine;
     if (!engine) return;
     const tasks = await engine.query();
@@ -304,30 +368,51 @@ export class TaskController {
     await this.updateUI();
   }
 
-  private async closeOwner(): Promise<void> {
+  private async closeOwner(preserve = false): Promise<void> {
     this.closing = true;
+    const owner = this.owner;
+    if (owner) {
+      owner.notify = undefined;
+      owner.onChange = undefined;
+    }
     clearTimeout(this.receiptTimer);
     this.receiptTimer = undefined;
     await this.delivery;
+    let released = false;
     try {
-      if (this.engine) await this.engine.close();
+      if (!preserve && this.engine) await this.engine.close();
+      released = true;
     } finally {
-      this.engine = undefined;
-      this.inFlight.clear();
-      this.attempts.clear();
-      if (this.ctx?.hasUI) {
-        this.ctx.ui.setStatus('task-agents', undefined);
-        this.ctx.ui.setWidget('task-agents', undefined);
+      // Failed cleanup retains the owner lease and engine for an explicit retry.
+      if (released) {
+        if (owner) {
+          owner.attached = undefined;
+          if (!preserve) forgetOwner(owner);
+        }
+        this.owner = undefined;
+        this.engine = undefined;
+        this.inFlight.clear();
+        this.attempts.clear();
+        if (this.ctx?.hasUI) {
+          this.ctx.ui.setStatus('task-agents', undefined);
+          this.ctx.ui.setWidget('task-agents', undefined);
+        }
       }
       this.closing = false;
     }
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(reason: 'quit' | 'reload' | 'new' | 'resume' | 'fork' = 'quit'): Promise<void> {
     this.generation++;
     this.cancelEpoch++;
+    const preserve = reason === 'new' || reason === 'resume' || reason === 'fork';
+    // Foreground waits are bound to the parent operation. Admitted background
+    // work ignores this signal and stays with its original owner on a switch.
     for (const admission of this.admissions) admission.abort();
     await this.initializing;
-    await this.closeOwner();
+    try { await this.closeOwner(preserve); }
+    finally {
+      if (!preserve) await closeDetachedOwners(join(this.agentDir, 'task-agents', 'sessions'));
+    }
   }
 }

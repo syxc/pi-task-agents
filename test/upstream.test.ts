@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { domainRoot, githubSource, main, makeLock, transform, vendorRoot, verify } from '../scripts/upstream.mjs';
+import { domainRoot, githubSource, main, makeLock, transform, vendorRoot, verify, watches } from '../scripts/upstream.mjs';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const fixtureRoot = '/upstream-fixture';
@@ -72,6 +72,12 @@ async function fixture() {
     failRename: (at: number) => { failRenameAt = at; },
   };
 }
+
+test('upstream monitoring stays within task protocol reference fixtures', () => {
+  assert.equal(watches.length, 3);
+  assert.ok(watches.every((entry) => entry.kind === 'host'));
+  assert.equal(watches.some((entry) => /website|ptc|file-changes|web-fetch|mcp|assets\/agents/.test(entry.source)), false);
+});
 
 test('module transforms preserve import-like text in strings, comments and template text', () => {
   const tick = String.fromCharCode(96);
@@ -154,15 +160,12 @@ test('module changes are reported and sync preserves transforms with the lock in
   assert.match(f.files.get(join(fixtureRoot, vendorRoot, 'errors.ts'))!, /readonly code: string;/);
 });
 
-test('role and host contract changes block sync until explicitly acknowledged', async () => {
+test('task protocol changes block sync until explicitly acknowledged', async () => {
   const f = await fixture();
-  const role = f.lock.watch.find((entry: { kind: string }) => entry.kind === 'role');
-  const host = f.lock.watch.find((entry: { kind: string }) => entry.kind === 'host');
-  f.remote.set(role.source, 'changed role prompt');
-  f.remote.set(host.source, 'changed host contract');
+  const host = f.lock.watch[0];
+  f.remote.set(host.source, 'changed task protocol');
   const before = f.snapshot();
   assert.equal(await main(['--check'], f.options), 1);
-  assert.match(f.logs.join('\n'), /role contract changed:/);
   assert.match(f.logs.join('\n'), /host contract changed:/);
   await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /manual adaptation\/review/);
   assert.deepEqual(f.snapshot(), before);

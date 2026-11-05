@@ -1,665 +1,335 @@
 import assert from 'node:assert/strict';
+import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import type { TestContext } from 'node:test';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createPiChildFactory } from '../src/pi-backend.ts';
-import type {
-  AgentSession,
-  CreateAgentSessionOptions,
-  CreateModelRuntimeOptions,
-  LoadedMcpConfig,
-  PromptOptions,
-} from '@earendil-works/pi-coding-agent';
-import type { AgentProfile, ChildSession, CreateChild, CreateChildOptions } from '../src/types.ts';
+import { answer, tool, deferred, profile, fixture } from './pi-backend-test-helpers.ts';
+import { seedInheritedProvider } from '../src/model-providers.ts';
+import { TaskEngine } from '../src/engine.ts';
+import type { AgentProfile, ChildFailure, ChildSession } from '../src/types.ts';
 
-type InstalledSdk = typeof import('@earendil-works/pi-coding-agent');
-type StopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted';
-type TestContent = { type: 'text'; text: string } | { type: 'thinking'; thinking: string }
-  | { type: 'toolCall'; id: string; name: string; arguments: Record<string, unknown> };
-interface TestAssistant {
-  role: 'assistant';
-  stopReason: StopReason;
-  content: TestContent[];
-  usage: { input: number; output: number; totalTokens: number; cost: { total: number } };
-  errorMessage?: string;
-  api?: string;
-  provider?: string;
-  model?: string;
-  timestamp?: number;
-}
-type TestEvent = { type: 'message_end'; message: TestAssistant }
-  | { type: 'agent_settled'; aborted: boolean }
-  | { type: 'agent_end'; willRetry: boolean; messages: unknown[] }
-  | { type: 'auto_retry_start' }
-  | { type: 'message_update'; assistantMessageEvent: { type: 'thinking_delta'; delta: string } }
-  | { type: 'tool_execution_start'; toolName: string; args: Record<string, unknown> }
-  | { type: 'tool_execution_end'; toolName: string; isError: boolean; result: unknown };
-type TestPromptOptions = Required<Pick<PromptOptions, 'expandPromptTemplates' | 'source' | 'preflightResult'>>;
-type TestBehavior = (session: FakeSession, text: string, options: TestPromptOptions) => Promise<void> | void;
-type GuardHandler = (event: { toolName: string }) => { block: boolean; reason: string } | void;
-type FakeFactory = (api: { on(name: string, callback: GuardHandler): void }) => void | Promise<void>;
-interface FakeLoaderOptions {
-  noExtensions: boolean;
-  noSkills: boolean;
-  noPromptTemplates: boolean;
-  noThemes: boolean;
-  additionalExtensionPaths: string[];
-  additionalSkillPaths: string[];
-  disabledBuiltinExtensions: string[];
-  extensionFactories: FakeFactory[];
-  systemPromptOverride(base: string): string | undefined;
-  promptsOverride(base: { prompts: string[] }): { prompts: string[] };
-  themesOverride(base: { themes: string[] }): { themes: string[] };
-  appendSystemPromptOverride(): string[];
-}
-interface FakeLoader {
-  options: FakeLoaderOptions;
-  reload(): Promise<void>;
-  getExtensions(): { extensions: unknown[]; errors: unknown[] };
-  getSkills(): { skills: unknown[]; diagnostics: unknown[] };
-}
-type TestSettings = NonNullable<Parameters<InstalledSdk['SettingsManager']['inMemory']>[0]>;
-interface FakeSessionOptions {
-  modelRuntime: unknown;
-  model: { provider: string; id: string };
-  tools: string[];
-  thinkingLevel: AgentProfile['thinking'];
-  resourceLoader: FakeLoader;
-  sessionManager: { getSessionFile(): string };
-  settingsManager: { settings: TestSettings };
-}
-interface FakeBindings {
-  mode?: string;
-}
-interface FakeMcpOptions {
-  loadConfig(): LoadedMcpConfig;
-  updateConfig(): never;
-  openUrl(): never;
-}
-interface FakeSession {
-  options: FakeSessionOptions;
-  calls: unknown[][];
-  isIdle: boolean;
-  thinkingLevel: AgentProfile['thinking'];
-  emit(event: TestEvent): void;
-  subscribe(listener: (event: TestEvent) => void): () => void;
-  bindExtensions(bindings: FakeBindings): Promise<void>;
-  getCallableToolNames(): string[];
-  extensionRunner: { hasHandlers(): boolean; emit(event: { type: string }): Promise<void> };
-  prompt(text: string, options: TestPromptOptions): Promise<void>;
-  answer(message?: string | TestAssistant): void;
-  settle(aborted?: boolean): void;
-  abort(): Promise<void>;
-  steer(text: string): Promise<void>;
-  dispose(): void;
-}
-interface FakeState {
-  sessions: FakeSession[];
-  loaders: FakeLoader[];
-  options: FakeSessionOptions[];
-  shutdowns: number;
-  disposals: number;
-  reloads?: number;
-  mcpConfig?: { agentDir: string; cwd: string; projectTrusted: boolean };
-  mcpOptions?: FakeMcpOptions;
-  clampedThinking?: AgentProfile['thinking'];
-  bindings?: FakeBindings;
-  guardHandlers?: { name: string; callback: GuardHandler }[];
-  unexpected?: string[];
-  failBind?: boolean;
-  failShutdown?: boolean;
-  unsubscribed?: boolean;
-  listenersAtDispose?: number;
-}
-interface FakeSdk {
-  SettingsManager: { inMemory(settings: TestSettings): { settings: TestSettings } };
-  DefaultResourceLoader: new (options: FakeLoaderOptions) => FakeLoader;
-  SessionManager: { open(path: string, dir: string, cwd: string): { getSessionFile(): string } };
-  loadMcpConfig(options: { agentDir: string; cwd: string; projectTrusted: boolean }): LoadedMcpConfig;
-  createMcpExtension(options: FakeMcpOptions): FakeFactory;
-  createAgentSession(options: FakeSessionOptions): Promise<{ session: FakeSession }>;
-  ModelRuntime?: { create(options: CreateModelRuntimeOptions): Promise<typeof modelRuntime> };
-}
-interface Fixture {
-  root: string;
-  sdk: FakeSdk;
-  state: FakeState;
-  options: CreateChildOptions;
-  output: string[];
-  activity: string[];
-  factory: CreateChild;
-}
-interface LocalModel {
-  provider: string;
-  id: string;
-  api: string;
-  reasoning: boolean;
-  input: string[];
-  contextWindow: number;
-  maxTokens: number;
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-}
-interface LocalContext {
-  messages: { role: string; toolsRemoved?: { name: string }[]; toolsAdded?: { name: string }[];
-    toolName?: string; isError?: boolean; content?: unknown }[];
-}
-interface LocalEventStream {
-  [Symbol.asyncIterator](): AsyncGenerator<{ type: 'done'; reason: StopReason; message: TestAssistant }>;
-  result(): Promise<TestAssistant>;
-}
-interface LocalRuntime {
-  getModel(provider: string, id: string): LocalModel;
-  getModels(): never[];
-  getProviders(): never[];
-  hasConfiguredAuth(): boolean;
-  resolveModel(model: LocalModel): Promise<{ model: LocalModel; thinkingLevel: 'off' }>;
-  streamSimple(model: LocalModel, context: LocalContext): LocalEventStream;
-}
-interface RealFixture {
-  sdk: InstalledSdk;
-  root: string;
-  agentDir: string;
-  runtime: LocalRuntime;
-  factory: CreateChild;
-  options: CreateChildOptions;
-  session(): AgentSession;
-}
-
-const testDir = dirname(fileURLToPath(import.meta.url));
-const modelRuntime = { getModel: (provider: string, id: string): { provider: string; id: string } | undefined => provider === 'test' ? { provider, id } : undefined };
-// Deliberately omit optional runtime defaults to cover callers that bypass configuration loading.
-const profile = Object.freeze({ name: 'reader', model: 'test/model/with/slash', thinking: 'low', instructions: 'Inspect only.' }) as AgentProfile;
-const assistant = (text = 'Done', stopReason: StopReason = 'stop'): TestAssistant => ({
-  role: 'assistant', stopReason, content: [{ type: 'thinking', thinking: 'private chain' }, { type: 'text', text }],
-  usage: { input: 3, output: 2, totalTokens: 5, cost: { total: 0.01 } },
-});
-const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-
-function fakeSdk(behavior: TestBehavior = async (session): Promise<void> => { session.answer(); session.settle(); }): { sdk: FakeSdk; state: FakeState } {
-  const state: FakeState = { sessions: [], loaders: [], options: [], shutdowns: 0, disposals: 0 };
-  class Loader implements FakeLoader {
-    options: FakeLoaderOptions;
-    constructor(options: FakeLoaderOptions) { this.options = options; state.loaders.push(this); }
-    async reload(): Promise<void> { state.reloads = (state.reloads ?? 0) + 1; }
-    getExtensions(): ReturnType<FakeLoader['getExtensions']> { return { extensions: [], errors: [] }; }
-    getSkills(): ReturnType<FakeLoader['getSkills']> { return { skills: [], diagnostics: [] }; }
-  }
-  const sdk: FakeSdk = {
-    SettingsManager: { inMemory: (settings) => ({ settings }) },
-    DefaultResourceLoader: Loader,
-    SessionManager: { open(path, dir, cwd) {
-      if (!readFileSync(path, 'utf8')) writeFileSync(path, JSON.stringify({ type: 'session', version: 3, id: 'session-id', cwd }) + '\n');
-      return { getSessionFile: () => path };
-    } },
-    loadMcpConfig: (options) => { state.mcpConfig = options; return { servers: [], errors: [] }; },
-    createMcpExtension: (options) => { state.mcpOptions = options; return () => {}; },
-    async createAgentSession(options) {
-      state.options.push(options);
-      const listeners = new Set<(event: TestEvent) => void>();
-      const session: FakeSession = {
-        options, calls: [], isIdle: true, thinkingLevel: state.clampedThinking ?? options.thinkingLevel,
-        emit(event) { for (const listener of listeners) listener(event); },
-        subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); state.unsubscribed = true; }; },
-        async bindExtensions(bindings) {
-          state.bindings = bindings;
-          state.guardHandlers = [];
-          for (const factory of options.resourceLoader.options.extensionFactories) {
-            await factory({ on: (name, callback) => state.guardHandlers!.push({ name, callback }) });
-          }
-          if (state.failBind) throw new Error('Bind failed');
-        },
-        getCallableToolNames() { return state.unexpected ?? options.tools; },
-        extensionRunner: {
-          hasHandlers: () => true,
-          async emit(event) {
-            assert.equal(event.type, 'session_shutdown');
-            state.shutdowns++;
-            if (state.failShutdown) throw new Error('Shutdown failed');
-          },
-        },
-        async prompt(text, opts) {
-          this.calls.push(['prompt', text, opts]);
-          this.isIdle = false;
-          appendFileSync(options.sessionManager.getSessionFile(), JSON.stringify({ type: 'message', message: { role: 'user', content: text } }) + '\n');
-          await behavior(this, text, opts);
-        },
-        answer(message = assistant()) {
-          if (typeof message === 'string') message = assistant(message);
-          appendFileSync(options.sessionManager.getSessionFile(), JSON.stringify({ type: 'message', message }) + '\n');
-          this.emit({ type: 'message_end', message });
-        },
-        settle(aborted = false) { this.isIdle = true; this.emit({ type: 'agent_settled', aborted }); },
-        async abort() { this.calls.push(['abort']); if (!this.isIdle) this.settle(true); },
-        async steer(text) { this.calls.push(['steer', text]); },
-        dispose() { state.disposals++; state.listenersAtDispose = listeners.size; },
-      };
-      state.sessions.push(session);
-      return { session };
-    },
-  };
-  return { sdk, state };
-}
-
-async function fixture(t: TestContext, behavior?: TestBehavior): Promise<Fixture> {
-  const root = await mkdtemp(join(testDir, '.pi-backend-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const { sdk, state } = fakeSdk(behavior);
-  const output: string[] = [];
-  const activity: string[] = [];
-  const options: CreateChildOptions = { profile, cwd: root, sessionPath: join(root, 'history', 'assigned.jsonl'),
-    onOutput: (text) => output.push(text), onActivity: (text) => activity.push(text) };
-  const factory = createPiChildFactory({ agentDir: join(root, 'agent'), modelRuntime, sdk });
-  return { root, sdk, state, options, output, activity, factory };
-}
-
-test('exact private JSONL path resumes; default resources and tools are isolated', async (t) => {
+test('default SDK native Bash writes an owned file; facts come from real messages/events', async (t) => {
   const f = await fixture(t);
-  const child = await f.factory(f.options);
-  assert.equal(child.sessionPath, f.options.sessionPath);
-  assert.equal((await stat(dirname(child.sessionPath))).mode & 0o777, 0o700);
+  let resolved!: AgentProfile;
+  const child = await f.child({ tools: ['bash'] }, undefined, async (value) => { resolved = value; });
+  assert.deepEqual(f.session().getCallableToolNames(), ['bash']);
+  assert.equal(f.options().customTools, undefined);
+  f.script((step) => step === 1 ? tool('bash', { command: "printf 'owned bytes' > actual.txt" }) : answer('Finished'));
+  const before = f.events();
+  const result = await child.prompt('Write the owned fixture', { turnId: 'opaque turn / 42' });
+  assert.equal(await readFile(join(f.cwd, 'actual.txt'), 'utf8'), 'owned bytes');
+  assert.equal(result.text, 'Finished');
+  assert.equal(result.subTurnId, 'opaque turn / 42');
+  assert.deepEqual(result.outcome, { kind: 'returned', status: 'succeeded' });
+  assert.deepEqual(result.usage, { input: 4, output: 6, cacheRead: 8, cacheWrite: 10, totalTokens: 28, cost: 0.02 });
+  assert.equal(result.eventCount, f.events() - before);
+  assert.equal(resolved.model, 'offline/local');
+  assert.deepEqual(resolved.nativeToolSnapshot, ['bash']);
+  assert.equal(Object.isFrozen(resolved.tools), true);
   assert.equal((await stat(child.sessionPath)).mode & 0o777, 0o600);
-  const result = await child.prompt('Inspect');
-  assert.equal(result.text, 'Done');
-  assert.deepEqual(result.usage, { input: 3, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: 0.01 });
-  assert.deepEqual(result.verification, { agentSettled: true, stopReason: 'stop', toolErrors: 0 });
-  const options = f.state.options[0];
-  assert.equal(options.modelRuntime, modelRuntime);
-  assert.equal(options.model.id, 'model/with/slash');
-  assert.deepEqual(options.tools, ['read', 'grep', 'find', 'ls']);
-  assert.equal(options.thinkingLevel, 'low');
-  const loader = f.state.loaders[0].options;
-  for (const name of ['noExtensions', 'noSkills', 'noPromptTemplates', 'noThemes'] as const) assert.equal(loader[name], true);
-  assert.deepEqual(loader.additionalExtensionPaths, []);
-  assert.deepEqual(loader.additionalSkillPaths, []);
-  assert.deepEqual(loader.disabledBuiltinExtensions, ['mcp']);
-  assert.equal(loader.systemPromptOverride('Global fixture'), undefined);
-  assert.deepEqual(loader.promptsOverride({ prompts: ['unexpected'] }).prompts, []);
-  assert.deepEqual(loader.themesOverride({ themes: ['unexpected'] }).themes, []);
-  assert.match(loader.appendSystemPromptOverride().join('\n'), /Inspect only/);
-  assert.equal(options.settingsManager.settings.cacheWarming, 'off');
-  assert.deepEqual(options.settingsManager.settings.packages, []);
-  assert.equal(f.state.bindings!.mode, 'json');
-  assert.deepEqual(f.output, ['Done\n']);
-  await child.dispose();
-  await child.dispose();
-  assert.equal(f.state.shutdowns, 1);
-  assert.equal(f.state.disposals, 1);
-  assert.equal(f.state.listenersAtDispose, 0);
-  const before = await readFile(child.sessionPath, 'utf8');
-  const resumed = await f.factory(f.options);
-  await resumed.prompt('Continue');
-  await resumed.dispose();
-  const after = await readFile(child.sessionPath, 'utf8');
-  assert.ok(after.startsWith(before));
-  assert.equal(after.trim().split('\n').filter((line) => JSON.parse(line).type === 'session').length, 1);
+  assert.equal((await stat(join(f.root, 'sessions'))).mode & 0o777, 0o700);
 });
 
-test('creates one model runtime per factory without copying credentials or refreshing over the network', async (t) => {
+test('independent sessions and continuation retain only their own history', async (t) => {
+  const f = await fixture(t), first = await f.child();
+  await first.prompt('First child secret');
+  await assert.rejects(f.child(), /leased/);
+  await first.dispose();
+  const continued = await f.child();
+  assert.match(JSON.stringify(f.session().messages), /First child secret/);
+  assert.equal((await continued.prompt('Continuation')).text, 'done');
+  const second = await f.child({}, join(f.root, 'sessions', 'second.jsonl'));
+  assert.doesNotMatch(JSON.stringify(f.session().messages), /First child secret|Continuation/);
+  await second.prompt('Independent');
+  const history = await readFile(first.sessionPath, 'utf8');
+  assert.match(history, /Continuation/); assert.doesNotMatch(history, /Independent/);
+});
+
+test('real session paths reject symlinks, foreign cwd and non-string input', async (t) => {
+  const f = await fixture(t), child = await f.child();
+  await assert.rejects(child.prompt(42 as any), /string/);
+  await assert.rejects(child.steer({} as any), /string/);
+  await assert.rejects(child.prompt('text', { turnId: '' }), /Turn ID/);
+  await child.prompt('Persist history'); await child.dispose();
+  const alias = join(f.root, 'alias.jsonl'); await symlink(child.sessionPath, alias);
+  await assert.rejects(f.child({}, alias));
+  const foreign = join(f.root, 'foreign.jsonl');
+  await writeFile(foreign, JSON.stringify({ type: 'session', id: 'foreign', cwd: '/foreign' }));
+  await assert.rejects(f.child({}, foreign), /working directory/);
+});
+
+test('skills/extensions use selected resources, snapshots and role ceilings', async (t) => {
   const f = await fixture(t);
-  const calls: CreateModelRuntimeOptions[] = [];
-  f.sdk.ModelRuntime = { create: async (options) => { calls.push(options); return modelRuntime; } };
-  const factory = createPiChildFactory({ agentDir: join(f.root, 'agent'), sdk: f.sdk });
-  await (await factory(f.options)).dispose();
-  await (await factory(f.options)).dispose();
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { authPath: join(f.root, 'agent', 'auth.json'), modelsPath: join(f.root, 'agent', 'models.json'), allowModelNetwork: false, refreshOnCreate: false });
-});
-
-test('waits for agent_settled through retry and steering after prompt and agent_end return', async (t) => {
-  const f = await fixture(t, async (session) => {
-    session.answer(assistant('Retrying', 'error'));
-    session.emit({ type: 'agent_end', willRetry: true, messages: [] });
-    session.emit({ type: 'auto_retry_start' });
-  });
-  const child = await f.factory(f.options);
-  let finished = false;
-  const pending = child.prompt('Run').then((result) => { finished = true; return result; });
-  await tick();
-  assert.equal(finished, false);
-  await child.steer('Also inspect the caller');
-  assert.deepEqual(f.state.sessions[0].calls.at(-1), ['steer', 'Also inspect the caller']);
-  f.state.sessions[0].answer('Recovered');
-  f.state.sessions[0].emit({ type: 'agent_end', willRetry: false, messages: [] });
-  await tick();
-  assert.equal(finished, false);
-  f.state.sessions[0].settle();
-  assert.equal((await pending).text, 'Recovered');
+  const skill = join(f.root, 'owned-skill'); await mkdir(skill);
+  await writeFile(join(skill, 'SKILL.md'), '---\nname: owned-skill\ndescription: Owned fixture\n---\nOnly this fixture.');
+  const extension = join(f.root, 'owned.mjs');
+  await writeFile(extension, `export default pi => {
+    pi.on('input', e => e.text === 'raw' ? { action: 'transform', text: 'transformed' } : undefined);
+    for (const name of ['plugin_owned', 'task', 'task_stop']) pi.registerTool({ name, label: name, description: name,
+      parameters: { type: 'object', properties: {} }, execute: async () => ({ content: [{ type: 'text', text: 'ok' }], details: {} }) });
+  };`);
+  const child = await f.child({ tools: ['read', 'write', 'task'], name: 'explore', skills: [skill], extensions: [extension] });
+  assert.deepEqual(f.options().resourceLoader!.getSkills().skills.map((skill) => skill.name), ['owned-skill']);
+  assert.deepEqual(f.session().getCallableToolNames().sort(), ['plugin_owned', 'read']);
+  await child.prompt('raw'); assert.match(JSON.stringify(f.session().messages), /transformed/);
   await child.dispose();
+  const denied = await f.child({ skills: [], extensions: [], nativeToolSnapshot: [] });
+  assert.deepEqual(f.session().getCallableToolNames(), []);
+  assert.deepEqual(f.options().resourceLoader!.getSkills().skills, []);
+  await denied.dispose();
+  const sealed = await f.child({ skills: [skill], skillSnapshot: [] });
+  assert.deepEqual(f.options().resourceLoader!.getSkills().skills, []);
+  await sealed.dispose();
 });
 
-test('thinking clamping fails clearly and explore/verifier may explicitly opt in to bash', async (t) => {
-  const f = await fixture(t);
-  f.state.clampedThinking = 'off';
-  await assert.rejects(f.factory(f.options), /Requested child thinking level low.*Pi selected off/);
-  assert.equal(f.state.disposals, 1);
-  f.state.clampedThinking = undefined;
-  for (const name of ['explore', 'verifier']) {
-    const child = await f.factory({ ...f.options, profile: { ...profile, name, tools: ['read', 'bash'] } });
-    assert.deepEqual(f.state.options.at(-1)!.tools, ['read', 'bash']);
-    await child.dispose();
-  }
+test('native tool calls still pass selected permission hooks', async (t) => {
+  const f = await fixture(t), extension = join(f.root, 'permission.mjs');
+  await writeFile(extension, `export default pi => pi.on('tool_call', e => e.toolName === 'bash' ? { block: true, reason: 'owned deny' } : undefined);`);
+  const child = await f.child({ tools: ['bash'], extensions: [extension] });
+  f.script((step) => step === 1 ? tool('bash', { command: 'printf forbidden > forbidden.txt' }) : answer('Denied'));
+  assert.equal((await child.prompt('Try the permission gate')).text, 'Denied');
+  await assert.rejects(readFile(join(f.cwd, 'forbidden.txt')), { code: 'ENOENT' });
+  assert.match(JSON.stringify(f.session().messages), /owned deny/);
 });
 
-test('error stopReason rejects; output omits thinking, tool payloads and credentials', async (t) => {
-  const f = await fixture(t, async (session) => {
-    session.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'private chain' } });
-    session.emit({ type: 'tool_execution_start', toolName: 'read', args: { token: 'secret-tool-argument' } });
-    session.emit({ type: 'tool_execution_end', toolName: 'read', isError: true, result: { secret: 'secret-tool-result' } });
-    session.answer({ ...assistant('api_key=secret-value Bearer private-token', 'error'), errorMessage: 'Authorization: Bearer private-token' });
-    session.settle();
+test('permission extensions observe the actual parent project trust', async (t) => {
+  for (const projectTrusted of [false, true]) await t.test(String(projectTrusted), async (t) => {
+    const f = await fixture(t, { projectTrusted });
+    const key = `child-trust-${Date.now()}-${projectTrusted}`, observed: boolean[] = [];
+    (globalThis as any)[key] = observed;
+    t.after(() => { delete (globalThis as any)[key]; });
+    const extension = join(f.root, 'trust-gate.mjs');
+    await writeFile(extension, `export default pi => pi.on('tool_call', (e, ctx) => {
+      globalThis[${JSON.stringify(key)}].push(ctx.isProjectTrusted());
+      if (!ctx.isProjectTrusted()) return { block: true, reason: 'Untrusted fixture' };
+    });`);
+    const child = await f.child({ tools: ['bash'], extensions: [extension] });
+    f.script(step => step === 1 ? tool('bash', { command: 'printf owned > trust.txt' }) : answer('Finished'));
+    await child.prompt('Run the owned permission fixture');
+    assert.deepEqual(observed, [projectTrusted]);
+    if (projectTrusted) assert.equal(await readFile(join(f.cwd, 'trust.txt'), 'utf8'), 'owned');
+    else await assert.rejects(readFile(join(f.cwd, 'trust.txt')), { code: 'ENOENT' });
   });
-  const child = await f.factory(f.options);
-  await assert.rejects(child.prompt('Run'), /redacted/);
-  const output = f.output.join('');
-  for (const text of ['private chain', 'secret-tool-argument', 'secret-tool-result', 'secret-value', 'private-token']) assert.equal(output.includes(text), false);
-  assert.match(output, /read: running/);
-  assert.match(output, /read: failed/);
-  await child.dispose();
 });
 
-test('abort, timeout and disposal reject in-flight work; shutdown happens once', async (t) => {
-  for (const kind of ['abort', 'timeout', 'dispose']) {
-    const f = await fixture(t, async () => {});
-    if (kind === 'timeout') f.options.profile = { ...profile, timeoutMs: 5 };
-    const child = await f.factory(f.options);
-    const pending = child.prompt('Run');
-    const rejected = assert.rejects(pending, { name: kind === 'timeout' ? 'TimeoutError' : 'AbortError' });
-    await tick();
-    if (kind === 'abort') await child.abort();
-    if (kind === 'dispose') await child.dispose();
+test('abort and timeout end the owning prompt without contaminating its successor', async (t) => {
+  for (const mode of ['abort', 'timeout']) await t.test(mode, async (t) => {
+    const f = await fixture(t), child = await f.child({ timeoutMs: mode === 'timeout' ? 30 : 0 });
+    const entered = deferred();
+    f.script(async (_step, _context, options) => {
+      entered.resolve();
+      await new Promise<void>((resolve) => options.signal.aborted ? resolve() : options.signal.addEventListener('abort', () => resolve(), { once: true }));
+      return answer('', { stopReason: 'aborted' });
+    });
+    const running = child.prompt('Wait');
+    const rejected = assert.rejects(running, (error: ChildFailure) => {
+      assert.equal(error.name, mode === 'timeout' ? 'TimeoutError' : 'AbortError');
+      assert.deepEqual(error.partialResult?.outcome, { kind: 'returned', status: mode === 'timeout' ? 'failed' : 'aborted' });
+      return true;
+    });
+    await entered.promise;
+    if (mode === 'abort') await child.abort();
     await rejected;
-    await child.dispose();
-    assert.equal(f.state.shutdowns, 1);
-    assert.equal(f.state.disposals, 1);
-    await assert.rejects(child.prompt('Again'), /disposed/);
-  }
+    f.script(() => answer('Next only'));
+    assert.equal((await child.prompt('Successor')).text, 'Next only');
+  });
 });
 
-test('prompt rejection, interception, concurrency and unexpected tools fail closed', async (t) => {
-  for (const [behavior, pattern] of [
-    [async () => { throw new Error('Prompt failed'); }, /Prompt failed/],
-    [async (_session: FakeSession, _text: string, options: TestPromptOptions): Promise<void> => options.preflightResult('handled'), /without a settled assistant response/],
-  ] as const) {
-    const f = await fixture(t, behavior);
-    const child = await f.factory(f.options);
-    await assert.rejects(child.prompt('Run'), pattern);
-    await child.dispose();
-  }
-  const f = await fixture(t, async () => {});
-  const child = await f.factory(f.options);
-  const pending = child.prompt('Run');
-  const rejected = assert.rejects(pending, { name: 'AbortError' });
-  await assert.rejects(child.prompt('Run again'), /already running/);
-  await child.abort();
-  await rejected;
-  await child.dispose();
-  f.state.unexpected = ['bash'];
-  await assert.rejects(f.factory(f.options), /outside the child allowlist/);
-  assert.equal(f.state.disposals, 2);
-});
-
-test('rejects recursive names, patterns, remote resources and this plugin before SDK creation', async (t) => {
-  const f = await fixture(t);
-  for (const change of [
-    ...['task', 'task_append', 'task_query', 'task_output', 'task_stop', 'task_agents'].map((name) => ({ tools: [name] })),
-    { tools: ['mcp__host__task_append'], mcp: true },
-    { tools: ['+bash'] }, { tools: ['*'] }, { tools: ['mcp__host__read'] },
-    { extensions: ['npm:unexpected'] }, { extensions: [fileURLToPath(new URL('../src/pi-backend.ts', import.meta.url))] },
-    { extensions: [f.root] }, { model: 'missing/model' },
-  ]) await assert.rejects(f.factory({ ...f.options, profile: { ...profile, ...change } }));
-  assert.equal(f.state.sessions.length, 0);
-});
-
-test('MCP is explicit, untrusted project config is excluded, and runtime guard blocks unexpected tools', async (t) => {
-  const f = await fixture(t);
-  f.options.profile = Object.freeze({ ...profile, tools: ['read', 'mcp__docs__lookup'], mcp: true });
-  const child = await f.factory(f.options);
-  const mcpOptions = f.state.mcpOptions;
-  assert.ok(mcpOptions);
-  assert.equal(mcpOptions.loadConfig().autoEnableCodemode, false);
-  assert.ok(f.state.mcpConfig);
-  assert.equal(f.state.mcpConfig.projectTrusted, false);
-  assert.equal(f.state.mcpConfig.agentDir, join(f.root, 'agent'));
-  assert.throws(() => mcpOptions.updateConfig(), /cannot change/);
-  assert.throws(() => mcpOptions.openUrl(), /parent host/);
-  const handler = f.state.guardHandlers?.find((item) => item.name === 'tool_call');
-  assert.ok(handler);
-  const guard = handler.callback;
-  assert.equal(guard({ toolName: 'read' }), undefined);
-  assert.equal(guard({ toolName: 'mcp__docs__lookup' }), undefined);
-  assert.equal(guard({ toolName: 'bash' })?.block, true);
-  assert.equal(guard({ toolName: 'task_append' })?.block, true);
-  await child.dispose();
-});
-
-test('invalid history is preserved; binding/shutdown failures still dispose the SDK', async (t) => {
-  const f = await fixture(t);
-  f.state.failBind = true;
-  await assert.rejects(f.factory(f.options), /Bind failed/);
-  assert.equal(f.state.disposals, 1);
-  f.state.failBind = false;
-  const child = await f.factory(f.options);
-  f.state.failShutdown = true;
-  await assert.rejects(child.dispose(), /Shutdown failed/);
-  assert.equal(f.state.disposals, 2);
-  const invalid = JSON.stringify({ type: 'message' }) + '\n';
-  await writeFile(f.options.sessionPath, invalid);
-  await assert.rejects(f.factory(f.options), /session header/);
-  assert.equal(await readFile(f.options.sessionPath, 'utf8'), invalid);
-});
-
-test('actual Pi resources and SessionManager preserve paths without auth access or model calls', async (t) => {
-  let sdk: InstalledSdk;
-  try { sdk = await import('@earendil-works/pi-coding-agent'); }
-  catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-    if (!process.env.PI_SDK_PATH) return t.skip('SDK peer unavailable; set PI_SDK_PATH for local SDK validation');
-    sdk = await import(pathToFileURL(join(process.env.PI_SDK_PATH, 'dist/index.js')).href);
-  }
-  const root = await mkdtemp(join(testDir, '.pi-backend-real-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  let authChecks = 0;
-  let streams = 0;
-  const realRuntime: LocalRuntime = {
-    getModel: (provider, id) => ({ provider, id, api: 'test', reasoning: false, input: ['text'],
-      contextWindow: 10000, maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
-    getModels: () => [], getProviders: () => [],
-    hasConfiguredAuth: () => { authChecks++; return true; },
-    resolveModel: async (model) => ({ model, thinkingLevel: 'off' }),
-    streamSimple(model) {
-      streams++;
-      const message = { ...assistant('Local SDK response'), api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() };
-      return {
-        async *[Symbol.asyncIterator]() { yield { type: 'done', reason: 'stop', message }; },
-        result: async () => message,
-      };
-    },
-  };
-  const options: CreateChildOptions = { profile: { ...profile, thinking: 'off' }, cwd: root, sessionPath: join(root, 'history', 'exact.jsonl') };
-  const createChild = createPiChildFactory({ agentDir: join(root, 'agent'), modelRuntime: realRuntime, sdk });
-  await assert.rejects(createChild({ ...options, profile }), /Requested child thinking level low.*Pi selected off/);
-  const smoke = await createChild(options);
-  await smoke.dispose();
-  assert.equal(authChecks, 0);
-  assert.equal(streams, 0);
-  const child = await createChild(options);
-  assert.equal((await child.prompt('Use only the injected local response')).text, 'Local SDK response');
-  assert.equal(streams, 1);
-  const first = await readFile(child.sessionPath, 'utf8');
-  assert.equal(JSON.parse(first.split('\n')[0]).type, 'session');
-  assert.equal((await stat(child.sessionPath)).mode & 0o777, 0o600);
-  await child.dispose();
-  const resumed = await createChild(options);
-  await resumed.dispose();
-  const after = await readFile(child.sessionPath, 'utf8');
-  assert.ok(after.startsWith(first));
-  assert.equal(after.trim().split('\n').filter((line) => JSON.parse(line).type === 'session').length, 1);
-});
-
-
-async function realFixture(t: TestContext): Promise<RealFixture> {
-  const sdk = await import('@earendil-works/pi-coding-agent');
-  const artifacts = join(testDir, '..', 'artifacts', 'backend-mcp-smoke');
-  await mkdir(artifacts, { recursive: true, mode: 0o700 });
-  const root = await mkdtemp(join(artifacts, 'run-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const agentDir = join(root, 'agent');
-  await mkdir(agentDir, { mode: 0o700 });
-  let session: AgentSession | undefined;
-  const api = { ...sdk, async createAgentSession(options: CreateAgentSessionOptions) {
-    const result = await sdk.createAgentSession(options);
-    session = result.session;
-    return result;
-  } };
-  const runtime: LocalRuntime = {
-    getModel: (provider, id) => ({ provider, id, api: 'test', reasoning: false, input: ['text'],
-      contextWindow: 10000, maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
-    getModels: () => [], getProviders: () => [],
-    hasConfiguredAuth: () => true,
-    resolveModel: async (model) => ({ model, thinkingLevel: 'off' }),
-    streamSimple() { throw new Error('A local response must be explicitly injected'); },
-  };
-  const factory = createPiChildFactory({ agentDir, modelRuntime: runtime, sdk: api });
-  const options: CreateChildOptions = { profile: { ...profile, thinking: 'off' }, cwd: root, sessionPath: join(root, 'history', 'child.jsonl') };
-  return { sdk, root, agentDir, runtime, factory, options, session: (): AgentSession => { assert.ok(session); return session; } };
-}
-
-test('real Pi MCP binds local stdio, exposes only the exact allowed tool, calls it and closes the server', { timeout: 20000 }, async (t) => {
-  const f = await realFixture(t);
-  const serverPath = join(f.root, 'server.mjs');
-  const auditPath = join(f.root, 'server-audit.jsonl');
-  await writeFile(serverPath, [
-    "import { createInterface } from 'node:readline';",
-    "import { appendFileSync } from 'node:fs';",
-    "const audit = (event) => appendFileSync(process.argv[2], JSON.stringify(event) + '\\n');",
-    "audit({ event: 'started', pid: process.pid });",
-    "const input = createInterface({ input: process.stdin });",
-    "input.on('close', () => process.exit(0));",
-    "input.on('line', (line) => {",
-    "  const request = JSON.parse(line);",
-    "  audit({ method: request.method, params: request.params });",
-    "  if (request.id === undefined) return;",
-    "  let result;",
-    "  if (request.method === 'initialize') result = { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'local-smoke', version: '1' } };",
-    "  else if (request.method === 'tools/list') result = { tools: ['echo', 'other', 'task_append'].map((name) => ({ name, description: 'Local fixture ' + name, inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } })) };",
-    "  else if (request.method === 'tools/call') result = { content: [{ type: 'text', text: 'local-echo:' + request.params.arguments.value }] };",
-    "  else if (request.method === 'ping') result = {};",
-    "  else { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Method not found' } }) + '\\n'); return; }",
-    "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');",
-    "});",
-  ].join('\n'), { mode: 0o600 });
-  const configPath = join(f.agentDir, 'mcp.json');
-  const config = { autoEnableCodemode: true, mcpServers: { smoke: {
-    command: process.execPath, args: [serverPath, auditPath], exposure: 'codemode',
-    toolExposure: { echo: 'direct', other: 'deferred' }, timeout: 3,
-  } } };
-  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
-  const { loadMcpConfig } = await import(new URL('./extensions/mcp/config.js', import.meta.resolve('@earendil-works/pi-coding-agent')).href) as {
-    loadMcpConfig(options: { agentDir: string; cwd: string; projectTrusted: boolean }): LoadedMcpConfig;
-  };
-  const loaded = loadMcpConfig({ agentDir: f.agentDir, cwd: f.root, projectTrusted: false });
-  assert.deepEqual(loaded.errors, []);
-  assert.deepEqual(loaded.servers.map(({ name, scope, source }) => ({ name, scope, source })), [{ name: 'smoke', scope: 'global', source: configPath }]);
-  const name = 'mcp__smoke__echo';
-  let turns = 0;
-  f.runtime.streamSimple = (model, context) => {
-    const declared = new Set<string>();
-    for (const message of context.messages.filter((item) => item.role === 'system')) {
-      for (const tool of message.toolsRemoved ?? []) declared.delete(tool.name);
-      for (const tool of message.toolsAdded ?? []) declared.add(tool.name);
+test('preflight cancellation cannot start a late model/tool run and a successor still works', async (t) => {
+  for (const stage of ['input', 'auth', 'before_agent_start', 'timeout']) await t.test(stage, async (t) => {
+    const f = await fixture(t), entered = deferred(), release = deferred(), canceled = deferred();
+    const key = `task-agent-preflight-${stage}-${Date.now()}`;
+    (globalThis as any)[key] = { entered, release };
+    t.after(() => { delete (globalThis as any)[key]; });
+    const extension = join(f.root, 'preflight.mjs');
+    await writeFile(extension, `export default pi => pi.on(${JSON.stringify(stage === 'before_agent_start' ? stage : 'input')}, async e => {
+      if (${JSON.stringify(stage)} === 'auth') return;
+      const fixture = globalThis[${JSON.stringify(key)}]; fixture.entered.resolve(); await fixture.release.promise;
+    });`);
+    if (stage === 'auth') {
+      f.runtime.hasConfiguredAuth = () => false;
+      (f.runtime as any).checkAuth = async () => { entered.resolve(); await release.promise; return 'owned-test-auth'; };
     }
-    assert.deepEqual([...declared], [name]);
-    turns++;
-    if (turns === 2) {
-      const result = context.messages.findLast((message) => message.role === 'toolResult');
-      assert.ok(result);
-      assert.equal(result.toolName, name);
-      assert.equal(result.isError, false);
-      assert.match(JSON.stringify(result.content), /local-echo:fixture-value/);
-    }
-    const message = { ...assistant('MCP completed'), api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() };
-    if (turns === 1) {
-      message.stopReason = 'toolUse';
-      message.content = [{ type: 'toolCall', id: 'local-call', name, arguments: { value: 'fixture-value' } }];
-    }
-    return { async *[Symbol.asyncIterator]() { yield { type: 'done', reason: message.stopReason, message }; }, result: async () => message };
-  };
-  const child = await f.factory({ ...f.options, profile: { ...f.options.profile, mcp: true, tools: [name], timeoutMs: 10000 } });
-  t.after(() => child.dispose());
-  assert.equal((await child.prompt('Call the local fixture')).text, 'MCP completed');
-  assert.equal(turns, 2);
-  assert.deepEqual(f.session().getActiveToolNames(), [name]);
-  assert.deepEqual(f.session().getCallableToolNames(), [name]);
-  assert.deepEqual(f.session().getAllTools().map((tool) => tool.name), [name]);
-  const audit = (await readFile(auditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(audit.filter((entry) => entry.method === 'initialize').length, 1);
-  assert.equal(audit.filter((entry) => entry.method === 'tools/list').length, 1);
-  assert.deepEqual(audit.filter((entry) => entry.method === 'tools/call').map(({ params }) => ({ name: params.name, arguments: params.arguments })), [{ name: 'echo', arguments: { value: 'fixture-value' } }]);
-  await child.dispose();
-  assert.throws(() => process.kill(audit[0].pid, 0), { code: 'ESRCH' });
-  assert.equal(await readFile(configPath, 'utf8'), JSON.stringify(config));
-  const missing = { ...f.options, profile: { ...f.options.profile, mcp: true, tools: ['mcp__smoke__absent'], timeoutMs: 1000 } };
-  await assert.rejects(f.factory(missing), /Missing requested child tools after MCP initialization: mcp__smoke__absent/);
-  const afterMissing = (await readFile(auditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(afterMissing.filter((entry) => entry.method === 'tools/list').length, 2);
-  assert.throws(() => process.kill(afterMissing.filter((entry) => entry.event === 'started').at(-1).pid, 0), { code: 'ESRCH' });
-  await writeFile(configPath, JSON.stringify({ mcpServers: { smoke: { command: process.execPath, args: ['-e', 'process.exit(17)'], exposure: 'direct' } } }));
-  await assert.rejects(f.factory({ ...missing, profile: { ...missing.profile, tools: [name] } }), /Missing requested child tools after MCP initialization: mcp__smoke__echo/);
-  assert.equal(turns, 2);
+    const child = await f.child({ tools: ['bash'], extensions: [extension], timeoutMs: stage === 'timeout' ? 200 : 0 });
+    let calls = 0;
+    f.script(() => ++calls === 1 ? tool('bash', { command: 'printf owned > owned.txt' }) : answer('Done'));
+    const sessionAbort = f.session().abort.bind(f.session());
+    f.session().abort = () => { canceled.resolve(); return sessionAbort(); };
+    const running = child.prompt('Canceled owner');
+    const rejected = assert.rejects(running, { name: stage === 'timeout' ? 'TimeoutError' : 'AbortError' });
+    await entered.promise;
+    const stopping = stage === 'timeout' ? canceled.promise : child.abort();
+    if (stage === 'timeout') await canceled.promise;
+    release.resolve();
+    await stopping; await rejected;
+    assert.equal(calls, 0, 'canceling preflight must not invoke the model');
+    await assert.rejects(readFile(join(f.cwd, 'owned.txt')), { code: 'ENOENT' });
+    assert.equal((await child.prompt('Successor')).text, 'Done');
+    assert.equal(await readFile(join(f.cwd, 'owned.txt'), 'utf8'), 'owned');
+    assert.equal(calls, 2, 'the same model/tool path must remain reachable for a valid successor');
+  });
 });
 
-test('real Pi loads only explicit local extensions and skills, preserves AGENTS and filters discovered extras', async (t) => {
-  const f = await realFixture(t);
-  const projectConfig = join(f.root, '.pi');
-  const allowedDir = join(f.root, 'explicit-skill');
-  const discoveredDir = join(f.root, 'discovered-skill');
-  const globalSkill = join(f.agentDir, 'skills', 'global-fixture-skill');
-  const globalExtensions = join(f.agentDir, 'extensions');
-  const projectExtensions = join(projectConfig, 'extensions');
-  await Promise.all([allowedDir, discoveredDir, globalSkill, globalExtensions, projectExtensions].map((path) => mkdir(path, { recursive: true })));
-  const skill = (name: string): string => '---\nname: ' + name + '\ndescription: A local fixture skill.\n---\nPerform local fixture work.\n';
-  await Promise.all([
-    writeFile(join(allowedDir, 'SKILL.md'), skill('explicit-skill')),
-    writeFile(join(discoveredDir, 'SKILL.md'), skill('discovered-skill')),
-    writeFile(join(globalSkill, 'SKILL.md'), skill('global-fixture-skill')),
-    writeFile(join(globalExtensions, 'poison.mjs'), "throw new Error('Global extension must not load');"),
-    writeFile(join(projectExtensions, 'poison.mjs'), "throw new Error('Project extension must not load');"),
-    writeFile(join(f.agentDir, 'SYSTEM.md'), 'Global fixture system content must not be inherited.'),
-    writeFile(join(f.root, 'AGENTS.md'), 'LOCAL_AGENTS_CONTEXT: inspect the fixture.'),
-  ]);
-  const extraPrompt = join(f.root, 'extra-prompt.md');
-  await writeFile(extraPrompt, 'Unexpected prompt template.');
-  const extension = join(f.root, 'explicit-extension.mjs');
-  const marker = join(f.root, 'extension-started');
-  await writeFile(extension, [
-    "import { writeFileSync } from 'node:fs';",
-    "import { Type } from 'typebox';",
-    "export default function (pi) {",
-    "  for (const name of ['fixture_probe', 'fixture_unlisted', 'task_append']) pi.registerTool({ name, label: name, description: 'Local fixture tool', parameters: Type.Object({}), execute: async () => ({ content: [{ type: 'text', text: 'fixture' }] }) });",
-    "  pi.on('session_start', () => writeFileSync(" + JSON.stringify(marker) + ", 'loaded'));",
-    "  pi.on('resources_discover', () => ({ skillPaths: [" + JSON.stringify(discoveredDir) + "], promptPaths: [" + JSON.stringify(extraPrompt) + "] }));",
-    "}",
-  ].join('\n'));
-  const defaults = await f.factory(f.options);
-  assert.deepEqual(f.session().resourceLoader.getSkills().skills, []);
-  assert.deepEqual(f.session().getActiveToolNames().sort(), ['find', 'grep', 'ls', 'read']);
-  await assert.rejects(readFile(marker), { code: 'ENOENT' });
-  await defaults.dispose();
-  const child = await f.factory({ ...f.options, profile: { ...f.options.profile, tools: ['fixture_probe', 'read'], extensions: [extension], skills: [allowedDir] } });
-  t.after(() => child.dispose());
-  assert.equal(await readFile(marker, 'utf8'), 'loaded');
-  assert.deepEqual(f.session().getActiveToolNames().sort(), ['fixture_probe', 'read']);
-  assert.deepEqual(f.session().getCallableToolNames().sort(), ['fixture_probe', 'read']);
-  assert.deepEqual(f.session().getAllTools().map((tool) => tool.name).sort(), ['fixture_probe', 'read']);
-  assert.deepEqual(f.session().resourceLoader.getSkills().skills.map((entry) => entry.name), ['explicit-skill']);
-  assert.deepEqual(f.session().resourceLoader.getPrompts().prompts, []);
-  assert.match(f.session().systemPrompt, /LOCAL_AGENTS_CONTEXT/);
-  assert.match(f.session().systemPrompt, /explicit-skill/);
-  assert.doesNotMatch(f.session().systemPrompt, /Global fixture|global-fixture-skill|discovered-skill/);
+test('async input steering reaches its original sink; canceled delayed input never enters a successor', async (t) => {
+  const f = await fixture(t), extension = join(f.root, 'steering.mjs');
+  const entered = deferred(), release = deferred();
+  const key = `task-agent-steer-${Date.now()}`;
+  (globalThis as any)[key] = { entered, release };
+  t.after(() => { delete (globalThis as any)[key]; });
+  await writeFile(extension, `export default pi => pi.on('input', async e => {
+    if (e.text === 'delayed') { globalThis[${JSON.stringify(key)}].entered.resolve(); await globalThis[${JSON.stringify(key)}].release.promise; }
+    if (e.streamingBehavior === 'steer') return { action: 'transform', text: e.text + ' transformed' };
+  });`);
+  const child = await f.child({ extensions: [extension] });
+  const streaming = deferred(), finish = deferred();
+  f.script(async (step, _context, options) => {
+    if (step === 1) { streaming.resolve(); await Promise.race([finish.promise, new Promise<void>(resolve => options.signal.addEventListener('abort', () => resolve(), { once: true }))]); }
+    return answer('Owner answer', { ...(options.signal.aborted ? { stopReason: 'aborted' } : {}) });
+  });
+  const running = child.prompt('Owner'); await streaming.promise;
+  assert.equal(await child.steer('queued'), 'queued');
+  const delayed = child.steer('delayed');
+  const rejectedInput = assert.rejects(delayed, (error: ChildFailure) => { assert.equal(error.steerAccepted, false); return true; });
+  await entered.promise;
+  const rejectedOwner = assert.rejects(running, { name: 'AbortError' });
+  await child.abort(); await rejectedOwner; await rejectedInput;
+  f.script(() => answer('Successor only'));
+  assert.equal((await child.prompt('Successor')).text, 'Successor only');
+  release.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.session().pendingMessageCount, 0);
+  assert.doesNotMatch(JSON.stringify(f.session().messages), /delayed transformed/);
+  finish.resolve();
+});
+
+test('successful async steering runs input hooks and is consumed before owning-turn settlement', async (t) => {
+  const f = await fixture(t), extension = join(f.root, 'async-input.mjs');
+  const input = deferred(), release = deferred(), streaming = deferred(), finish = deferred(), settling = deferred();
+  const key = `task-agent-async-${Date.now()}`;
+  (globalThis as any)[key] = { input, release, settling };
+  t.after(() => { delete (globalThis as any)[key]; });
+  await writeFile(extension, `export default pi => {
+    pi.on('input', async e => { if (e.streamingBehavior !== 'steer') return;
+      const fixture = globalThis[${JSON.stringify(key)}]; fixture.input.resolve(); await fixture.release.promise;
+      return { action: 'transform', text: 'Accepted transformed input' };
+    });
+    pi.on('agent_before_settle', () => globalThis[${JSON.stringify(key)}].settling.resolve());
+  };`);
+  const child = await f.child({ extensions: [extension] });
+  f.script(async (step) => {
+    if (step === 1) { streaming.resolve(); await finish.promise; }
+    return answer(step === 1 ? 'First answer' : 'Steered answer');
+  });
+  const running = child.prompt('Owner'); await streaming.promise;
+  const steering = child.steer('Async steering'); await input.promise;
+  finish.resolve(); await settling.promise; release.resolve();
+  assert.equal(await steering, 'queued');
+  assert.equal((await running).text, 'First answer\nSteered answer');
+  assert.match(JSON.stringify(f.session().messages), /Accepted transformed input/);
+  assert.equal(f.session().pendingMessageCount, 0);
+});
+
+test('abort/dispose and shutdown-hook failures retain the session lease until retry succeeds', async (t) => {
+  for (const mode of ['abort', 'dispose', 'shutdown']) await t.test(mode, async (t) => {
+    const f = await fixture(t), extension = join(f.root, 'shutdown.mjs');
+    if (mode === 'shutdown') await writeFile(extension, `export default pi => { let first = true; pi.on('session_shutdown', () => { if (first) { first = false; throw Error('owned cleanup failure'); } }); };`);
+    const child = await f.child(mode === 'shutdown' ? { extensions: [extension] } : {});
+    if (mode !== 'shutdown') {
+      const session = f.session(), original = session[mode].bind(session);
+      let first = true;
+      (session as any)[mode] = (...args: any[]) => { if (first) { first = false; throw Error('owned cleanup failure'); } return original(...args); };
+    }
+    await assert.rejects(child.dispose(), (error: ChildFailure) => { assert.equal(error.code, 'CHILD_CLEANUP_FAILED'); return true; });
+    await assert.rejects(f.child(), /leased/);
+    await child.dispose(); await (await f.child()).dispose();
+  });
+});
+
+test('failed initialization exposes cleanup ownership and the engine retries it on close', async (t) => {
+  const f = await fixture(t), extension = join(f.root, 'initialization-cleanup.mjs');
+  let modelCalls = 0;
+  f.script(() => { modelCalls++; return answer(); });
+  await writeFile(extension, `export default pi => { let first = true; pi.on('session_shutdown', () => {
+    if (first) { first = false; throw Error('owned initial cleanup failure'); }
+  }); };`);
+  let orphan: ChildSession | undefined;
+  await assert.rejects(f.child({ extensions: [extension] }, undefined, async () => { throw Error('profile persistence failed'); }), (error: ChildFailure) => {
+    orphan = error.cleanupChild;
+    assert.equal(error.code, 'CHILD_CLEANUP_FAILED');
+    assert.ok(orphan, 'factory rejection must retain a reachable cleanup handle');
+    assert.match(error.message, /profile persistence failed/);
+    return true;
+  });
+  await assert.rejects(f.child(), /leased/);
+  await orphan!.dispose();
+  await (await f.child()).dispose();
+
+  const engine = new TaskEngine({ rootDir: join(f.root, 'tasks'), parentId: 'cleanup-owner', cwd: f.cwd, createChild: f.create });
+  await engine.init();
+  t.after(() => engine.close());
+  const persist = engine.persist.bind(engine);
+  let failSnapshot = true;
+  engine.persist = async () => {
+    if (failSnapshot && engine.state?.tasks.some((task) => task.profile.skillSnapshot !== undefined)) {
+      failSnapshot = false; throw Error('engine profile persistence failed');
+    }
+    await persist();
+  };
+  await engine.start({ agent_name: 'worker', description: 'Initialization cleanup', prompt: 'Never dispatch' },
+    { ...profile, extensions: [extension] });
+  const [task] = engine.state!.tasks;
+  assert.equal(task.stopError?.code, 'CHILD_CLEANUP_FAILED');
+  assert.ok(engine.sessions.get(task.session_id)?.child, 'engine must own a child even when its factory rejected');
+  assert.equal(engine.runtimes.has(task.task_id), true, 'unconfirmed cleanup must retain its capacity');
+  assert.equal(JSON.stringify(engine.state).includes('cleanupChild'), false, 'cleanup handles are not persisted');
+  assert.equal(modelCalls, 0, 'failed initialization must never dispatch the model');
+  await assert.rejects(f.child({ extensions: [extension] }, task.childSessionPath), /leased/);
+  await engine.close();
+  await (await f.child({}, task.childSessionPath)).dispose();
+});
+
+test('model inheritance, native thinking validation and profile persistence happen before dispatch', async (t) => {
+  const f = await fixture(t);
+  const child = await f.child(); assert.equal(f.options().model, f.model);
   await child.dispose();
-  await assert.rejects(f.factory({ ...f.options, profile: { ...f.options.profile, tools: ['unknown_builtin'] } }), /Missing requested child tools: unknown_builtin/);
-  await assert.rejects(f.factory({ ...f.options, profile: { ...f.options.profile, tools: ['extension_missing'], extensions: [extension] } }), /Missing requested child tools: extension_missing/);
+  await assert.rejects(f.child({ thinking: 'high' }), /unsupported/);
+  await assert.rejects(f.child({ effort: 'high' }), /Requested child thinking level high is unsupported/);
+  await assert.rejects(f.child({ thinking: 'm3' as any }), /Invalid Pi thinking/);
+  await assert.rejects(f.child({}, undefined, async () => { throw Error('persist failed'); }), /persist failed/);
+  await (await f.child()).dispose();
+});
+
+test('an explicit model does not inherit a different parent thinking choice', async (t) => {
+  const f = await fixture(t, { inheritedThinking: 'high' });
+  const child = await f.child({ model: 'offline/local', thinking: undefined });
+  assert.equal(f.options().thinkingLevel, undefined);
+  assert.equal(f.session().thinkingLevel, 'off');
+  await child.dispose();
+});
+
+test('only the selected trusted registered provider is seeded, without reading protocol metadata', () => {
+  const registered: unknown[] = [];
+  const runtime = { registerProvider: (...args: unknown[]) => registered.push(args),
+    registerNativeProvider: (provider: unknown) => registered.push(provider) } as any;
+  const config = { api: 'test', models: [] };
+  const inherited = { getRegisteredProviderIds: () => ['owned'], getRegisteredNativeProvider: () => undefined,
+    getRegisteredProviderConfig: () => config } as any;
+  assert.equal(seedInheritedProvider(runtime, inherited, 'untrusted-name'), false);
+  assert.deepEqual(registered, []);
+  assert.equal(seedInheritedProvider(runtime, inherited, 'owned'), true);
+  assert.deepEqual(registered, [['owned', config]]);
+});
+
+test('returned model failures and true input exceptions preserve terminal provenance', async (t) => {
+  const f = await fixture(t), child = await f.child();
+  f.script(() => answer('Committed failure', { stopReason: 'error', errorMessage: 'Owned failure' }));
+  await assert.rejects(child.prompt('Fail'), (error: ChildFailure) => {
+    assert.equal(error.partialResult?.text, 'Committed failure');
+    assert.deepEqual(error.partialResult?.outcome, { kind: 'returned', status: 'failed' }); return true;
+  });
+  await child.dispose();
+  const extension = join(f.root, 'handled.mjs');
+  await writeFile(extension, `export default pi => pi.on('input', () => ({ action: 'handled' }));`);
+  const handled = await f.child({ extensions: [extension] });
+  await assert.rejects(handled.prompt('Handled'), (error: ChildFailure) => {
+    assert.deepEqual(error.partialResult?.outcome, { kind: 'exception' }); assert.equal(error.partialResult?.text, ''); return true;
+  });
 });
