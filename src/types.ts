@@ -6,13 +6,25 @@ export type ThinkingLevel = NonNullable<CreateAgentSessionOptions['thinkingLevel
 
 export interface AgentProfile {
   readonly name: string;
-  readonly model: string;
-  readonly thinking: ThinkingLevel;
+  readonly model?: string;
+  readonly thinking?: ThinkingLevel;
+  /** Legacy persisted metadata; execution uses only the SDK-native thinking level. */
+  readonly effort?: string;
   readonly instructions: string;
+  /** Requested selectors; a missing selector does not create a tool. */
   readonly tools: readonly string[];
-  readonly extensions: readonly string[];
-  readonly skills: readonly string[];
-  readonly mcp: boolean;
+  /** Internal native inventory ceiling captured at creation, excluding MCP/Plugin tools. */
+  readonly nativeToolSnapshot?: readonly string[];
+  /** Observed inventory at the latest child creation, not a dynamic MCP/Plugin allowlist. */
+  readonly toolInventory?: readonly string[];
+  readonly extensions?: readonly string[];
+  readonly skills?: readonly string[];
+  /** Internal creation-time Skill names, intersected with current trusted discovery on restore. */
+  readonly skillSnapshot?: readonly string[];
+  /** Legacy switch: false disables MCP; omission inherits trusted host servers. */
+  readonly mcp?: boolean;
+  readonly mcpServers?: readonly string[];
+  readonly disallowedTools?: readonly string[];
   readonly timeoutMs: number;
 }
 
@@ -21,7 +33,7 @@ export interface TaskInput {
   description?: string;
   prompt: string;
   model?: string;
-  effort?: ThinkingLevel;
+  effort?: string;
   run_in_background?: boolean;
 }
 
@@ -36,20 +48,38 @@ export interface TaskRequestOptions {
 }
 
 export interface TaskOutputOptions {
+  signal?: AbortSignal;
   offset?: number;
   wait_ms?: number;
   limitBytes?: number;
 }
 
+export type ChildOutcome = { kind: 'returned'; status: 'succeeded' | 'failed' | 'aborted' } | { kind: 'exception' };
+
 export interface ChildResult {
+  /** Internal producer provenance for terminal formatting; never public Task details. */
+  outcome?: ChildOutcome;
+  eventCount?: number;
+  subTurnId?: string;
+  resolvedAgentName?: string;
   text: string;
   usage?: Record<string, number>;
-  verification?: unknown;
 }
+
+export interface ChildFailure extends Error {
+  code?: unknown;
+  partialResult?: ChildResult;
+  /** Internal ownership handoff when initialization fails before returning the child. */
+  cleanupChild?: ChildSession;
+  /** Present only when the captured turn's execution queue definitely did not accept this input. */
+  steerAccepted?: false;
+}
+
+export interface ChildPromptOptions { turnId?: string }
 
 export interface ChildSession {
   readonly sessionPath: string;
-  prompt(text: string): Promise<ChildResult>;
+  prompt(text: string, options?: ChildPromptOptions): Promise<ChildResult>;
   steer(text: string): Promise<unknown>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
@@ -61,12 +91,18 @@ export interface CreateChildOptions {
   sessionPath: string;
   onOutput?: (chunk: string) => void;
   onActivity?: (activity: string) => void;
+  /** Persist the resolved profile before returning a child that the engine can dispatch. */
+  onProfileResolved?: (profile: AgentProfile) => Promise<void>;
 }
 
 export type CreateChild = (options: CreateChildOptions) => Promise<ChildSession>;
 
 export interface TaskRecord {
   task_id: string;
+  sub_turn_id?: string;
+  event_count?: number;
+  resolved_agent_name?: string;
+  requested_agent_name?: string;
   session_id: string;
   parent_id: string;
   childSessionPath: string;
@@ -86,7 +122,9 @@ export interface TaskRecord {
   error?: string;
   cancel_reason?: string;
   usage?: Record<string, number>;
-  verification?: unknown;
+  mode?: 'activated' | 'steered' | 'duplicate';
+  accepted?: boolean;
+  stopError?: { code: string; message: string };
 }
 
 export type TaskSummary = Omit<TaskRecord, 'profile' | 'input' | 'output' | 'cursor'> & {
@@ -94,6 +132,8 @@ export type TaskSummary = Omit<TaskRecord, 'profile' | 'input' | 'output' | 'cur
 };
 
 export interface TaskOutput extends TaskSummary {
+  timed_out?: boolean;
+  truncated?: boolean;
   output: string;
   offset: number;
   next_offset: number;
@@ -121,6 +161,7 @@ export interface TaskService {
   init(): Promise<unknown>;
   start(input: TaskInput, profile: AgentProfile, options?: TaskRequestOptions): Promise<TaskSummary>;
   append(taskId: string, content: string, options?: TaskRequestOptions): Promise<TaskSummary>;
+  send(taskId: string, content: string, options?: TaskRequestOptions): Promise<TaskSummary>;
   query(): Promise<TaskSummary[]>;
   query(query: TaskQuery & { task_id: string }): Promise<TaskSummary>;
   query(query: TaskQuery & { task_id?: undefined }): Promise<TaskSummary[]>;
@@ -143,7 +184,7 @@ export interface ConfigLoadOptions {
 export interface TaskAgentsConfig {
   readonly cwd: string;
   readonly agentDir: string;
-  readonly maxConcurrency: number;
+  readonly maxConcurrency?: number;
   readonly roles: Readonly<Record<string, AgentProfile>>;
   readonly diagnostics: readonly string[];
   readonly sources: readonly string[];

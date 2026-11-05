@@ -2,6 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { TaskStore } from './store.ts';
 import { TaskDomain } from './task-domain.ts';
+import { TaskAdmissions } from './engine-admission.ts';
+import { TaskOutputReads } from './engine-output.ts';
+import { appendTask } from './engine-append.ts';
+import { admittedFacts, recordChildFacts, recordChildFailure, resolvedProfile } from './engine-facts.ts';
+import { appendTerminalOutput, exceptionOutcome, runnerOutcome, type TaskTerminalOutcome } from './engine-terminal.ts';
+import { SessionSafety } from './engine-session-safety.ts';
+import { aborted, clone, freeze, normalizeTaskInput, trimmedContent, waitForChange } from './engine-helpers.ts';
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts';
 import { ACTIVE_TASK_STATUSES } from './vendor/mcode-background-task/status.ts';
 import type {
@@ -11,6 +18,8 @@ import type {
 
 interface TaskRuntime {
   accepting: boolean;
+  backgroundRunner?: boolean;
+  shutdownReason?: string;
   sealed?: boolean;
   started?: Promise<ChildSession>;
   ready?: Promise<ChildSession>;
@@ -20,7 +29,6 @@ interface TaskRuntime {
   timer?: ReturnType<typeof setTimeout>;
   stopReason?: string;
   stopStatus?: 'canceled' | 'failed';
-  resultStatus?: 'succeeded' | 'failed';
 }
 
 interface SessionRuntime {
@@ -29,17 +37,6 @@ interface SessionRuntime {
 }
 
 const pending = new Set<TaskStatus>(ACTIVE_TASK_STATUSES);
-const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-const freeze = <T>(value: T): T => {
-  if (value && typeof value === 'object') {
-    Object.values(value).forEach(freeze);
-    Object.freeze(value);
-  }
-  return value;
-};
-const aborted = (signal?: AbortSignal): void => {
-  if (signal?.aborted) throw Object.assign(new Error('Request aborted'), { name: 'AbortError' });
-};
 
 export class TaskEngine {
   readonly parentId: string;
@@ -55,25 +52,30 @@ export class TaskEngine {
   readonly operations: Map<string, Promise<TaskSummary>>;
   state?: TaskState;
   private readonly domain: TaskDomain;
-  private gate: Promise<unknown>;
+  private readonly admission = new TaskAdmissions();
+  private readonly safety = new SessionSafety();
+  private readonly outputReads: TaskOutputReads;
   private closed = false;
   private closing?: Promise<void>;
   private storageError: unknown;
 
-  constructor({ rootDir, parentId, cwd, maxConcurrency = 4, createChild, notify, onChange }: TaskEngineOptions) {
-    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) throw new Error('Invalid maxConcurrency');
+  constructor({ rootDir, parentId, cwd, maxConcurrency, createChild, notify, onChange }: TaskEngineOptions) {
+    if (maxConcurrency !== undefined && (!Number.isInteger(maxConcurrency) || maxConcurrency < 1)) {
+      throw new Error('Invalid maxConcurrency');
+    }
     this.parentId = parentId;
     this.cwd = resolve(cwd);
     this.store = new TaskStore(rootDir, parentId);
-    this.maxConcurrency = maxConcurrency;
+    this.outputReads = new TaskOutputReads(JSON.stringify([this.store.dir, parentId]));
+    // Omission adds no cross-session plugin quota; explicit values remain legacy host policy.
+    this.maxConcurrency = maxConcurrency ?? Infinity;
     this.createChild = createChild;
     this.notify = notify;
     this.onChange = onChange;
     this.runtimes = new Map();
     this.sessions = new Map();
     this.waiters = new Set();
-    this.operations = new Map();
-    this.gate = Promise.resolve();
+    this.operations = this.admission.operations;
     this.domain = new TaskDomain(() => this.getState());
   }
 
@@ -93,6 +95,7 @@ export class TaskEngine {
         task.notification_pending = task.notify_completion !== false;
       }
     }
+    this.safety.restore(this.getState());
     try { await this.persist(); } catch (error) { await this.store.close(); throw error; }
     return this;
   }
@@ -102,15 +105,18 @@ export class TaskEngine {
     if (this.storageError) throw this.storageError;
   }
 
+  private assertDispatch(): void {
+    this.assertOpen();
+    this.safety.assertDispatch();
+  }
+
   private getState(): TaskState {
     if (!this.state) throw new Error('Engine is not open');
     return this.state;
   }
 
   exclusive<T>(fn: () => T | PromiseLike<T>): Promise<T> {
-    const result = this.gate.then(fn);
-    this.gate = result.catch(() => {});
-    return result;
+    return this.admission.exclusive(fn);
   }
 
   persist(): Promise<void> { return this.store.save(this.getState()); }
@@ -122,7 +128,8 @@ export class TaskEngine {
 
   summary(task: TaskRecord): TaskSummary {
     const { output, cursor, input, profile, ...result } = task;
-    return { ...clone(result), output_bytes: Buffer.byteLength(output) };
+    return { ...clone(result), ...(task.stopError ? { stopError: clone(this.safety.publicStopError(task)) } : {}),
+      output_bytes: Buffer.byteLength(output) };
   }
 
   task(id: string): TaskRecord {
@@ -131,31 +138,32 @@ export class TaskEngine {
     return task;
   }
 
-  request(key: string | undefined, fn: (key?: string) => Promise<TaskSummary>): Promise<TaskSummary> {
-    if (!key) return this.exclusive(fn);
-    const existing = this.operations.get(key);
-    if (existing) return existing;
-    const result = this.exclusive(async () => {
+  request(
+    key: string | undefined, fn: (key?: string) => Promise<TaskSummary>,
+    duplicate: (result: TaskSummary) => TaskSummary = (result) => result,
+  ): Promise<TaskSummary> {
+    return this.admission.request(key, fn, (key) => {
       this.assertOpen();
       const id = this.getState().requests[key];
-      return id ? this.summary(this.task(id)) : fn(key);
-    });
-    this.operations.set(key, result);
-    result.catch(() => {}).finally(() => this.operations.delete(key));
-    return result;
+      return id ? this.summary(this.task(id)) : undefined;
+    }, duplicate);
   }
 
   async start(input: TaskInput, profile: AgentProfile, { requestId, signal }: TaskRequestOptions = {}): Promise<TaskSummary> {
     aborted(signal);
+    input = normalizeTaskInput(input);
     const result = await this.request(requestId && `start:${requestId}`, async (key) => {
       this.assertOpen();
       aborted(signal);
       const effective = { ...clone(profile) };
       if (input.model) effective.model = input.model;
-      if (input.effort) effective.thinking = input.effort;
+      if (input.model || input.effort) { effective.effort = input.effort; effective.thinking = undefined; }
       return this.enqueue(input, effective, undefined, key);
     });
-    if (input.run_in_background !== false) return result;
+    return input.run_in_background === true ? result : this.foreground(result, signal);
+  }
+
+  private async foreground(result: TaskSummary, signal?: AbortSignal): Promise<TaskSummary> {
     const task = this.task(result.task_id);
     let cancellation: Promise<TaskSummary> | undefined;
     const onAbort = () => {
@@ -168,90 +176,82 @@ export class TaskEngine {
       await this.waitUntil(() => !pending.has(task.status));
       await this.runtimes.get(task.task_id)?.done;
       await cancellation;
-      return { ...this.summary(task), final_text: task.final_text ?? task.output };
+      return { ...this.summary(task), mode: result.mode, accepted: result.accepted };
     } finally { signal?.removeEventListener('abort', onAbort); }
   }
 
   async enqueue(input: TaskInput, profile: AgentProfile, previous?: TaskRecord, key?: string): Promise<TaskSummary> {
+    this.assertDispatch();
+    if (previous) profile = this.safety.continuation(previous);
     const id = this.domain.createId();
     const sessionId = previous?.session_id ?? randomUUID();
     const task: TaskRecord = {
-      task_id: id, session_id: sessionId, parent_id: this.parentId,
+      task_id: id, session_id: sessionId, parent_id: this.parentId, ...admittedFacts(id, input, profile, previous),
       childSessionPath: previous?.childSessionPath ?? join(this.store.dir, `${sessionId}.jsonl`),
       profile: freeze(clone(profile)), input: clone(input), status: 'queued',
       description: input.description ?? '', agent_name: input.agent_name ?? profile.name,
       created_at: new Date().toISOString(), output: '', cursor: 0, notification_pending: false,
-      notify_completion: input.run_in_background !== false,
+      notify_completion: input.run_in_background === true,
+      ...(previous ? { mode: 'activated', accepted: true } as const : {}),
     };
-    this.getState().tasks.push(task);
-    if (key) this.getState().requests[key] = id;
-    await this.persist();
+    await this.admission.commit(this.getState(), task, key, () => this.persist(), (error) => { this.storageError = error; });
     this.changed(task);
     const result = this.summary(task);
     this.pump();
     return result;
   }
 
-  async append(taskId: string, content: string, { requestId, signal }: TaskRequestOptions = {}): Promise<TaskSummary> {
-    aborted(signal);
-    return this.request(requestId && `append:${taskId}:${requestId}`, async (key) => {
-      this.assertOpen();
-      aborted(signal);
-      const original = this.task(taskId);
-      const task = this.getState().tasks.filter((item) => item.session_id === original.session_id).at(-1);
-      if (!task) throw new Error('Unknown task for this parent');
-      if (task.status === 'stopping') throw new Error('Task is stopping');
-      if (task.status === 'queued') {
-        task.input.prompt += `\n${content}`;
-        if (key) this.getState().requests[key] = task.task_id;
-        await this.persist();
-        this.changed(task);
-        return this.summary(task);
+  append(taskId: string, content: string, options: TaskRequestOptions = {}): Promise<TaskSummary> {
+    const poison = (error: unknown) => { this.storageError = error || new Error('Task append persistence failed'); };
+    return appendTask({ parentId: this.parentId, runtimes: this.runtimes, state: () => this.getState(),
+      assertAdmission: () => this.assertDispatch(),
+      request: (key, fn, duplicate) => this.request(key, fn, duplicate),
+      storageError: () => this.storageError, pump: () => this.pump(),
+      reserve: (task, key) => this.admission.reserveSteering(this.getState(), task, key, () => this.persist(), poison),
+      queued: (task, content, key) => this.admission.appendQueued(this.getState(), task, content, key, () => this.persist(), poison),
+      enqueue: (task, content, key) => this.enqueue({ ...task.input, prompt: content, run_in_background: true }, task.profile, task, key),
+      changed: (task) => this.changed(task), summary: (task) => this.summary(task),
+    }, taskId, content, options);
+  }
+
+  async send(taskId: string, content: string, options: TaskRequestOptions = {}): Promise<TaskSummary> {
+    this.assertOpen();
+    aborted(options.signal);
+    const target = this.getState().tasks.find((task) => task.task_id === taskId.trim())
+      ?? this.getState().tasks.find((task) => task.session_id === taskId.trim());
+    const original = this.task(target?.task_id ?? taskId);
+    content = trimmedContent(content);
+    const result = await this.request(options.requestId && `send:${original.session_id}:${options.requestId}`, async (key) => {
+      this.assertDispatch();
+      aborted(options.signal);
+      const task = this.getState().tasks.filter((item) => item.session_id === original.session_id).at(-1)!;
+      // Direct session send is idle-only. It must not join or cancel another caller's Turn.
+      if (pending.has(task.status) || this.runtimes.has(task.task_id)) {
+        throw Object.assign(new Error('Session already has an active Turn'), { code: 'local_session_busy', status: 409 });
       }
-      const runtime = this.runtimes.get(task.task_id);
-      if (runtime?.accepting) {
-        let release!: () => void;
-        let accepted = false;
-        let failure: unknown;
-        // Reserve delivery before yielding so completion cannot reuse this child.
-        runtime.delivery = new Promise((resolve) => { release = resolve; });
-        try {
-          const child = await runtime.started!;
-          if (runtime.accepting && task.status === 'running') {
-            await child.steer(content);
-            accepted = true;
-          }
-        } catch (error) { failure = error; }
-        finally { release(); runtime.delivery = undefined; }
-        if (accepted) {
-          if (key) this.getState().requests[key] = task.task_id;
-          await this.persist();
-          this.changed(task);
-          return this.summary(task);
-        }
-        if (runtime.stopReason) throw failure ?? new Error('Task is stopping');
-        if (failure && runtime.accepting) throw failure;
-      }
-      // A settled prompt can reject steer before its completion reaches this caller.
-      await runtime?.done;
-      return this.enqueue({ ...task.input, prompt: content, run_in_background: true }, task.profile, task, key);
-    });
+      return this.enqueue({ ...task.input, prompt: content, run_in_background: false }, task.profile, task, key);
+    }, (receipt) => ({ ...receipt, mode: 'duplicate', accepted: true }));
+    return this.foreground(result, options.signal);
   }
 
   pump(): void {
-    if (this.closed || this.storageError) return;
+    if (this.closed || this.storageError || this.safety.quarantined) return;
     while (this.runtimes.size < this.maxConcurrency) {
-      const task = this.getState().tasks.find((item) => item.status === 'queued');
+      const task = this.getState().tasks.find((item) => item.status === 'queued' && !this.admission.isPending(item.task_id));
       if (!task) break;
       this.domain.transition(task, 'running');
       task.started_at = new Date().toISOString();
-      const runtime: TaskRuntime = { accepting: true };
+      // Later background rows in the same child session use append-completion semantics.
+      const runtime: TaskRuntime = { accepting: true,
+        backgroundRunner: task.input.run_in_background === true
+          && this.getState().tasks.find((item) => item.session_id === task.session_id) === task };
       this.runtimes.set(task.task_id, runtime);
       runtime.done = this.run(task, runtime);
     }
   }
 
   async run(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+    let outcome!: TaskTerminalOutcome;
     let startedResolve!: (child: ChildSession) => void;
     let startedReject!: (error: Error) => void;
     runtime.started = new Promise<ChildSession>((resolve, reject) => { startedResolve = resolve; startedReject = reject; });
@@ -263,14 +263,20 @@ export class TaskEngine {
       if (!session.child) {
         session.child = await this.createChild({
           profile: freeze(clone(task.profile)), cwd: this.cwd, sessionPath: task.childSessionPath,
-          onOutput: (chunk) => {
-            const current = session.active;
-            if (!current || !pending.has(current.status)) return;
-            current.output += String(chunk);
-            this.persist().catch((error) => { this.storageError = error; });
-            this.changed(current);
+          onProfileResolved: async (profile: AgentProfile) => {
+            if (this.storageError) throw this.storageError;
+            resolvedProfile(task, profile);
+            try { await this.persist(); }
+            catch (error) {
+              this.storageError = error || new Error('Profile snapshot persistence failed');
+              throw error;
+            }
           },
+          onOutput: () => { if (session.active) this.changed(session.active); },
           onActivity: () => { if (session.active) this.changed(session.active); },
+        }).catch((error) => {
+          if (error?.cleanupChild?.sessionPath === task.childSessionPath) session.child = error.cleanupChild;
+          throw error;
         });
       }
       return session.child;
@@ -280,6 +286,8 @@ export class TaskEngine {
       await this.persist();
       this.changed(task);
       const child = await runtime.ready;
+      if (this.storageError) throw this.storageError;
+      this.safety.assertDispatch();
       if (child.sessionPath && child.sessionPath !== task.childSessionPath) {
         throw new Error('Child session path does not match assigned path');
       }
@@ -289,18 +297,20 @@ export class TaskEngine {
             this.cancel(task, 'Task timed out', 'failed').catch(() => {});
           }, task.profile.timeoutMs);
         }
-        const prompting = child.prompt(task.input.prompt);
+        const prompting = child.prompt(task.input.prompt, { turnId: task.sub_turn_id });
         startedResolve(child);
         const result = await prompting;
-        task.final_text = result?.text ?? '';
-        if (!task.output && task.final_text) task.output = task.final_text;
-        if (result?.usage !== undefined) task.usage = result.usage;
-        if (result?.verification !== undefined) task.verification = result.verification;
+        recordChildFacts(task, result);
+        outcome = runnerOutcome(result);
+      } else {
+        outcome = { status: 'aborted', errorMessage: runtime.stopReason };
       }
-      runtime.resultStatus = 'succeeded';
     } catch (error) {
-      runtime.resultStatus = 'failed';
-      if (!runtime.stopReason) task.error = normalizeTaskError(error).message;
+      const failure = recordChildFailure(task, error);
+      outcome = exceptionOutcome(task.input.run_in_background === true, error, failure.partialResult,
+        runtime.backgroundRunner ? runtime.shutdownReason : undefined);
+      if (this.safety.record(task, error) && !runtime.stopReason) runtime.stopStatus = 'failed';
+      if (!runtime.stopReason && ('failure' in outcome || outcome.status !== 'succeeded')) task.error = failure.message;
     } finally {
       runtime.accepting = false;
       startedReject(new Error('Task ended before prompt dispatch'));
@@ -311,29 +321,34 @@ export class TaskEngine {
       runtime.sealed = true;
       session.active = undefined;
       try {
-        await this.domain.finish(task, runtime.stopStatus ?? runtime.resultStatus!);
-        task.notification_pending = task.status !== 'canceled' && task.notify_completion !== false;
+        const terminal = appendTerminalOutput(task, outcome);
+        if (pending.has(task.status) && task.error === undefined && terminal.lastError) task.error = terminal.lastError.message;
+        await this.domain.finish(task, runtime.stopStatus ?? terminal.status);
+        task.notification_pending = (task.status !== 'canceled' || !runtime.stopReason) && task.notify_completion !== false;
         await this.persist();
         this.changed(task);
         if (task.notification_pending) {
           try { Promise.resolve(this.notify?.(this.summary(task))).catch(() => {}); } catch {}
         }
-      } catch (error) { this.storageError = error; }
-      this.runtimes.delete(task.task_id);
+      } catch (error) { this.storageError = error; this.changed(task); }
+      if (!this.safety.retains(task.session_id)) this.runtimes.delete(task.task_id);
       this.pump();
     }
   }
 
-  async cancel(task: TaskRecord, reason: string, status: 'canceled' | 'failed' = 'canceled'): Promise<TaskSummary> {
+  async cancel(task: TaskRecord, reason: string, status: 'canceled' | 'failed' = 'canceled', shutdown = false): Promise<TaskSummary> {
     const runtime = this.runtimes.get(task.task_id);
+    if (runtime && shutdown) runtime.shutdownReason = reason;
     if (runtime?.sealed || !pending.has(task.status)) {
-      await runtime?.done;
+      if (pending.has(task.status)) await runtime?.done;
       return this.summary(task);
     }
     if (!runtime) {
       this.domain.transition(task, status);
       task.finished_at = new Date().toISOString();
       task.cancel_reason = reason;
+      const terminal = appendTerminalOutput(task, { status: status === 'canceled' ? 'aborted' : 'failed', errorMessage: reason });
+      if (terminal.lastError) task.error = terminal.lastError.message;
       await this.persist();
       this.changed(task);
       return this.summary(task);
@@ -344,11 +359,27 @@ export class TaskEngine {
       this.domain.transition(task, 'stopping');
       task.cancel_reason = runtime.stopReason;
       if (status === 'failed') task.error = runtime.stopReason;
-      runtime.aborting = runtime.ready!.then((child) => child.abort()).catch(() => {});
+      runtime.aborting = runtime.ready!.then((child) => child.abort()).catch(async (error) => {
+        if (!this.safety.record(task, error)) {
+          task.stopError = { code: 'TASK_STOP_FAILED', message: normalizeTaskError(error).message };
+          task.error = task.stopError.message;
+        }
+        runtime.stopStatus = status;
+        // Upstream reports a failed explicit stop as canceled + stopError; capacity remains owned independently.
+        if (pending.has(task.status)) {
+          this.domain.transition(task, status);
+          task.finished_at = new Date().toISOString();
+          task.notification_pending = status !== 'canceled' && task.notify_completion !== false;
+        }
+        try { await this.persist(); } catch (failure) { this.storageError = failure; }
+        this.changed(task);
+      });
       await this.persist();
       this.changed(task);
     }
-    await runtime.done;
+    await runtime.aborting;
+    // A failed abort is observable immediately, but the live child still owns its slot.
+    if (!task.stopError) await runtime.done;
     return this.summary(task);
   }
 
@@ -367,48 +398,37 @@ export class TaskEngine {
     return this.getState().tasks.filter((task) => !status || task.status === status).map((task) => this.summary(task));
   }
 
-  async waitUntil(predicate: () => boolean, timeout?: number): Promise<void> {
-    if (predicate()) return;
-    await new Promise<void>((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const wake = () => {
-        if (!predicate()) return;
-        clearTimeout(timer);
-        this.waiters.delete(wake);
-        resolve();
-      };
-      this.waiters.add(wake);
-      if (timeout !== undefined) timer = setTimeout(() => {
-        this.waiters.delete(wake);
-        resolve();
-      }, timeout);
-      wake();
-    });
+  waitUntil(predicate: () => boolean, timeout?: number, signal?: AbortSignal): Promise<boolean> {
+    return waitForChange(this.waiters, predicate, timeout, signal);
   }
 
-  async output(taskId: string, { offset, wait_ms = 0, limitBytes = 65536 }: TaskOutputOptions = {}): Promise<TaskOutput> {
+  async output(
+    taskId: string, { offset, wait_ms = 0, limitBytes = 65536, signal }: TaskOutputOptions = {},
+  ): Promise<TaskOutput> {
     this.assertOpen();
+    aborted(signal);
     if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0)) throw new Error('Invalid output offset');
     if (!Number.isSafeInteger(limitBytes) || limitBytes < 1) throw new Error('Invalid output limit');
     const task = this.task(taskId);
-    const automatic = offset === undefined;
-    const requested = offset ?? task.cursor;
-    const before = task.status;
-    const length = Buffer.byteLength(task.output);
-    if (requested > length) throw new Error('Output offset exceeds available bytes');
-    await this.waitUntil(() => Buffer.byteLength(task.output) > requested || task.status !== before || !pending.has(task.status),
-      Math.max(0, Math.min(30000, Number(wait_ms) || 0)));
-    return this.exclusive(async () => {
-      const bytes = Buffer.from(task.output);
-      let start = automatic ? task.cursor : requested;
-      // Explicit offsets inside a code point advance to its next boundary.
-      while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
-      const result = await this.domain.readOutput(taskId, { offset: start, limitBytes });
-      const end = result.nextOffset ?? start;
-      if (automatic) { task.cursor = end; await this.persist(); }
-      return { ...this.summary(task), output: result.content,
-        offset: start, next_offset: end, has_more: result.truncated ?? false };
-    });
+    const waitMs = Math.max(0, Math.min(30000, Number(wait_ms) || 0));
+    const read = async (requested: number): Promise<TaskOutput> => {
+      if (requested > Buffer.byteLength(task.output)) throw new Error('Output offset exceeds available bytes');
+      const changed = waitMs === 0 || await this.waitUntil(
+        () => Buffer.byteLength(task.output) > requested || !pending.has(task.status), waitMs, signal);
+      return this.exclusive(async () => {
+        aborted(signal);
+        const bytes = Buffer.from(task.output);
+        let start = requested;
+        // Explicit offsets inside a code point advance to its next boundary.
+        while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+        const result = await this.domain.readOutput(taskId, { offset: start, limitBytes });
+        const end = result.nextOffset ?? start;
+        const truncated = result.truncated ?? false;
+        return { ...this.summary(task), output: result.content, offset: start, next_offset: end,
+          has_more: truncated, truncated, ...(waitMs > 0 ? { timed_out: !changed } : {}) };
+      });
+    };
+    return offset === undefined ? this.outputReads.automatic(taskId, signal, read) : read(offset);
   }
 
   async pendingNotifications(): Promise<TaskSummary[]> {
@@ -430,16 +450,28 @@ export class TaskEngine {
     if (this.closing) return this.closing;
     this.closed = true;
     this.closing = (async () => {
-      await this.gate;
+      await this.admission.settled();
       if (!this.state) return;
-      await Promise.all(this.getState().tasks.filter((task) => pending.has(task.status))
-        .map((task) => this.cancel(task, 'Parent closed')));
-      try {
-        const results = await Promise.allSettled([...this.sessions.values()].map((session) => session.child?.dispose()));
-        const failure = results.find((result) => result.status === 'rejected');
-        if (failure) throw failure.reason;
-      } finally { await this.store.close(); }
-    })();
+      const tasks = this.getState().tasks;
+      await Promise.all(tasks.filter((task) => pending.has(task.status)).map((task) => this.cancel(task, 'Parent closed', 'canceled', true)));
+      const hadCleanupFailure = this.safety.quarantined;
+      const confirmed = await this.safety.dispose(this.sessions, tasks);
+      await Promise.all([...this.runtimes].filter(([id]) => confirmed.has(this.task(id).session_id))
+        .map(([, runtime]) => runtime.done));
+      const recovered = this.safety.confirmDisposed(confirmed, tasks);
+      if (hadCleanupFailure || recovered || this.safety.quarantined) {
+        try { await this.persist(); } catch (error) { this.storageError = error; throw error; }
+      }
+      for (const task of tasks) if (task.stopError) this.changed(task);
+      this.safety.assertDispatch();
+      this.runtimes.clear();
+      await this.store.close();
+    })().catch((error) => {
+      // Keep the lock and readable owner when cleanup remains unproven; close can be retried.
+      this.closed = false;
+      this.closing = undefined;
+      throw error;
+    });
     return this.closing;
   }
 }

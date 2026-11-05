@@ -5,6 +5,7 @@ import { TaskController, RESULT_TYPE } from '../src/controller.ts';
 function fixture(entries = []) {
   const sent = [];
   const engines = [];
+  const factories = [];
   class Engine {
     constructor(options) { this.options = options; this.tasks = []; engines.push(this); }
     async init() {}
@@ -15,12 +16,14 @@ function fixture(entries = []) {
     async output(id) { return { ...this.tasks.find((task) => task.task_id === id), output: 'child report' }; }
     async stop(id) { this.tasks.find((task) => task.task_id === id).status = 'canceled'; }
   }
-  const pi = { sendMessage: (...args) => sent.push(args), appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
+  const pi = { sendMessage: (...args) => sent.push(args), getThinkingLevel: () => 'high',
+    appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
   const ctx = { cwd: '/project', hasUI: false, isProjectTrusted: () => false,
     sessionManager: { getSessionId: () => 'parent-a', getEntries: () => entries } };
   const controller = new TaskController(pi, { agentDir: '/agent', Engine,
-    configLoader: async () => ({ maxConcurrency: 4, roles: {}, diagnostics: [] }), childFactory: () => () => {} });
-  return { controller, ctx, engines, sent, entries, pi };
+    configLoader: async () => ({ maxConcurrency: 4, roles: {}, diagnostics: [] }),
+    childFactory: (options) => { factories.push(options); return () => {}; } });
+  return { controller, ctx, engines, sent, entries, pi, factories };
 }
 const complete = (id = 't1') => ({ task_id: id, agent_name: 'worker', description: 'bounded work', status: 'succeeded', notification_pending: true });
 
@@ -71,17 +74,25 @@ test('cancel pauses delivery across reload and stops running children', async ()
   await f.controller.shutdown();
 });
 
-test('session replacement closes the old owner and never sends its result to the new session', async () => {
+test('session replacement retains the old owner and never sends its result to the new session', async () => {
   const f = fixture();
   await f.controller.ensure(f.ctx);
   f.engines[0].tasks.push(complete());
   const other = { ...f.ctx, sessionManager: { getSessionId: () => 'parent-b', getEntries: () => [] } };
   await f.controller.ensure(other);
-  assert.equal(f.engines[0].closed, true);
+  assert.notEqual(f.engines[0].closed, true);
+  await f.engines[0].options.notify();
   await f.controller.flush();
   assert.equal(f.sent.length, 0);
   assert.equal(f.engines[1].options.parentId, 'parent-b');
+  await f.controller.ensure(f.ctx);
+  assert.equal(f.controller.engine, f.engines[0]);
+  await f.controller.flush();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0][0].details.parent_id, 'parent-a');
   await f.controller.shutdown();
+  assert.equal(f.engines[0].closed, true);
+  assert.equal(f.engines[1].closed, true);
 });
 
 test('dialog defers completion delivery until it closes', async () => {
@@ -187,4 +198,215 @@ test('shutdown during initialization cannot leave a new task owner alive', async
   await closing;
   assert.equal(f.controller.engine, undefined);
   assert.equal(f.engines.length, 0);
+});
+
+
+test('replacement extension instances reclaim detached engines without cross-session callbacks', async () => {
+  const f = fixture();
+  await f.controller.ensure(f.ctx);
+  const engine = f.engines[0];
+  engine.tasks.push({ task_id: 'background', status: 'running' });
+  await f.controller.shutdown('new');
+  assert.notEqual(engine.closed, true);
+  await engine.options.notify();
+  assert.equal(f.sent.length, 0);
+  let replacementFactories = 0;
+  const replacement = new TaskController(f.pi, { agentDir: '/agent',
+    configLoader: async () => ({ maxConcurrency: 4, roles: {}, diagnostics: [] }),
+    childFactory: () => { replacementFactories++; return () => {}; },
+  });
+  try {
+    await replacement.ensure(f.ctx);
+    assert.equal(replacement.engine, engine);
+    assert.equal(f.factories.length, 1);
+    assert.equal(replacementFactories, 0);
+    engine.tasks[0] = complete('background');
+    await engine.options.notify();
+    await replacement.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0][0].details.parent_id, 'parent-a');
+  } finally { await replacement.shutdown(); }
+  assert.equal(engine.closed, true);
+});
+
+test('admission snapshots the current inherited model and thinking, and reload continuation does not drift', async () => {
+  const { mkdir, mkdtemp } = await import('node:fs/promises');
+  const root = new URL('../artifacts/controller-tests/', import.meta.url);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const agentDir = await mkdtemp(new URL('models-', root).pathname);
+  let thinking = 'high';
+  const dispatched = [];
+  let factoryCalls = 0;
+  const base = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 };
+  const pi = { getThinkingLevel: () => thinking, sendMessage() {}, appendEntry() {} };
+  const options = { agentDir,
+    configLoader: async () => ({ maxConcurrency: 4, diagnostics: [], roles: {
+      worker: base, verifier: { ...base, name: 'verifier', model: 'fake/fixed' },
+      explore: { ...base, name: 'explore', thinking: 'medium' },
+    } }),
+    childFactory: () => {
+      factoryCalls++;
+      return async ({ profile, sessionPath, onProfileResolved }) => {
+        await onProfileResolved?.({ ...profile, skillSnapshot: [] });
+        dispatched.push({ profile, sessionPath });
+        return { sessionPath, async prompt() { return { text: 'done' }; },
+          async steer() {}, async abort() {}, async dispose() {} };
+      };
+    },
+  };
+  const ctx = { cwd: agentDir, hasUI: false, model: { provider: 'fake', id: 'parent-a' },
+    sessionManager: { getSessionId: () => 'snapshot-parent', getEntries: () => [] } };
+  const input = { agent_name: 'worker', description: 'snapshot', prompt: 'work' };
+  let controller = new TaskController(pi, options);
+  try {
+    const first = await controller.start(input, 'first', undefined, ctx);
+    assert.equal(dispatched[0].profile.model, 'fake/parent-a');
+    assert.equal(dispatched[0].profile.thinking, 'high');
+    ctx.model = { provider: 'fake', id: 'parent-b' };
+    thinking = 'low';
+    await controller.start(input, 'second', undefined, ctx);
+    assert.equal(dispatched[1].profile.model, 'fake/parent-b');
+    assert.equal(dispatched[1].profile.thinking, 'low');
+    await controller.start({ ...input, agent_name: 'verifier' }, 'role-model', undefined, ctx);
+    assert.equal(dispatched[2].profile.model, 'fake/fixed');
+    assert.equal(dispatched[2].profile.thinking, undefined);
+    await controller.start({ ...input, model: 'fake/override' }, 'input-model', undefined, ctx);
+    assert.equal(dispatched[3].profile.model, 'fake/override');
+    assert.equal(dispatched[3].profile.thinking, undefined);
+    await controller.start({ ...input, agent_name: 'explore' }, 'role-thinking', undefined, ctx);
+    assert.equal(dispatched[4].profile.model, 'fake/parent-b');
+    assert.equal(dispatched[4].profile.thinking, 'medium');
+    await controller.start({ ...input, effort: 'high' }, 'explicit-effort', undefined, ctx);
+    assert.equal(dispatched[5].profile.model, 'fake/parent-b');
+    assert.equal(dispatched[5].profile.effort, 'high');
+    assert.equal(dispatched[5].profile.thinking, undefined, 'an override must not inherit a contradictory Pi level');
+    await controller.ensure(ctx);
+    await controller.engine.query();
+    await controller.ensure(ctx);
+    assert.equal(factoryCalls, 1, 'all tasks and repeated queries share one factory');
+    await controller.shutdown('reload');
+    ctx.model = { provider: 'fake', id: 'parent-c' };
+    thinking = 'xhigh';
+    controller = new TaskController(pi, options);
+    const continued = await controller.send({ task_id: first.task_id, content: 'continue' }, 'continuation', undefined, ctx);
+    assert.equal(continued.session_id, first.session_id);
+    assert.equal(dispatched[6].sessionPath, dispatched[0].sessionPath);
+    assert.equal(dispatched[6].profile.model, 'fake/parent-a');
+    assert.equal(dispatched[6].profile.thinking, 'high');
+    assert.equal(factoryCalls, 2, 'reload creates exactly one replacement factory');
+  } finally { await controller.shutdown(); }
+});
+
+test('controller passes the public parent registry object into its one owner factory', async () => {
+  const f = fixture();
+  const registry = { getRegisteredProviderIds: () => [], getRegisteredProviderConfig: () => undefined,
+    getRegisteredNativeProvider: () => undefined };
+  f.ctx.modelRegistry = registry;
+  try {
+    await f.controller.ensure(f.ctx);
+    await f.controller.ensure(f.ctx);
+    assert.equal(f.factories.length, 1);
+    assert.equal(f.factories[0].inheritedModelRegistry, registry);
+  } finally { await f.controller.shutdown(); }
+});
+
+test('default controller factory forwards extension provider registry before model selection without a custom factory', async (t) => {
+  const { mkdir, mkdtemp } = await import('node:fs/promises');
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+  const root = new URL('../artifacts/controller-tests/', import.meta.url);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const agentDir = await mkdtemp(new URL('provider-registry-', root).pathname);
+  const calls = [];
+  const providerConfig = { api: 'openai-completions', baseUrl: 'https://example.invalid/offline', models: [] };
+  const registry = {
+    getRegisteredProviderIds: () => { calls.push(['ids']); return ['extension-fixture']; },
+    getRegisteredProviderConfig: (id) => { calls.push(['config', id]); return id === 'extension-fixture' ? providerConfig : undefined; },
+    getRegisteredNativeProvider: (id) => { calls.push(['native', id]); return undefined; },
+  };
+  let runtimeCreates = 0;
+  t.mock.method(ModelRuntime, 'create', async (options) => {
+    runtimeCreates++;
+    assert.equal(options.authPath, agentDir + '/auth.json');
+    assert.equal(options.allowModelNetwork, false);
+    return {
+      registerProvider: (id, config) => calls.push(['seed', id, config]),
+      registerNativeProvider: (provider) => calls.push(['seed-native', provider]),
+      getModel: (provider, id) => { calls.push(['lookup', provider, id]); return undefined; },
+    };
+  });
+  const controller = new TaskController({ getThinkingLevel: () => 'off', sendMessage() {}, appendEntry() {} }, {
+    agentDir,
+    configLoader: async () => ({ roles: { worker: { name: 'worker', instructions: '', tools: ['read'],
+      extensions: [], skills: [], mcp: false, timeoutMs: 0 } }, diagnostics: [] }),
+  });
+  const ctx = { cwd: agentDir, hasUI: false, isProjectTrusted: () => false,
+    model: { provider: 'extension-fixture', id: 'offline-model' }, modelRegistry: registry,
+    sessionManager: { getSessionId: () => 'extension-provider-parent', getEntries: () => [] } };
+  try {
+    const result = await controller.start({ agent_name: 'worker', description: 'registry path', prompt: 'offline' }, 'registry-call', undefined, ctx);
+    // Stop at the mock lookup boundary: no auth files, provider requests, or SDK
+    // sessions are created. The real default factory must seed before lookup.
+    assert.equal(result.status, 'failed');
+    assert.match(result.error, /Unknown child model: extension-fixture\/offline-model/);
+    assert.equal(runtimeCreates, 1);
+    const seed = calls.findIndex(([kind]) => kind === 'seed');
+    const lookup = calls.findIndex(([kind]) => kind === 'lookup');
+    assert.ok(seed >= 0, 'default createPiChildFactory must receive and seed the parent registry');
+    assert.deepEqual(calls[seed], ['seed', 'extension-fixture', providerConfig]);
+    assert.ok(lookup > seed, 'extension provider must be seeded before selecting the frozen provider/id');
+    assert.deepEqual(calls[lookup], ['lookup', 'extension-fixture', 'offline-model']);
+  } finally { await controller.shutdown(); }
+});
+
+test('task UI omits absent or unbounded capacity instead of showing undefined or Infinity', async () => {
+  for (const cap of [undefined, Infinity, 4]) {
+    const f = fixture();
+    const statuses = [];
+    f.ctx.hasUI = true;
+    f.ctx.ui = { setStatus: (key, text) => statuses.push(text), setWidget() {}, notify() {} };
+    f.controller.configLoader = async () => ({ ...(cap === undefined ? {} : { maxConcurrency: cap }), roles: {}, diagnostics: [] });
+    try {
+      await f.controller.ensure(f.ctx);
+      f.engines[0].tasks.push({ task_id: 'running', status: 'running' });
+      await f.controller.updateUI();
+      assert.equal(statuses.at(-1), cap === 4 ? 'Agents 1/4' : 'Agents 1');
+    } finally { await f.controller.shutdown(); }
+  }
+});
+
+test('owner factory reuse rejects trust changes until explicit reload', async () => {
+  const f = fixture();
+  try {
+    const engine = await f.controller.ensure(f.ctx);
+    await f.controller.ensure(f.ctx);
+    assert.equal(f.factories.length, 1);
+    f.ctx.isProjectTrusted = () => true;
+    await assert.rejects(f.controller.ensure(f.ctx), /project trust changed; reload/);
+    assert.equal(f.factories.length, 1);
+    assert.equal(f.controller.engine, engine);
+    await f.controller.shutdown('reload');
+    await f.controller.ensure(f.ctx);
+    assert.equal(f.factories.length, 2);
+    assert.equal(f.factories[1].projectTrusted, true);
+    assert.equal(engine.closed, true);
+  } finally { await f.controller.shutdown(); }
+});
+
+test('delivery retries stop at three attempts and can be explicitly resumed', async () => {
+  const f = fixture();
+  await f.controller.ensure(f.ctx);
+  f.engines[0].tasks.push(complete());
+  f.ctx.isIdle = () => true;
+  f.ctx.hasPendingMessages = () => false;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    f.controller.inFlight.set('t1', Date.now() - 2000);
+    await f.controller.flush();
+  }
+  assert.equal(f.sent.length, 3);
+  assert.equal(f.engines[0].tasks[0].notification_pending, true);
+  f.controller.resume();
+  f.controller.inFlight.set('t1', Date.now() - 2000);
+  await f.controller.flush();
+  assert.equal(f.sent.length, 4);
+  await f.controller.shutdown();
 });

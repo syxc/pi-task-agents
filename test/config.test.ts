@@ -6,9 +6,11 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveProfile } from '../src/config.ts';
+import { childToolPolicy, isRecursive } from '../src/resource-selection.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const readonly = ['read', 'grep', 'find', 'ls'];
+const roleTools = (name: string) => [...readonly, 'bash', ...(['worker', 'mavis'].includes(name) ? ['edit', 'write'] : [])];
 
 async function setup(t: TestContext) {
   // Keep fixture resources outside the plugin: children must never load the plugin itself.
@@ -30,24 +32,25 @@ function assertFrozen(value: unknown): void {
   }
 }
 
-test('missing configuration uses the four exact defaults with no inherited resources', async (t) => {
+test('missing configuration inherits models/resources and selects native Pi tools', async (t) => {
   const paths = await setup(t);
   const config = await loadConfig(paths);
-  assert.equal(config.maxConcurrency, 4);
+  assert.equal(config.maxConcurrency, undefined);
+  assert.equal(Object.hasOwn(config, 'maxConcurrency'), false);
   assert.deepEqual(config.sources, []);
   assert.deepEqual(config.diagnostics, []);
   assert.deepEqual(Object.keys(config.roles), ['explore', 'worker', 'verifier', 'mavis']);
-  for (const [name, effort] of Object.entries({ explore: 'medium', worker: 'high', verifier: 'xhigh', mavis: 'xhigh' })) {
+  for (const name of ['explore', 'worker', 'verifier', 'mavis']) {
     const actual = profile(config, name);
     assert.equal(actual.name, name);
-    assert.equal(actual.model, 'openai-codex/gpt-6.1-' + (name === 'explore' ? 'terra' : 'sol'));
-    assert.equal(actual.thinking, effort);
-    assert.deepEqual(actual.tools, ['explore', 'verifier'].includes(name) ? readonly : [...readonly, 'bash', 'edit', 'write']);
-    assert.deepEqual(actual.extensions, []);
-    assert.deepEqual(actual.skills, []);
-    assert.equal(actual.mcp, false);
+    assert.equal(actual.model, undefined);
+    assert.equal(actual.thinking, undefined);
+    assert.deepEqual(actual.tools, roleTools(name));
+    assert.equal(actual.extensions, undefined);
+    assert.deepEqual(actual.skills, ['explore', 'verifier'].includes(name) ? [] : undefined);
+    assert.equal(actual.mcp, undefined);
     assert.equal(actual.timeoutMs, 0);
-    assert.match(actual.instructions, /Leaf Session Contract/);
+    assert.match(actual.instructions, /## Delegated Task Contract/);
     assertFrozen(actual);
   }
   assertFrozen(config);
@@ -66,7 +69,8 @@ test('global and trusted project layers append instructions and replace explicit
   assert.equal(config.maxConcurrency, 6);
   assert.deepEqual(config.sources, [paths.global, paths.project]);
   assert.equal(actual.model, 'vendor/project/model');
-  assert.equal(actual.thinking, 'low');
+  assert.equal(actual.effort, 'low');
+  assert.equal(actual.thinking, undefined);
   assert.equal(actual.timeoutMs, 900);
   assert.deepEqual(actual.tools, ['read']);
   assert.match(actual.instructions, /Role: Worker/);
@@ -91,7 +95,7 @@ test('an agentDir equal to project .pi cannot bypass project trust', async (t) =
   await save(paths.project, { maxConcurrency: 8 });
   const options = { cwd: paths.cwd, agentDir: dirname(paths.project) };
   const untrusted = await loadConfig(options);
-  assert.equal(untrusted.maxConcurrency, 4);
+  assert.equal(untrusted.maxConcurrency, undefined);
   assert.deepEqual(untrusted.sources, []);
   assert.equal(untrusted.diagnostics.length, 1);
   const trusted = await loadConfig({ ...options, projectTrusted: true });
@@ -105,15 +109,15 @@ test('a symlink agentDir alias cannot load an untrusted project config', async (
   await symlink(dirname(paths.project), alias);
   await save(paths.project, { maxConcurrency: 17, roles: { worker: { tools: ['bash'] } } });
   const config = await loadConfig({ cwd: paths.cwd, agentDir: alias });
-  assert.equal(config.maxConcurrency, 4);
-  assert.deepEqual(profile(config, 'worker').tools, [...readonly, 'bash', 'edit', 'write']);
+  assert.equal(config.maxConcurrency, undefined);
+  assert.deepEqual(profile(config, 'worker').tools, roleTools('worker'));
   assert.deepEqual(config.sources, []);
   assert.equal(config.diagnostics.length, 1);
   assert.ok(config.diagnostics[0].includes(paths.project));
   assert.match(config.diagnostics[0], /Untrusted project configuration ignored/);
   await writeFile(paths.project, '{ invalid and untrusted JSON');
   const invalid = await loadConfig({ cwd: paths.cwd, agentDir: alias });
-  assert.equal(invalid.maxConcurrency, 4);
+  assert.equal(invalid.maxConcurrency, undefined);
   assert.deepEqual(invalid.sources, []);
   assert.equal(invalid.diagnostics.length, 1);
 });
@@ -123,7 +127,7 @@ test('a global config file symlink cannot alias an untrusted project config', as
   await save(paths.project, { maxConcurrency: 17 });
   await symlink(paths.project, paths.global);
   const config = await loadConfig(paths);
-  assert.equal(config.maxConcurrency, 4);
+  assert.equal(config.maxConcurrency, undefined);
   assert.deepEqual(config.sources, []);
   assert.equal(config.diagnostics.length, 1);
 });
@@ -134,12 +138,12 @@ test('an agentDir alias preserves missing-file and dangling-symlink diagnostics'
   await symlink(dirname(paths.project), alias);
   const options = { cwd: paths.cwd, agentDir: alias };
   const missing = await loadConfig(options);
-  assert.equal(missing.maxConcurrency, 4);
+  assert.equal(missing.maxConcurrency, undefined);
   assert.deepEqual(missing.sources, []);
   assert.deepEqual(missing.diagnostics, []);
   await symlink(join(paths.dir, 'missing.json'), paths.project);
   const dangling = await loadConfig(options);
-  assert.equal(dangling.maxConcurrency, 4);
+  assert.equal(dangling.maxConcurrency, undefined);
   assert.deepEqual(dangling.sources, []);
   assert.equal(dangling.diagnostics.length, 1);
   assert.ok(dangling.diagnostics[0].includes(paths.project));
@@ -167,32 +171,36 @@ test('custom namespace preserves builtin collisions and custom roles have isolat
   assert.match(custom.instructions, /Custom worker/);
   assert.doesNotMatch(custom.instructions, /Builtin addition/);
   assert.equal(custom.name, 'agent:worker');
-  assert.deepEqual(custom.tools, [...readonly, 'bash', 'edit', 'write']);
-  assert.equal(custom.mcp, false);
+  assert.deepEqual(custom.tools, roleTools('mavis'));
+  assert.equal(custom.mcp, undefined);
   assert.equal(profile(config, 'agent:researcher').model, 'vendor/research');
-  assert.throws(() => profile(config, 'researcher'), /custom roles require agent:<name>/);
+  assert.equal(profile(config, 'researcher').model, 'vendor/research');
   assert.throws(() => profile(config, 'agent:missing'), /unknown role/);
   assert.throws(() => profile(config, 'agent:explore'), /unknown role/);
 });
 
-test('input model and effort overrides are explicit, support max, and produce independent frozen profiles', async (t) => {
+test('input model and Pi thinking overrides produce independent frozen profiles', async (t) => {
   const paths = await setup(t);
   const config = await loadConfig(paths);
-  for (const effort of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+  for (const effort of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']) {
     const actual = profile(config, 'worker', { model: 'custom-provider/model/version', effort });
     assert.equal(actual.model, 'custom-provider/model/version');
-    assert.equal(actual.thinking, effort);
+    assert.equal(actual.effort, effort);
+    assert.equal(actual.thinking, undefined);
     assertFrozen(actual);
     assert.notEqual(actual.tools, config.roles.worker.tools);
     assert.throws(() => { actual.tools.push('other'); }, TypeError);
   }
-  assert.equal(config.roles.worker.model, 'openai-codex/gpt-6.1-sol');
-  assert.equal(config.roles.worker.thinking, 'high');
+  assert.equal(config.roles.worker.model, undefined);
+  assert.equal(config.roles.worker.thinking, undefined);
   for (const model of ['bare', '/id', 'provider/', 'provider//id', 'provider/id/', ' provider/id', 'provider/id with spaces', '', null, 5]) {
     assert.throws(() => profile(config, 'worker', { model }), /expected provider\/id/);
   }
-  for (const effort of ['ultra', 'MAX', '', null, 5]) {
-    assert.throws(() => profile(config, 'worker', { effort }), /expected one of/);
+  for (const effort of ['', ' \t', null, 5]) {
+    assert.throws(() => profile(config, 'worker', { effort }), /expected a string/);
+  }
+  for (const effort of ['max', 'on', 'light', 'ULTRA']) {
+    assert.throws(() => profile(config, 'worker', { effort }), /Pi thinking level/);
   }
   assert.throws(() => resolveProfile(config, { agent_name: 'worker', tools: ['write'] }), /unknown key/);
   assert.throws(() => resolveProfile(config, { agent_name: 'worker', run_in_background: 1 }), /expected a boolean/);
@@ -211,15 +219,14 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
     [{ roles: [] }, /expected an object/],
     [{ roles: { 'agent:': {} } }, /invalid role name/],
     [{ roles: { 'bad/name': {} } }, /invalid role name/],
-    [{ roles: { constructor: {} } }, /invalid role name/],
+    [{ roles: { CON: {} } }, /invalid role name/],
     [{ roles: { worker: null } }, /expected an object/],
-    [{ roles: { worker: { effort: 'high' } } }, /unknown key/],
+    [{ roles: { worker: { effort: '' } } }, /expected a string/],
     [{ roles: { worker: { model: 'invalid' } } }, /provider\/id/],
-    [{ roles: { worker: { thinking: 'unsupported' } } }, /expected one of/],
+    [{ roles: { worker: { thinking: 3 } } }, /expected a string/],
     [{ roles: { worker: { instructions: [] } } }, /expected a string/],
     [{ roles: { worker: { tools: 'read' } } }, /expected an array/],
     [{ roles: { worker: { tools: ['read', 3] } } }, /expected a string/],
-    [{ roles: { worker: { tools: ['read', 'read'] } } }, /duplicate entries/],
     [{ roles: { worker: { extensions: [null] } } }, /expected a string/],
     [{ roles: { worker: { skills: {} } } }, /expected an array/],
     [{ roles: { worker: { mcp: {} } } }, /expected a boolean/],
@@ -231,7 +238,7 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
     await assert.rejects(loadConfig(paths), error, JSON.stringify(value));
   }
   for (const [maxConcurrency, timeoutMs] of [[1, 0], [64, 2147483647]]) {
-    await save(paths.global, { maxConcurrency, roles: { worker: { timeoutMs, thinking: 'max' } } });
+    await save(paths.global, { maxConcurrency, roles: { worker: { timeoutMs, thinking: 'xhigh' } } });
     const config = await loadConfig(paths);
     assert.equal(config.maxConcurrency, maxConcurrency);
     assert.equal(config.roles.worker.timeoutMs, timeoutMs);
@@ -245,22 +252,35 @@ test('trusted project schema is just as strict as global schema', async (t) => {
   await assert.rejects(loadConfig({ ...paths, projectTrusted: true }), /unknown key/);
 });
 
-test('read-only builtins never enable write or edit; every role rejects recursive and pattern tools', async (t) => {
+test('selectors do not grant readonly mutation, delegation, or wildcard expansion', async (t) => {
   const paths = await setup(t);
-  for (const name of ['explore', 'verifier']) for (const tool of ['write', 'edit']) {
-    await save(paths.global, { roles: { [name]: { tools: ['read', tool] } } });
-    await assert.rejects(loadConfig(paths), /read-only builtins cannot enable/);
-  }
-  for (const name of ['worker', 'mavis', 'agent:custom']) {
-    for (const tool of ['task', 'task_append', 'TASK_output', 'subagent', 'subagent_run', 'mcp__server__task', 'mcp__server__task_append', 'mcp__x__subagent_run']) {
-      await save(paths.global, { roles: { [name]: { tools: [tool] } } });
-      await assert.rejects(loadConfig(paths), /recursive task and subagent tools are forbidden/);
+  for (const name of ['explore', 'verifier', 'worker', 'mavis', 'agent:custom']) {
+    const tools = ['write', 'edit', 'task', 'task_append', 'mcp__server__task', '*', 'mcp__*'];
+    await save(paths.global, { roles: { [name]: { tools } } });
+    const selected = profile(await loadConfig(paths), name);
+    const allows = childToolPolicy(selected, selected.tools);
+    assert.equal(allows('task'), false);
+    assert.equal(allows('task_append'), false);
+    assert.equal(allows('mcp__server__task'), true);
+    assert.equal(allows('read'), false);
+    assert.equal(allows('mcp__server__read'), false);
+    if (['explore', 'verifier'].includes(name)) {
+      assert.equal(allows('write'), false); assert.equal(allows('edit'), false);
     }
-    for (const tool of ['*', 'task_*', 'mcp__*', 'read write']) {
-      await save(paths.global, { roles: { [name]: { tools: [tool] } } });
-      await assert.rejects(loadConfig(paths), /use exact tool names/);
-    }
   }
+});
+
+test('parent task controls remain unavailable and MCP business names are not overblocked', () => {
+  for (const name of ['task', 'task_append', 'task_send', 'task_query', 'task_output', 'task_stop', 'task_agents', 'subagent']) {
+    assert.equal(isRecursive(name), true, name);
+  }
+  for (const name of ['task_update', 'subagent_status', 'mcp__tracker__task', 'mcp__tracker__task_update']) {
+    assert.equal(isRecursive(name), false, name);
+  }
+  const selected = { name: 'verifier', tools: ['read'], timeoutMs: 0 };
+  const allow = childToolPolicy(selected, selected.tools, new Set(['write', 'edit', 'task_query', 'search_docs']));
+  for (const name of ['write', 'edit', 'task_query']) assert.equal(allow(name), false, name);
+  assert.equal(allow('search_docs'), true);
 });
 
 test('explicit readonly Bash and MCP opt-in remains visible and requires matching permissions', async (t) => {
@@ -270,8 +290,9 @@ test('explicit readonly Bash and MCP opt-in remains visible and requires matchin
   assert.equal(profile(config, 'explore').mcp, true);
   assert.equal(config.diagnostics.length, 1);
   assert.match(config.diagnostics[0], /not a sandbox/);
-  await save(paths.global, { roles: { worker: { tools: ['mcp__server__search'] } } });
-  await assert.rejects(loadConfig(paths), /MCP tools require mcp: true/);
+  await save(paths.global, { roles: { worker: { tools: ['mcp__server__search'], mcp: false } } });
+  const disabled = profile(await loadConfig(paths), 'worker');
+  assert.equal(childToolPolicy(disabled, disabled.tools)('mcp__server__search'), false);
 });
 
 test('resource paths resolve at the declaring config, replace by layer, and never execute during loading', async (t) => {
@@ -285,7 +306,7 @@ test('resource paths resolve at the declaring config, replace by layer, and neve
     writeFile(projectExtension, 'throw new Error("config must not execute extensions");'),
     writeFile(join(skills, 'SKILL.md'), 'A fixture skill.'),
   ]);
-  await save(paths.global, { roles: { worker: { extensions: ['./global.mjs'], skills: ['./skills'] } } });
+  await save(paths.global, { roles: { worker: { extensions: ['./global.mjs'], skills: ['skills'] } } });
   await save(paths.project, { roles: { worker: { extensions: ['./project.js'], skills: [] } } });
   const global = await loadConfig(paths);
   assert.deepEqual(profile(global, 'worker').extensions, [globalExtension]);
@@ -317,21 +338,102 @@ test('resource loading rejects own plugin paths, symlink aliases, packages, miss
   }
 });
 
-test('all role prompts retain deliverable gates and reports without host-specific APIs or root routing', async () => {
-  const prompts = Object.fromEntries(await Promise.all(['explore', 'worker', 'verifier', 'mavis'].map(async (name) =>
-    [name, await readFile(resolve(root, 'prompts/' + name + '.md'), 'utf8')])));
-  for (const prompt of Object.values(prompts)) {
-    assert.match(prompt, /do not inherit/);
-    assert.match(prompt, /Do not delegate/);
-    assert.match(prompt, /Return:/);
-    assert.doesNotMatch(prompt, /task_output|run_in_background|final_text|deliver-assets|<media|\{\{|Task Routing|ROLE_DIRECTORY|\bglob\b/);
+test('config loads the maintained role instructions', async (t) => {
+  const paths = await setup(t);
+  const config = await loadConfig(paths);
+  for (const name of ['explore', 'worker', 'verifier', 'mavis']) {
+    const generated = (await readFile(resolve(root, 'prompts/' + name + '.md'), 'utf8')).trim();
+    const instructions = profile(config, name).instructions;
+    assert.equal(instructions, generated);
+    assert.match(instructions, /## Delegated Task Contract/);
+    assert.doesNotMatch(instructions, /Leaf Session Contract|Bash is disabled by default|or use task or subagent tools/);
   }
-  assert.match(prompts.explore, /ROLE_MISMATCH/);
-  assert.match(prompts.explore, /Inferences/);
-  assert.match(prompts.worker, /Validation run and observed results/);
-  assert.match(prompts.verifier, /ROLE_MISMATCH/);
-  assert.match(prompts.verifier, /VERDICT: PASS \| FAIL \| PARTIAL/);
-  assert.match(prompts.verifier, /explicitly designated temporary location/);
-  assert.match(prompts.mavis, /Core Judgment/);
-  assert.match(prompts.mavis, /unverified/);
+});
+
+test('named resources, MCP selectors and deny patterns preserve omission versus explicit empty', async (t) => {
+  const paths = await setup(t);
+  await save(paths.global, { roles: {
+    worker: { skills: ['code-review'], extensions: ['permission-gate'], mcpServers: ['docs'], disallowedTools: ['mcp__docs__delete*', 'write'] },
+    verifier: { tools: ['bash', 'task_query', 'task_output', 'task_stop'] },
+    disabled: { skills: [], extensions: [], mcp: false },
+  } });
+  const config = await loadConfig(paths);
+  assert.deepEqual(config.roles.worker.skills, ['code-review']);
+  assert.deepEqual(config.roles.worker.extensions, ['permission-gate']);
+  assert.deepEqual(config.roles.worker.mcpServers, ['docs']);
+  assert.deepEqual(config.roles.worker.disallowedTools, ['mcp__docs__delete*', 'write']);
+  assert.deepEqual(config.roles['agent:disabled'].skills, []);
+  assert.deepEqual(config.roles['agent:disabled'].extensions, []);
+  assert.equal(config.roles['agent:disabled'].mcp, false);
+  for (const change of [{ mcpServers: [{}] }, { mcpServers: [3] }, { disallowedTools: [null] }]) {
+    await save(paths.global, { roles: { worker: change } });
+    await assert.rejects(loadConfig(paths));
+  }
+});
+
+test('explicit model clears inherited profile effort unless the task sets effort', async (t) => {
+  const paths = await setup(t);
+  await save(paths.global, { roles: { worker: { model: 'test/old', thinking: 'high' } } });
+  const config = await loadConfig(paths);
+  assert.equal(profile(config, 'worker').effort, 'high');
+  assert.equal(profile(config, 'worker', { model: 'test/new' }).effort, undefined);
+  assert.equal(profile(config, 'worker', { model: 'test/new' }).thinking, undefined);
+  assert.equal(profile(config, 'worker', { model: 'test/new', effort: 'low' }).effort, 'low');
+});
+
+test('custom names accept bare refs and retain explicit aliases', async (t) => {
+  const paths = await setup(t);
+  await save(paths.global, { roles: {
+    reviewer: { effort: 'low' }, 'acme:reviewer': { effort: 'high' }, 'Custom Reviewer': {},
+    '审核员': {}, 'agent:worker': { effort: 'medium' }, main: { effort: 'high' }, constructor: {},
+  } });
+  const config = await loadConfig(paths);
+  for (const name of ['reviewer', 'acme:reviewer', 'Custom Reviewer', '审核员', 'constructor']) {
+    assert.equal(profile(config, name).name, 'agent:' + name);
+    assert.equal(profile(config, 'agent:' + name).name, 'agent:' + name);
+  }
+  assert.equal(profile(config, ' AGENT:reviewer ').effort, 'low');
+  assert.equal(profile(config, 'acme:reviewer').effort, 'high');
+  assert.equal(profile(config, 'agent:worker').effort, 'medium');
+  assert.equal(profile(config, 'worker').effort, undefined);
+  assert.equal(profile(config, 'WORKER').name, 'worker');
+  assert.equal(profile(config, 'main').name, 'mavis');
+  assert.equal(profile(config, 'agent:main').effort, 'high');
+  assert.throws(() => profile(config, 'unknown-plugin:reviewer'), /unknown role/);
+  for (const name of ['..', 'name.', 'con', 'bad\\\\name', 'bad/name', 'bad\u0000name']) {
+    assert.throws(() => profile(config, name), /invalid role name/);
+  }
+});
+
+test('effort config normalizes the thinking alias and rejects conflicting selectors', async (t) => {
+  const paths = await setup(t);
+  await save(paths.global, { roles: { worker: { effort: ' high ' }, verifier: { thinking: 'minimal' } } });
+  let config = await loadConfig(paths);
+  assert.equal(config.roles.worker.effort, 'high');
+  assert.equal(config.roles.verifier.effort, 'minimal');
+  assert.equal(config.roles.verifier.thinking, undefined);
+  await save(paths.global, { roles: { worker: { effort: 'low', thinking: 'high' } } });
+  await assert.rejects(loadConfig(paths), /thinking and effort conflict/);
+  await save(paths.global, {});
+  config = await loadConfig(paths);
+  assert.equal(JSON.stringify(config).includes('maxConcurrency'), false);
+  await save(paths.global, { maxConcurrency: 64 });
+  assert.equal((await loadConfig(paths)).maxConcurrency, 64);
+});
+
+test('selector comparison is exact after trim/NFKC/en-US case normalization, never wildcard expansion', async (t) => {
+  const paths = await setup(t);
+  await save(paths.global, { roles: { worker: { tools: [' ＲＥＡＤ ', 'read'],
+    disallowedTools: [' READ '], mcpServers: [' ＤＯＣＳ '] } } });
+  const selected = profile(await loadConfig(paths), 'worker');
+  const policy = childToolPolicy(selected, selected.tools, undefined, () => 'Docs');
+  assert.equal(policy('read'), false);
+  assert.equal(policy('mcp__Docs__read'), true);
+  const literal = childToolPolicy({ ...selected, disallowedTools: ['mcp__docs__delete*'] }, selected.tools, undefined, () => 'Docs');
+  assert.equal(literal('mcp__docs__delete_item'), true);
+  const exact = childToolPolicy({ ...selected, disallowedTools: [' ＭＣＰ__ＤＯＣＳ__ＤＥＬＥＴＥ_ＩＴＥＭ '] }, selected.tools, undefined, () => 'Docs');
+  assert.equal(exact('mcp__docs__delete_item'), false);
+  assert.equal(childToolPolicy(selected, selected.tools)('mcp__docs__read'), false);
+  const distinct = childToolPolicy({ ...selected, mcpServers: ['my_docs'] }, selected.tools, undefined, () => 'my-docs');
+  assert.equal(distinct('mcp__my_docs__read'), false);
 });

@@ -12,23 +12,12 @@ export const modules = [
   'errors.ts', 'id.ts', 'in-memory-output-store.ts', 'in-memory-store.ts',
   'index.ts', 'manager.ts', 'status.ts', 'types.ts',
 ];
-const agentsRoot = 'packages/local-runtime-v2/assets/agents';
+// Only task-protocol reference fixtures are watched; Pi owns the host runtime.
 export const watches = [
-  ...['explore', 'worker', 'verifier', 'mavis'].map((role) => ({
-    source: `${agentsRoot}/${role}/system-prompt.md.hbs`, kind: 'role',
-  })),
-  ...['explore', 'worker', 'verifier'].map((role) => ({
-    source: `${agentsRoot}/${role}/agent.md`, kind: 'role',
-  })),
-  { source: `${agentsRoot}/_default/prompt-session-branch.md.hbs`, kind: 'role' },
-  ...[
-    'packages/shared/src/subagent-roles.ts',
-    'packages/agent-tools/src/desktop/canonical-tool-policy.ts',
-    'packages/local-runtime/src/api/local-task-append.ts',
-    'packages/local-runtime/src/api/local-task-append-lifecycle.ts',
-    'packages/local-runtime/src/api/local-task-runner.ts',
-  ].map((source) => ({ source, kind: 'host' })),
-];
+  'packages/local-runtime-v2/src/service/turn-system/execution/steering/steer-session.service.ts',
+  'packages/local-runtime/src/background-task/turn-id.ts',
+  'LICENSE',
+].map((source) => ({ source, kind: 'host' }));
 const root = fileURLToPath(new URL('../', import.meta.url));
 const commitPattern = /^[0-9a-f]{40}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
