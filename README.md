@@ -32,9 +32,9 @@ pi -e /path/to/pi-task-agents/src/extension.ts
 
 | 角色 | 用途 | 默认原生工具 | 默认 Skills |
 | --- | --- | --- | --- |
-| explore | 定位与证据收集 | read、grep、find、ls、bash | 空列表 |
+| explore | 定位与证据收集 | read、grep、find、ls、bash | 继承可用资源 |
 | worker | 指定范围内实现 | 上述工具及 edit、write | 继承可用资源 |
-| verifier | 独立检查 | 与 explore 相同 | 空列表 |
+| verifier | 独立检查 | 与 explore 相同 | 继承可用资源 |
 | mavis | 研究与实现 | 与 worker 相同 | 继承可用资源 |
 
 子会话不开放本插件的父任务入口，也不加载本插件自身。Explore/Verifier 不开放 write/edit，但 Bash、MCP 和可信扩展不是只读沙箱，仍须遵守任务授权和项目权限。工具运行、超时及外部服务行为由 Pi SDK 和相应扩展负责。
@@ -59,7 +59,7 @@ pi -e /path/to/pi-task-agents/src/extension.ts
 
 `maxConcurrency` 可选，范围 1–64；省略时不施加插件自己的并发配额。`timeoutMs: 0` 表示不限时。
 
-`tools`、`disallowedTools`、`mcpServers` 按 trim/NFKC/大小写归一化后的精确名称匹配，不展开通配符。`extensions`、`skills` 支持已发现的资源名称或现有本地路径；扩展路径须指向 JS/TS 入口。资源省略表示继承可用范围，空列表表示不加载；`mcp:false` 或 `mcpServers:[]` 禁用 MCP。资源选择受项目 trust 和保存的权限上界限制。MCP 通过 Pi SDK 接入，不包含独立 MCP 客户端或 MCode 恢复协议。目前 SDK 未在根入口导出配置 loader，唯一非根接缝为 `extensions/mcp/config.js`；升级 Pi 后须重跑 MCP 回归。
+`tools`、`disallowedTools`、`mcpServers` 按 trim/NFKC/大小写归一化后的精确名称匹配，不展开通配符。`extensions`、`skills` 支持已发现的资源名称或现有本地路径；扩展路径须指向 JS/TS 入口。四个角色均默认继承可用资源。资源省略表示继承可用范围，空列表表示不加载；`mcp:false` 或 `mcpServers:[]` 禁用 MCP。资源选择受项目 trust 和保存的权限上界限制。MCP 通过 Pi SDK 接入，不包含独立 MCP 客户端或 MCode 恢复协议。目前 SDK 未在根入口导出配置 loader，唯一非根接缝为 `extensions/mcp/config.js`；升级 Pi 后须重跑 MCP 回归。
 
 裸名可覆盖内置角色；自定义 `researcher` 可通过 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。旧配置中的显式模型、工具和空资源列表仍有优先权；本次清理不自动迁移用户配置。旧的 MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。
 

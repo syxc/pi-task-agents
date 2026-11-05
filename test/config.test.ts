@@ -47,7 +47,7 @@ test('missing configuration inherits models/resources and selects native Pi tool
     assert.equal(actual.thinking, undefined);
     assert.deepEqual(actual.tools, roleTools(name));
     assert.equal(actual.extensions, undefined);
-    assert.deepEqual(actual.skills, ['explore', 'verifier'].includes(name) ? [] : undefined);
+    assert.equal(actual.skills, undefined);
     assert.equal(actual.mcp, undefined);
     assert.equal(actual.timeoutMs, 0);
     assert.match(actual.instructions, /## Delegated Task Contract/);
