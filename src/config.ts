@@ -268,7 +268,6 @@ export async function loadConfig({
       name,
       instructions: prompts[index].trim(),
       tools: [...readTools, 'bash', ...(['worker', 'mavis'].includes(name) ? ['edit', 'write'] : [])],
-      ...(['explore', 'verifier'].includes(name) ? { skills: [] } : {}),
       timeoutMs: 0,
     };
   });
