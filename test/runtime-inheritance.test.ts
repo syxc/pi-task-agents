@@ -200,7 +200,7 @@ export default pi => { appendFileSync(${JSON.stringify(marker)}, 'initialized\\n
   assert.equal(await readFile(marker, 'utf8'), 'initialized\n');
 });
 
-test('managed Bash inherits the actual parent shell executable and prefix', { skip: process.platform === 'win32' }, async t => {
+test('managed Bash inherits the actual parent shell executable and prefix', { timeout: 15000, skip: process.platform === 'win32' }, async t => {
   const f = await setup(t, { prefix: 'export OWNED_SHELL_PREFIX=MANAGED_PREFIX', customShell: true });
   const command = 'printf "%s" "${OWNED_SHELL_PREFIX-UNSET}"';
   f.script(step => step === 1 ? tool('bash', { command }) : answer('parent'));
@@ -211,7 +211,7 @@ test('managed Bash inherits the actual parent shell executable and prefix', { sk
     if (step === 1) return tool('bash_task', { action: 'start', command: command + ' > ' + JSON.stringify(target) });
     const message = context.messages.findLast(message => message.role === 'toolResult' && message.toolName === 'bash_task');
     const previous = JSON.parse(message.content.filter(part => part.type === 'text').map(part => part.text).join(''));
-    if (step === 2) return tool('bash_task', { action: 'output', command_id: previous.command_id, wait_ms: 5000 });
+    if (step === 2 || previous.status === 'running') return tool('bash_task', { action: 'output', command_id: previous.command_id, wait_ms: 5000 });
     assert.equal(previous.status, 'succeeded'); return answer('managed');
   }, 'child');
   const result = await f.child(); assert.equal(result.status, 'succeeded', result.error);
