@@ -6,7 +6,7 @@
     "repository": "https://github.com/earendil-works/pi",
     "commit": "f9a26365568127461c47a07a37dcb42c140a3ac5"
   },
-  "patchSha256": "a5b47a8131b68a476a1e37ddf2e0d24e089b775adecc45cf228745e49ca42da9",
+  "patchSha256": "9fb9260501e1f1a101e03c8c941b7714e67a19dd3b2d1c2b949fe2b02e0a7c66",
   "files": [
     {
       "source": "src/core/agent-session.ts",
@@ -30,13 +30,13 @@
       "source": "src/core/extensions/runner.ts",
       "map": "dist/core/extensions/runner.js.map",
       "baseSha256": "3cd6d1ad18e8e4c7adf722aed9291bc64f06e3a7d461755c21e3cba4819f4e5e",
-      "patchedSha256": "c8fc2730233420bc8ce7da7a938ed9a73d8d62752bef8badd04ad2eeede9566d"
+      "patchedSha256": "905c002b8333edc0fb7e1740602e108709a44643d3de83f929d9261f999195e4"
     },
     {
       "source": "src/core/extensions/types.ts",
       "map": "dist/core/extensions/types.js.map",
       "baseSha256": "78cfd4937aa72c02be444354ef5cb94310b9b40e20e477969630eb81c6a7391b",
-      "patchedSha256": "49ed2a8d2e096c14b2f7eaf01b35f7cdc7792000361365d29e15db67851fa21b"
+      "patchedSha256": "9e4c4369160afdb59fe4f2fb7892caad841312a00c89606c3d948c208fee403c"
     },
     {
       "source": "src/extensions/mcp/index.ts",

@@ -13,28 +13,35 @@ async function fixture(t, factories = [], files = false, mcp = false) {
   await writeFile(join(root, 'runtime-skill/SKILL.md'), '---\nname: runtime-skill\ndescription: owned runtime skill\n---\nFixture.\n');
   const hook = join(agentDir, 'extensions/hook.ts');
   await writeFile(hook, 'export default pi => { pi.on("before_agent_start", () => {}); };');
-  let api;
+  let api, script;
   const inline = pi => { api = pi; pi.on('resources_discover', () => ({ skillPaths: [join(root, 'runtime-skill')] })); };
   const settings = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: 'off' }, { projectTrusted: true });
   const model = { provider: 'offline', id: 'local', api: 'test', reasoning: false, input: ['text'], contextWindow: 10000, maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
   const runtime = { getModel: () => model, getModels: () => [], getProviders: () => [], hasConfiguredAuth: () => true,
-    resolveModel: async () => ({ model, thinkingLevel: 'off' }), streamSimple() {
-      const message = { role: 'assistant', api: 'test', provider: 'offline', model: 'local', content: [{ type: 'text', text: 'done' }], stopReason: 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-      return { async *[Symbol.asyncIterator]() { yield { type: 'done', reason: 'stop', message }; }, result: async () => message };
+    resolveModel: async () => ({ model, thinkingLevel: 'off' }), streamSimple(_model, context) {
+      const baseMessage = { role: 'assistant', api: 'test', provider: 'offline', model: 'local', content: [{ type: 'text', text: 'done' }], stopReason: 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      const message = script ? script(baseMessage, context) : baseMessage;
+      return { async *[Symbol.asyncIterator]() { yield { type: 'done', reason: message.stopReason, message }; }, result: async () => message };
     } };
   const audit = join(root, 'mcp-audit.jsonl');
   const connector = sdk.createMcpExtension({ startupWaitMs: 5000, logPath: join(root, 'mcp.log'),
     loadConfig: () => ({ servers: [{ name: 'file-owned', source: 'owned fixture', scope: 'global', config: { command: process.execPath,
-      args: [fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url)), audit, 'snapshot'], exposure: 'direct' } }], errors: [] }) });
+      args: [fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url)), audit, 'snapshot', '',
+        mcp === 'legacy-resources' ? 'resources' : 'tools'], exposure: 'direct' } }], errors: [] }) });
+  const selectedConnector = typeof mcp === 'string' ? pi => connector(new Proxy(pi, { get(target, property, receiver) {
+    if (property === 'on') return (event, handler) => event === 'resources_snapshot' || mcp === 'legacy-static' && event === 'mcp_servers_change'
+      ? () => {} : target.on(event, handler);
+    return Reflect.get(target, property, receiver);
+  } })) : connector;
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings, noExtensions: !files, noSkills: true,
     noContextFiles: true, noPromptTemplates: true, noThemes: true,
-    extensionFactories: [{ name: 'snapshot-owner', factory: inline }, ...(mcp ? [connector] : []), ...factories] });
+    extensionFactories: [{ name: 'snapshot-owner', factory: inline }, ...(mcp ? [selectedConnector] : []), ...factories] });
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
   const { session } = await sdk.createAgentSession({ cwd, agentDir, resourceLoader: loader, settingsManager: settings,
     sessionManager: sdk.SessionManager.inMemory(cwd), modelRuntime: runtime, model, thinkingLevel: 'off' });
   t.after(async () => { try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); await session.dispose(); } finally { await rm(root, { recursive: true, force: true }); } });
   await session.bindExtensions({ mode: 'json', onError: error => { throw error; }, abortHandler() {}, shutdownHandler() {} });
-  return { get api() { return api; }, session, loader, root, hook, inline, audit };
+  return { get api() { return api; }, session, loader, root, hook, inline, audit, script(fn) { script = fn; } };
 }
 
 test('resource snapshot preserves hook-only files, accepted inline factories and runtime Skills without exposing parent handlers', async t => {
@@ -84,7 +91,39 @@ test('MCP event observers do not become connectors or disappear from the extensi
   assert.equal(value.extensions.find(entry => entry.path === '<inline:observer>').mcpConnector, false);
 });
 
-test('unsupported MCP connectors fail explicitly instead of claiming an empty complete snapshot', async t => {
-  const f = await fixture(t, [pi => pi.on('mcp_servers_change', () => {})]);
+test('MCP-off event observers do not imply a connector', async t => {
+  const f = await fixture(t, [{ name: 'observer', factory: pi => pi.on('mcp_servers_change', () => {}) }]);
+  const value = await f.api.getResources(); assert.equal(value.mcp, null);
+  assert.equal(value.extensions.find(entry => entry.path === '<inline:observer>').mcpConnector, false);
+});
+
+for (const enabled of [false, true]) test('unhandled MCP registrations require a snapshot only when enabled: ' + enabled, async t => {
+  const f = await fixture(t, [pi => {
+    pi.on('mcp_servers_change', () => {});
+    pi.registerMcpServer('owned-unhandled', { command: process.execPath, args: ['-e', 'process.exit(1)'], enabled });
+  }]);
+  if (enabled) await assert.rejects(f.api.getResources(), /does not provide a resource snapshot/);
+  else assert.equal((await f.api.getResources()).mcp, null);
+});
+
+for (const mode of ['legacy', 'legacy-resources', 'legacy-static']) test('a connected native MCP without the snapshot protocol is rejected: ' + mode, async t => {
+  const f = await fixture(t, [], false, mode);
+  await f.session.prompt('Initialize only the owned local connector.');
+  const resource = mode === 'legacy-resources';
+  const name = resource ? 'list_mcp_resources' : f.session.getAllTools().find(tool => tool.name.startsWith('mcp__') && tool.name.endsWith('__echo'))?.name;
+  assert.ok(name); assert.ok(f.session.getAllTools().some(tool => tool.name === name));
+  assert.equal(f.loader.getExtensions().extensions.some(extension => extension.handlers.has('resources_snapshot')), false);
+  let observed = false;
+  f.script((base, context) => {
+    const reply = context.messages.findLast(message => message.role === 'toolResult' && message.toolName === name);
+    if (!reply) return { ...base, stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'owned-legacy-call', name,
+      arguments: resource ? { server: 'file-owned' } : { value: 'legacy' } }] };
+    assert.equal(reply.isError, false);
+    const text = reply.content.filter(part => part.type === 'text').map(part => part.text).join('');
+    assert.match(text, resource ? /OWNED_MCP_RESOURCE:snapshot/ : /OWNED_MCP_ECHO:snapshot:\d+:legacy/);
+    observed = true; return base;
+  });
+  await f.session.prompt('Call only the owned local fixture.'); assert.equal(observed, true);
+  assert.match(await readFile(f.audit, 'utf8'), resource ? /resources\/list/ : /tools\/call/);
   await assert.rejects(f.api.getResources(), /does not provide a resource snapshot/);
 });

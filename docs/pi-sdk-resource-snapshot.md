@@ -12,11 +12,11 @@
 | --- | --- |
 | `extensions` | 当前 loader 已接受的扩展元数据；保留纯 hook 扩展，inline/builtin 资源携带原始工厂引用。`mcpConnector` 标识快照提供者，不把普通 MCP 事件观察者当作 connector |
 | `skills` | 当前有效 Skill 元数据，包含 `resources_discover` 的运行态贡献，不因本地仍有文件而恢复关闭的 Skill |
-| `mcp` | 原生 connector 的当前配置快照，包含文件、运行态注册及其有效启停状态；没有 connector 时为 `null` |
+| `mcp` | 原生 connector 的当前配置快照，包含文件、运行态注册及其有效启停状态；没有快照提供者、MCP 工具或启用的服务器登记时为 `null` |
 
 扩展与 Skill 元数据为副本，MCP 配置通过 `structuredClone` 复制。工厂引用是可信代码，不能序列化，也不构成 JavaScript 闭包或文件系统沙箱。子会话重新执行工厂并提供新的 API，不复用父 handlers、UI 对象或对话历史；文件扩展仍从获准入口重新加载。
 
-原生 MCP 通过只读 `resources_snapshot` 事件交付当前状态，不从磁盘重建批准范围，也不因此调用业务工具。旧 connector 没有快照协议或存在多个提供者时明确报错，不伪造完整的空快照。普通 `mcp_servers_change` 观察者在存在正常提供者时仍作为扩展保留。
+原生 MCP 通过只读 `resources_snapshot` 事件交付当前状态，不从磁盘重建批准范围，也不因此调用业务工具。没有快照协议却存在 MCP 工具或启用的服务器登记时明确报错；存在多个提供者时也报错，不伪造完整的空快照。普通 `mcp_servers_change` 观察者本身不证明存在 connector，在父会话未加载 MCP 时仍可保留。SDK 只用自身注册的 MCP 能力发现无法快照的状态并拒绝，不从工具列表推导配置或授权。
 
 MCP 配置可能含认证材料。插件只在宿主可信内存中使用快照，不把原始配置、工厂函数或父设置写入 task profile、任务历史、模型请求或日志。第三方可信扩展自行读取或输出数据不在此保证范围内。
 
@@ -36,7 +36,7 @@ MCP 配置可能含认证材料。插件只在宿主可信内存中使用快照�
 
 `npm test` 使用本地已安装的固定版本开发依赖，在临时目录验证 source map 原文哈希、应用同一补丁，并用现有 TypeScript 转译 7 个改动模块。测试不联网或改动已安装 SDK；结果不是 SDK 发行构建证明。公共 API、默认父子创建链、运行态 MCP 的真实工具回复、角色关闭、纯 hook、历史隔离、取消、reload、Shell 设置和 codemode 均有受控回归。测试模型是本地脚本，本地 stdio MCP 是自有夹具，不能替代真实模型或业务服务验收。
 
-另已使用固定上游的官方构建脚本，在隔离工作区重建 SDK 的 CLI bundle。Node 22/24 的实际 bundled CLI 验证了公开 getter、纯 hook、工厂身份、MCP 视图和副本隔离；这不是已安装宿主的接入证明。尚未生成可安装 SDK 发行包，也未更换用户安装。仅更新插件或对原版 Pi 执行 `/reload`，不能补出宿主缺少的接口。缺少接口时，任务准入返回 `PARENT_RESOURCE_SNAPSHOT_REQUIRED`。
+SDK 的完整构建、CLI bundle、发行包和用户安装必须分别验证，不能用测试转译层替代。须使用固定上游的官方构建脚本，并在 Node 22/24 验证实际 bundled CLI 的公开 getter、纯 hook、工厂身份、MCP 视图和副本隔离；隔离验证不证明用户安装已更新。源码补丁和插件更新不会自动更换宿主 SDK，`/reload` 也不能替换当前进程的核心代码；SDK 更新后须重启 Pi。缺少接口时，任务准入返回 `PARENT_RESOURCE_SNAPSHOT_REQUIRED`。
 
 准备在独立 SDK 源码仓库接入时，可先检查并应用补丁：
 

@@ -47,7 +47,7 @@ pi -e /path/to/pi-task-agents/src/extension.ts
 
 角色指令和原生工具范围作为代码内置预设，不需要用户逐项配置。子会话不开放父任务、todo、用户提问、goal 和定时控制，也不加载本插件自身。信息不足时向父会话报告 blocker，不直接询问用户或安排独立后续工作。Memory 只可写入明确提供的 child-owned 存储，否则把持久结论交给父会话处理。Explore/Verifier 不开放 write/edit；若交付物需要修改文件，应返回 `ROLE_MISMATCH`，由父会话转交 worker。Verifier 只能在任务明确指定的临时目录生成验证产物，不能修改被验证的交付物。Bash、MCP 和可信扩展不是只读沙箱，仍须遵守任务授权和项目权限。
 
-模型和 thinking 默认在任务准入时继承父会话，并随解析后的 profile 保存。显式指定 `model: "provider/id"` 不静默替换模型，也不继续沿用旧模型的 effort。`effort` 使用 Pi 档位：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`；`thinking` 是配置中的兼容别名。不支持的模型或档位报错。
+模型和 thinking 默认在任务准入时继承父会话，并随解析后的 profile 保存。显式指定 `model: "provider/id"` 不静默替换模型，也不继续沿用旧模型的 effort。`effort` 使用 Pi 档位：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；`thinking` 是配置中的兼容别名。具体模型支持的档位由 Pi SDK 判断，不支持的模型或档位报错。
 
 ### Verifier 的结果
 

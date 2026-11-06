@@ -292,6 +292,7 @@ test('model inheritance, native thinking validation and profile persistence happ
   await child.dispose();
   await assert.rejects(f.child({ thinking: 'high' }), /unsupported/);
   await assert.rejects(f.child({ effort: 'high' }), /Requested child thinking level high is unsupported/);
+  await assert.rejects(f.child({ effort: 'max' }), /Requested child thinking level max is unsupported/);
   await assert.rejects(f.child({ thinking: 'm3' as any }), /Invalid Pi thinking/);
   await assert.rejects(f.child({}, undefined, async () => { throw Error('persist failed'); }), /persist failed/);
   await (await f.child()).dispose();

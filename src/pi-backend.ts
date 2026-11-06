@@ -149,7 +149,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       : 'Child model requires an inherited host model. Select a model in the parent conversation first.');
     // Accept only native Pi levels. Provider effort/managed protocol translation belongs to the SDK, not this plugin.
     const requestedThinking = profile.effort ?? profile.thinking ?? (profile.model ? undefined : inheritedThinking);
-    if (requestedThinking !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(requestedThinking)) {
+    if (requestedThinking !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(requestedThinking)) {
       throw new Error('Invalid Pi thinking level');
     }
     const thinkingLevel = requestedThinking as ThinkingLevel | undefined;
