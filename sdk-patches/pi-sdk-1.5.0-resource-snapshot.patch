@@ -96,10 +96,18 @@ index ff9f127..db530f3 100644
  
  /**
 diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
-index 77712e6..e5e55ef 100644
+index 77712e6..11e44cc 100644
 --- a/packages/coding-agent/src/core/extensions/runner.ts
 +++ b/packages/coding-agent/src/core/extensions/runner.ts
-@@ -76,6 +76,8 @@ import type {
+@@ -15,6 +15,7 @@ import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+ import type { CacheWarmingAction } from "../cache-warmer.ts";
+ import type { ResourceDiagnostic } from "../diagnostics.ts";
+ import type { KeybindingsConfig } from "../keybindings.ts";
++import { isMcpToolName } from "../mcp-servers.ts";
+ import type { ModelRegistry } from "../model-registry.ts";
+ import type { ScopedModel } from "../model-resolver.ts";
+ import type { SessionManager } from "../session-manager.ts";
+@@ -76,6 +77,8 @@ import type {
  	ResolvedCommand,
  	ResourcesDiscoverEvent,
  	ResourcesDiscoverResult,
@@ -108,7 +116,7 @@ index 77712e6..e5e55ef 100644
  	SessionBeforeCompactResult,
  	SessionBeforeForkResult,
  	SessionBeforeSwitchResult,
-@@ -194,6 +196,7 @@ type RunnerEmitEvent = Exclude<
+@@ -194,6 +197,7 @@ type RunnerEmitEvent = Exclude<
  	| BeforeAgentStartEvent
  	| MessageEndEvent
  	| ResourcesDiscoverEvent
@@ -116,7 +124,7 @@ index 77712e6..e5e55ef 100644
  	| InputEvent
  	| TurnEndEvent
  	| AgentBeforeSettleEvent
-@@ -435,6 +438,7 @@ export class ExtensionRunner {
+@@ -435,6 +439,7 @@ export class ExtensionRunner {
  		this.runtime.getActiveTools = actions.getActiveTools;
  		this.runtime.getAllTools = actions.getAllTools;
  		this.runtime.getSettings = actions.getSettings;
@@ -124,14 +132,18 @@ index 77712e6..e5e55ef 100644
  		this.runtime.setActiveTools = actions.setActiveTools;
  		this.runtime.refreshTools = actions.refreshTools;
  		this.runtime.getCommands = actions.getCommands;
-@@ -1476,6 +1480,20 @@ export class ExtensionRunner {
+@@ -1476,6 +1481,24 @@ export class ExtensionRunner {
  		return { messages, systemPromptOptions: currentOptions };
  	}
  
 +	async getMcpResourceSnapshot(): Promise<ResourcesSnapshotResult["mcp"] | null> {
 +		const connectors = this.extensions.filter((extension) => extension.handlers.has("resources_snapshot"));
 +		if (connectors.length === 0) {
-+			if (this.hasHandlers("mcp_servers_change")) throw new Error("MCP connector does not provide a resource snapshot");
++			// Observers are not connectors; reject unaccounted MCP capabilities, not event subscriptions.
++			if (
++				this.runtime.getAllTools().some((tool) => isMcpToolName(tool.name)) ||
++				this.runtime.mcpServers.list().some((server) => server.config.enabled !== false)
++			) throw new Error("MCP connector does not provide a resource snapshot");
 +			return null;
 +		}
 +		if (connectors.length !== 1) throw new Error("MCP resource snapshot requires one connector");
@@ -146,7 +158,7 @@ index 77712e6..e5e55ef 100644
  		cwd: string,
  		reason: ResourcesDiscoverEvent["reason"],
 diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
-index 098f7fb..8f93012 100644
+index 098f7fb..5e325f6 100644
 --- a/packages/coding-agent/src/core/extensions/types.ts
 +++ b/packages/coding-agent/src/core/extensions/types.ts
 @@ -58,6 +58,7 @@ import type {
@@ -182,7 +194,7 @@ index 098f7fb..8f93012 100644
 +export interface ResourceSnapshot {
 +	extensions: Array<Pick<Extension, "path" | "resolvedPath" | "sourceInfo" | "hidden" | "replaceable" | "factory" | "factoryId"> & { mcpConnector: boolean }>;
 +	skills: Skill[];
-+	/** Null when no MCP connector is loaded. Config may contain secrets; do not log or persist it. */
++	/** Null without a snapshot provider, MCP tools or enabled registrations. Config may contain secrets; do not log or persist it. */
 +	mcp: LoadedMcpConfig | null;
 +}
 +

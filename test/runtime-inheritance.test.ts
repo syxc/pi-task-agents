@@ -9,7 +9,7 @@ import { registerTaskAgents } from '../src/extension.ts';
 import { answer, tool } from './pi-backend-test-helpers.ts';
 
 async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill = false, runtimeMcp = false,
-  role = {}, extraFactories = [], customShell = false, codemode = false } = {}) {
+  role = {}, extraFactories = [], customShell = false, codemode = false, maxThinking = false, withoutMcp = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pi-runtime-inheritance-'));
   const agentDir = join(root, 'agent'), cwd = join(root, 'workspace');
   const skill = join(agentDir, 'skills', 'owned-runtime-skill'), extension = join(agentDir, 'extensions', 'owned.ts');
@@ -30,12 +30,16 @@ async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill =
   await writeFile(join(agentDir, 'task-agents.json'), JSON.stringify({ roles: { worker: { ...(!runtimeMcp ? { mcp: false } : {}),
     ...(!resourcesDisabled && !runtimeSkill && !runtimeMcp && !extraFactories.length ? { extensions: [], skills: [] } : {}),
     ...(typeof role === 'function' ? role({ skill, extension }) : role) } } }));
-  const model = { provider: 'offline', id: 'local', api: 'test', reasoning: false, input: ['text'], contextWindow: 10000,
-    maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const model = maxThinking ? (await sdk.ModelRuntime.create({ authPath: join(root, 'model-auth.json'),
+    modelsPath: join(root, 'model-config.json'), modelsStorePath: join(root, 'model-catalog.json'),
+    allowModelNetwork: false, refreshOnCreate: false })).getModel('anthropic', 'claude-opus-4-6') :
+    { provider: 'offline', id: 'local', api: 'test', reasoning: false, input: ['text'], contextWindow: 10000,
+      maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  assert.ok(model);
   let mode = 'main', step = 0, script = () => answer('done'), controller, ctx, parent, api, childIndex = 0;
   const runtime = { getModel: () => model, getModels: () => [], getProviders: () => [], hasConfiguredAuth: () => true,
     getRegisteredProviderIds: () => [], getRegisteredProviderConfig: () => undefined, getRegisteredNativeProvider: () => undefined,
-    resolveModel: async () => ({ model, thinkingLevel: 'off' }),
+    resolveModel: async () => ({ model, thinkingLevel: maxThinking ? 'max' : 'off' }),
     streamSimple(_model, context) {
       const result = Promise.resolve(script(++step, context, mode));
       return { async *[Symbol.asyncIterator]() { const message = await result; yield { type: 'done', reason: message.stopReason, message }; }, result: () => result };
@@ -44,7 +48,7 @@ async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill =
   const settings = sdk.SettingsManager.create(cwd, agentDir, { projectTrusted: true });
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
     noContextFiles: true, noPromptTemplates: true, noThemes: true,
-    noExtensions: resourcesDisabled, noSkills: resourcesDisabled,
+    noExtensions: resourcesDisabled, noSkills: resourcesDisabled, disabledBuiltinExtensions: withoutMcp ? ['mcp'] : undefined,
     extensionFactories: [
       ...(codemode ? [sdk.createCodemodeExtension({ mode: 'on', models: false })] : []),
       ...(runtimeMcp ? [sdk.createMcpExtension({ startupWaitMs: 10000,
@@ -67,7 +71,7 @@ async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill =
   });
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
   ({ session: parent } = await sdk.createAgentSession({ cwd, agentDir, resourceLoader: loader,
-    modelRuntime: runtime, model, thinkingLevel: 'off', settingsManager: settings,
+    modelRuntime: runtime, model, thinkingLevel: maxThinking ? 'max' : 'off', settingsManager: settings,
     sessionManager: sdk.SessionManager.create(cwd, join(root, 'parent')) }));
   const errors = [];
   await parent.bindExtensions({ mode: 'json', onError: error => errors.push(error), abortHandler() {}, shutdownHandler() {} });
@@ -75,7 +79,8 @@ async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill =
   if (codemode) parent.setActiveToolsByName([...parent.getActiveToolNames(), 'codemode']);
   return { root, cwd, agentDir, loader, parent, marker, shellMarker, settings, get api() { return api; }, get controller() { return controller; }, get ctx() { return ctx; },
     script(fn, nextMode = 'main') { mode = nextMode; step = 0; script = fn; },
-    async child() { return controller.start({ agent_name: 'worker', description: 'Runtime inheritance probe', prompt: 'Use only the assigned fixture.' }, 'owned-' + ++childIndex, undefined, ctx); } };
+    async child(overrides = {}) { return controller.start({ agent_name: 'worker', description: 'Runtime inheritance probe',
+      prompt: 'Use only the assigned fixture.', ...overrides }, 'owned-' + ++childIndex, undefined, ctx); } };
 }
 
 test('default controller respects parent-session noSkills/noExtensions instead of rediscovering disabled resources', { timeout: 15000 }, async t => {
@@ -134,6 +139,25 @@ test('default controller preserves the configured native shell prefix used by th
   assert.equal(observed.main, 'PARENT_PREFIX');
   f.script(script, 'child'); const result = await f.child(); assert.equal(result.status, 'succeeded', result.error);
   assert.equal(observed.child, observed.main);
+});
+
+for (const selection of ['inherit', 'input', 'role']) test('native max thinking survives default admission: ' + selection, { timeout: 15000 }, async t => {
+  const f = await setup(t, { maxThinking: true, role: selection === 'role' ? { thinking: 'max' } : {} });
+  assert.ok(f.parent.getAvailableThinkingLevels().includes('max'));
+  assert.equal(f.parent.thinkingLevel, 'max'); assert.equal(f.api.getThinkingLevel(), 'max');
+  f.script(() => answer('owned max reply', { api: 'anthropic-messages', provider: 'anthropic', model: 'claude-opus-4-6' }), 'child');
+  const result = await f.child(selection === 'input' ? { effort: 'max' } : {});
+  assert.equal(result.status, 'succeeded', result.error);
+  assert.equal(f.controller.engine.task(result.task_id).profile.thinking, 'max');
+});
+
+test('MCP-off event observers preserve a null snapshot and default child admission', { timeout: 15000 }, async t => {
+  const f = await setup(t, { withoutMcp: true, extraFactories: [{ name: 'owned-mcp-observer',
+    factory: pi => pi.on('mcp_servers_change', () => {}) }] });
+  const snapshot = await f.api.getResources(); assert.equal(snapshot.mcp, null);
+  assert.equal(snapshot.extensions.find(entry => entry.path === '<inline:owned-mcp-observer>').mcpConnector, false);
+  f.script(() => answer('owned observer reply'), 'child');
+  const result = await f.child(); assert.equal(result.status, 'succeeded', result.error);
 });
 
 test('role paths cannot resurrect files and Skills disabled in the parent', async t => {

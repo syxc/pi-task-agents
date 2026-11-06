@@ -16,7 +16,7 @@ interface ParsedConfig {
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url));
 const builtins: readonly string[] = ['explore', 'worker', 'verifier', 'mavis'];
 const readTools: readonly string[] = ['read', 'grep', 'find', 'ls'];
-const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const roleKeys: readonly string[] = [
   'model', 'thinking', 'effort', 'instructions', 'tools', 'extensions', 'skills', 'mcp', 'mcpServers', 'disallowedTools', 'timeoutMs',
 ];

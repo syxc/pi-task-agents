@@ -182,7 +182,7 @@ test('custom namespace preserves builtin collisions and custom roles have isolat
 test('input model and Pi thinking overrides produce independent frozen profiles', async (t) => {
   const paths = await setup(t);
   const config = await loadConfig(paths);
-  for (const effort of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']) {
+  for (const effort of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
     const actual = profile(config, 'worker', { model: 'custom-provider/model/version', effort });
     assert.equal(actual.model, 'custom-provider/model/version');
     assert.equal(actual.effort, effort);
@@ -199,7 +199,7 @@ test('input model and Pi thinking overrides produce independent frozen profiles'
   for (const effort of ['', ' \t', null, 5]) {
     assert.throws(() => profile(config, 'worker', { effort }), /expected a string/);
   }
-  for (const effort of ['max', 'on', 'light', 'ULTRA']) {
+  for (const effort of ['on', 'light', 'ULTRA']) {
     assert.throws(() => profile(config, 'worker', { effort }), /Pi thinking level/);
   }
   assert.throws(() => resolveProfile(config, { agent_name: 'worker', tools: ['write'] }), /unknown key/);
