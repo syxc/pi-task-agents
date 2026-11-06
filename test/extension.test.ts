@@ -13,6 +13,9 @@ test('a full output page is preserved when the engine has advanced its byte curs
 });
 
 
+const runtimeAPI = { getAllTools: () => [], getSettings: () => ({}),
+  getResources: async () => ({ extensions: [], skills: [], mcp: null }) };
+
 function fixture() {
   const tools = new Map(), handlers = new Map(), commands = new Map(), engines = [], factories = [];
   const entries = [], sent = [];
@@ -39,6 +42,7 @@ function fixture() {
     async stop(id, reason) { this.stopped = { id, reason }; return this.result; }
   }
   const pi = {
+    ...runtimeAPI,
     registerTool: (tool) => tools.set(tool.name, tool),
     on: (name, handler) => handlers.set(name, handler),
     registerCommand: (name, command) => commands.set(name, command),
@@ -316,7 +320,7 @@ test('real engine adapter waits by default, continues the same child and enforce
   const tools = new Map(), children = [], sent = [];
   let release, entered;
   const started = new Promise((resolve) => { entered = resolve; });
-  const pi = { registerTool: (tool) => tools.set(tool.name, tool), on() {}, registerCommand() {},
+  const pi = { ...runtimeAPI, registerTool: (tool) => tools.set(tool.name, tool), on() {}, registerCommand() {},
     getThinkingLevel: () => 'high', appendEntry() {}, sendMessage: (...args) => sent.push(args) };
   const profile = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 };
   const controller = registerTaskAgents(pi, { agentDir,

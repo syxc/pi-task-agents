@@ -13,23 +13,25 @@ const namespace = (name: string) => normalizedSelectorName(`mcp__${name.replace(
 
 /** Only selection, trust and provenance live here. Connections and shutdown belong to Pi. */
 export async function childMcpFactory(sdk: Sdk, profile: AgentProfile, agentDir: string, cwd: string,
-  projectTrusted: boolean, sessionPath: string, startupWaitMs: number): Promise<{
+  projectTrusted: boolean, sessionPath: string, startupWaitMs: number, inherited?: LoadedMcpConfig): Promise<{
     extension: InlineExtension; indirect: string[]; serverFor(tool: string): string | undefined;
   }> {
-  let load = sdk.loadMcpConfig;
-  if (!load) {
-    // Host peers need not exist beside this plugin. Anchor the sole non-root
-    // config-loader seam to the SDK supplied by Pi, preserving its validation.
-    try {
-      const root = sdk.getPackageDir?.();
-      if (!root) throw new Error('Missing host SDK package directory');
-      load = (await import(pathToFileURL(resolve(root, 'dist/extensions/mcp/config.js')).href)).loadMcpConfig;
+  let config = inherited;
+  if (!config) {
+    let load = sdk.loadMcpConfig;
+    if (!load) {
+      // Direct SDK embeddings may lack a parent snapshot; resolve their loader from the supplied host SDK.
+      try {
+        const root = sdk.getPackageDir?.();
+        if (!root) throw new Error('Missing host SDK package directory');
+        load = (await import(pathToFileURL(resolve(root, 'dist/extensions/mcp/config.js')).href)).loadMcpConfig;
+      }
+      catch { throw new Error('Pi native MCP configuration API is unavailable. Update Pi and pi-task-agents to compatible versions.'); }
     }
-    catch { throw new Error('Pi native MCP configuration API is unavailable. Update Pi and pi-task-agents to compatible versions.'); }
+    if (!load) throw new Error('Pi MCP config loader is unavailable');
+    config = !projectTrusted && await sameFile(resolve(agentDir, 'mcp.json'), resolve(cwd, '.pi/mcp.json'))
+      ? { servers: [], errors: [] } as LoadedMcpConfig : load({ agentDir, cwd, projectTrusted });
   }
-  if (!load) throw new Error('Pi MCP config loader is unavailable');
-  const config = !projectTrusted && await sameFile(resolve(agentDir, 'mcp.json'), resolve(cwd, '.pi/mcp.json'))
-    ? { servers: [], errors: [] } as LoadedMcpConfig : load({ agentDir, cwd, projectTrusted });
   const servers = normalizeSelector(profile.mcpServers);
   const tools = normalizeSelector(profile.tools ?? [])!;
   const explicitMcp = (profile.tools ?? []).some(isSelectorMcp);
@@ -38,7 +40,15 @@ export async function childMcpFactory(sdk: Sdk, profile: AgentProfile, agentDir:
   const constrain = (name: string, value: Registration['config']): Registration['config'] => ({ ...value,
     ...(explicitMcp && ![...tools].some((tool) => tool.startsWith(`${namespace(name)}__`)) ? { enabled: false } : {}),
   });
-  const files = config.servers.filter((entry) => serverAllowed(entry.name)).map((entry) => ({ ...entry, config: constrain(entry.name, entry.config) }));
+  const accepted = [];
+  for (const entry of config.servers) {
+    if (!serverAllowed(entry.name)) continue;
+    if (inherited && entry.scope === 'extension' && !profile.extensionSnapshot?.some(identity => identity === entry.source
+      || /^<inline:\d+>$/.test(entry.source) && identity.startsWith(entry.source + '#factory:'))
+      && !(await Promise.all(extensionFiles.map(file => sameFile(file, resolve(cwd, entry.source))))).some(Boolean)) continue;
+    accepted.push(entry);
+  }
+  const files = accepted.map(entry => ({ ...entry, config: constrain(entry.name, entry.config) }));
   const shadowed = new Set(config.servers.map((entry) => namespace(entry.name)));
   let visible: Registration[] = [];
   const owners = new Map<string, string>();
@@ -46,6 +56,7 @@ export async function childMcpFactory(sdk: Sdk, profile: AgentProfile, agentDir:
   const allowed = childToolPolicy(profile, profile.tools ?? [], undefined, serverFor);
   async function snapshot(pi: ExtensionAPI): Promise<void> {
     visible = [];
+    if (inherited) return;
     for (const entry of pi.getMcpServers()) {
       if (!serverAllowed(entry.name) || shadowed.has(namespace(entry.name))) continue;
       for (const file of extensionFiles) if (await sameFile(file, resolve(cwd, entry.extensionPath))) {

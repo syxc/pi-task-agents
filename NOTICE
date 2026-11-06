@@ -43,3 +43,9 @@ they are not copied into the Pi runtime. Programmatic tool calls map upstream
 PTC to native Pi codemode, not to a separate PTC host. Workspace observations use bounded
 Pi-side metadata snapshots, not the MCode observation database. Child sessions, tools and resources use the
 host Pi SDK. This package does not reproduce the MCode host platform.
+
+sdk-patches/ contains a source patch for @earendil-works/pi-coding-agent 1.5.0
+at earendil-works/pi revision f9a26365568127461c47a07a37dcb42c140a3ac5.
+The patch adds an accepted-resource snapshot interface. It does not install
+or replace the host SDK. The original SDK uses the MIT license, included in
+sdk-patches/LICENSE-PI. Its seven base files match the pinned upstream source.

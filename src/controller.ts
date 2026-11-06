@@ -6,6 +6,7 @@ import { taskCompletionNotice, taskProgress } from './task-presentation.ts';
 import { loadConfig, resolveProfile } from './config.ts';
 import { createPiChildFactory } from './pi-backend.ts';
 import type { PiChildFactoryOptions } from './pi-backend.ts';
+import { captureParentRuntime, type ParentRuntimeAPI } from './parent-runtime.ts';
 import { closeDetachedOwners, forgetOwner, getOwner, retainOwner } from './controller-owners.ts';
 import type { ControllerOwner } from './controller-owners.ts';
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts';
@@ -22,7 +23,7 @@ import type {
 export const RESULT_TYPE = 'pi-task-agents:result';
 
 type ParentAPI = Pick<ExtensionAPI, 'sendMessage' | 'appendEntry' | 'getThinkingLevel'>
-  & Partial<Pick<ExtensionAPI, 'getActiveTools'>>;
+  & Partial<Pick<ExtensionAPI, 'getActiveTools'>> & ParentRuntimeAPI;
 type ConfigLoader = (options: ConfigLoadOptions) => Promise<TaskAgentsConfig>;
 
 export interface TaskControllerOptions {
@@ -114,6 +115,9 @@ export class TaskController {
           createChild: this.makeChildFactory(ctx, () => {
             if (handle.readCodemodeEnabled) handle.codemodeEnabled = handle.readCodemodeEnabled();
             return handle.codemodeEnabled === true;
+          }, () => {
+            if (!handle.hostRuntime) throw new Error('Parent runtime snapshot is not ready');
+            return handle.hostRuntime;
           }) });
         await engine.init();
         if (generation !== this.generation) {
@@ -151,8 +155,9 @@ export class TaskController {
     }
   }
 
-  private makeChildFactory(ctx: ExtensionContext, isCodemodeEnabled: () => boolean): CreateChild {
-    return this.childFactory({ agentDir: this.agentDir,
+  private makeChildFactory(ctx: ExtensionContext, isCodemodeEnabled: () => boolean,
+    getParentRuntime: NonNullable<PiChildFactoryOptions['getParentRuntime']>): CreateChild {
+    return this.childFactory({ agentDir: this.agentDir, getParentRuntime,
       inheritedModel: ctx.model, inheritedThinking: this.pi.getThinkingLevel(),
       inheritedModelRegistry: ctx.modelRegistry, isCodemodeEnabled,
       projectTrusted: ctx.isProjectTrusted?.() === true });
@@ -255,6 +260,11 @@ export class TaskController {
     this.admissions.add(admission);
     const combined = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
     try {
+      const owner = this.owner;
+      const runtime = await captureParentRuntime(this.pi, combined);
+      if (combined.aborted || epoch !== this.cancelEpoch || this.closing || !owner || owner !== this.owner
+        || ctx.sessionManager.getSessionId() !== this.parentId) throw canceled();
+      owner.hostRuntime = runtime;
       const result = await operation(engine, combined);
       if (!combined.aborted && epoch === this.cancelEpoch && result.status !== 'canceled') {
         this.resume();

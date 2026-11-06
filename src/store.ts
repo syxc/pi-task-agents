@@ -30,7 +30,7 @@ function profile(value: unknown): value is AgentProfile {
     && (value.thinking === undefined || thinking(value.thinking))
     && (value.effort === undefined || thinking(value.effort)) && typeof value.instructions === 'string'
     && strings(value.tools)
-    && ['extensions', 'skills', 'skillSnapshot', 'nativeToolSnapshot', 'toolInventory', 'mcpServers', 'disallowedTools']
+    && ['extensions', 'skills', 'skillSnapshot', 'extensionSnapshot', 'nativeToolSnapshot', 'toolInventory', 'mcpServers', 'disallowedTools']
       .every((key) => value[key] === undefined || strings(value[key]))
     && (value.mcp === undefined || typeof value.mcp === 'boolean') && typeof value.timeoutMs === 'number';
 }

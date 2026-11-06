@@ -77,7 +77,7 @@ test('upstream monitoring covers core task, role, model and child-surface contra
   const paths = new Set(watches.map(entry => entry.source));
   assert.equal(paths.size, watches.length);
   for (const suffix of ['desktop/builtin-defs.ts', 'desktop/local-task-control.ts',
-    'api/local-task-append-lifecycle.ts', 'api/injected-conversation-task-turn.ts', 'background-task/conversation-delivery.ts', 'turns/file-changes.ts',
+    'api/local-task-append-lifecycle.ts', 'api/injected-conversation-task-turn.ts', 'background-task/conversation-delivery.ts', 'background-task/subagent-task-row.ts', 'turns/file-changes.ts',
     'session/task-agent-binding-capture.ts', 'catalog/agent-model-selection.ts',
     'assembly/local-turn-tool-catalog.ts', 'builtin/catalog.ts', 'assets/agents/builtin-agents.json',
     'assets/agents/_v2/verifier.md.hbs', 'assets/agents/_default/prompt-session-branch.md.hbs',

@@ -1,0 +1,272 @@
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index dbe36c3..8c3e1a9 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -3503,6 +3503,19 @@ export class AgentSession {
+ 				getActiveTools: () => this.getActiveToolNames(),
+ 				getAllTools: () => this.getAllTools(),
+ 				getSettings: () => this.settingsManager.getSettings(),
++				getResources: async () => {
++					const mcp = await runner.getMcpResourceSnapshot();
++					return {
++						extensions: this._resourceLoader.getExtensions().extensions.map(
++							({ path, resolvedPath, sourceInfo, hidden, replaceable, factory, factoryId, handlers }) => ({
++								path, resolvedPath, sourceInfo: { ...sourceInfo }, hidden, replaceable, factory, factoryId,
++								mcpConnector: handlers.has("resources_snapshot"),
++							}),
++						),
++						skills: this._resourceLoader.getSkills().skills.map((skill) => ({ ...skill, sourceInfo: { ...skill.sourceInfo } })),
++						mcp,
++					};
++				},
+ 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
+ 				refreshTools: () => this._refreshToolRegistry(),
+ 				getCommands,
+diff --git a/packages/coding-agent/src/core/extensions/index.ts b/packages/coding-agent/src/core/extensions/index.ts
+index 99c0044..75df5a4 100644
+--- a/packages/coding-agent/src/core/extensions/index.ts
++++ b/packages/coding-agent/src/core/extensions/index.ts
+@@ -148,6 +148,9 @@ export type {
+ 	// Events - Resources
+ 	ResourcesDiscoverEvent,
+ 	ResourcesDiscoverResult,
++	ResourcesSnapshotEvent,
++	ResourcesSnapshotResult,
++	ResourceSnapshot,
+ 	SendMessageHandler,
+ 	SendUserMessageHandler,
+ 	SessionBeforeCompactEvent,
+diff --git a/packages/coding-agent/src/core/extensions/loader.ts b/packages/coding-agent/src/core/extensions/loader.ts
+index ff9f127..db530f3 100644
+--- a/packages/coding-agent/src/core/extensions/loader.ts
++++ b/packages/coding-agent/src/core/extensions/loader.ts
+@@ -3,6 +3,7 @@
+  *
+  */
+ 
++import { randomUUID } from "node:crypto";
+ import * as fs from "node:fs";
+ import { createRequire } from "node:module";
+ import * as path from "node:path";
+@@ -37,6 +38,7 @@ import type {
+ } from "./types.ts";
+ 
+ const require = createRequire(import.meta.url);
++const factoryIdentities = new WeakMap<ExtensionFactory, string>();
+ 
+ const isNodeSeaBinary =
+ 	("sea" in process.features && process.features.sea === true) ||
+@@ -180,6 +182,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
+ 		getActiveTools: notInitialized,
+ 		getAllTools: notInitialized,
+ 		getSettings: notInitialized,
++		getResources: notInitialized,
+ 		setActiveTools: notInitialized,
+ 		// registerTool() is valid during extension load; refresh is only needed post-bind.
+ 		refreshTools: () => {},
+@@ -432,6 +435,13 @@ function createExtensionAPI(
+ 			return runtime.getSettings();
+ 		},
+ 
++		async getResources() {
++			assertActive();
++			const snapshot = await runtime.getResources();
++			assertActive();
++			return snapshot;
++		},
++
+ 		setActiveTools(toolNames: string[]): void {
+ 			assertActive();
+ 			runtime.setActiveTools(toolNames);
+@@ -671,7 +681,15 @@ export async function loadExtensionFromFactory(
+ 	extensionPath = "<inline>",
+ ): Promise<Extension> {
+ 	const resolvedCwd = resolvePath(cwd);
+-	return initializeExtension(factory, extensionPath, extensionPath, resolvedCwd, eventBus, runtime);
++	const extension = await initializeExtension(factory, extensionPath, extensionPath, resolvedCwd, eventBus, runtime);
++	extension.factory = factory;
++	let identity = factoryIdentities.get(factory);
++	if (!identity) {
++		identity = randomUUID();
++		factoryIdentities.set(factory, identity);
++	}
++	extension.factoryId = identity;
++	return extension;
+ }
+ 
+ /**
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index 77712e6..e5e55ef 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -76,6 +76,8 @@ import type {
+ 	ResolvedCommand,
+ 	ResourcesDiscoverEvent,
+ 	ResourcesDiscoverResult,
++	ResourcesSnapshotEvent,
++	ResourcesSnapshotResult,
+ 	SessionBeforeCompactResult,
+ 	SessionBeforeForkResult,
+ 	SessionBeforeSwitchResult,
+@@ -194,6 +196,7 @@ type RunnerEmitEvent = Exclude<
+ 	| BeforeAgentStartEvent
+ 	| MessageEndEvent
+ 	| ResourcesDiscoverEvent
++	| ResourcesSnapshotEvent
+ 	| InputEvent
+ 	| TurnEndEvent
+ 	| AgentBeforeSettleEvent
+@@ -435,6 +438,7 @@ export class ExtensionRunner {
+ 		this.runtime.getActiveTools = actions.getActiveTools;
+ 		this.runtime.getAllTools = actions.getAllTools;
+ 		this.runtime.getSettings = actions.getSettings;
++		this.runtime.getResources = actions.getResources;
+ 		this.runtime.setActiveTools = actions.setActiveTools;
+ 		this.runtime.refreshTools = actions.refreshTools;
+ 		this.runtime.getCommands = actions.getCommands;
+@@ -1476,6 +1480,20 @@ export class ExtensionRunner {
+ 		return { messages, systemPromptOptions: currentOptions };
+ 	}
+ 
++	async getMcpResourceSnapshot(): Promise<ResourcesSnapshotResult["mcp"] | null> {
++		const connectors = this.extensions.filter((extension) => extension.handlers.has("resources_snapshot"));
++		if (connectors.length === 0) {
++			if (this.hasHandlers("mcp_servers_change")) throw new Error("MCP connector does not provide a resource snapshot");
++			return null;
++		}
++		if (connectors.length !== 1) throw new Error("MCP resource snapshot requires one connector");
++		const handlers = connectors[0].handlers.get("resources_snapshot");
++		if (handlers?.length !== 1) throw new Error("MCP connector does not provide a resource snapshot");
++		const result = (await handlers[0]({ type: "resources_snapshot" }, this.createContext())) as ResourcesSnapshotResult;
++		if (!result?.mcp || !Array.isArray(result.mcp.servers)) throw new Error("Invalid MCP resource snapshot");
++		return structuredClone(result.mcp);
++	}
++
+ 	async emitResourcesDiscover(
+ 		cwd: string,
+ 		reason: ResourcesDiscoverEvent["reason"],
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 098f7fb..8f93012 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -58,6 +58,7 @@ import type {
+ } from "@earendil-works/pi-tui";
+ import type { Static, TSchema } from "typebox";
+ import type { Theme } from "../../modes/interactive/theme/theme.ts";
++import type { LoadedMcpConfig } from "../../extensions/mcp/config.ts";
+ import type { BashResult } from "../bash-executor.ts";
+ import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
+ import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+@@ -80,6 +81,7 @@ import type {
+ 	SessionManager,
+ } from "../session-manager.ts";
+ import type { Settings } from "../settings-manager.ts";
++import type { Skill } from "../skills.ts";
+ import type { SlashCommandInfo } from "../slash-commands.ts";
+ import type { SourceInfo } from "../source-info.ts";
+ import type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
+@@ -755,6 +757,23 @@ export interface ResourcesDiscoverResult {
+ 	themePaths?: string[];
+ }
+ 
++/** A read-only request to the active MCP connector; it must not start I/O. */
++export interface ResourcesSnapshotEvent {
++	type: "resources_snapshot";
++}
++
++export interface ResourcesSnapshotResult {
++	mcp: LoadedMcpConfig;
++}
++
++/** Current accepted resources, not a fresh discovery from configuration files. */
++export interface ResourceSnapshot {
++	extensions: Array<Pick<Extension, "path" | "resolvedPath" | "sourceInfo" | "hidden" | "replaceable" | "factory" | "factoryId"> & { mcpConnector: boolean }>;
++	skills: Skill[];
++	/** Null when no MCP connector is loaded. Config may contain secrets; do not log or persist it. */
++	mcp: LoadedMcpConfig | null;
++}
++
+ /**
+  * Fired when an extension registers or unregisters an MCP server after the extensions are bound
+  * (see {@link ExtensionAPI.registerMcpServer}). Servers registered while extensions load are read
+@@ -1425,6 +1444,7 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
+ export type ExtensionEvent =
+ 	| ProjectTrustEvent
+ 	| ResourcesDiscoverEvent
++	| ResourcesSnapshotEvent
+ 	| McpServersChangeEvent
+ 	| SessionEvent
+ 	| ContextEvent
+@@ -1623,6 +1643,7 @@ export interface ExtensionAPI {
+ 		event: "resources_discover",
+ 		handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>,
+ 	): () => void;
++	on(event: "resources_snapshot", handler: ExtensionHandler<ResourcesSnapshotEvent, ResourcesSnapshotResult>): () => void;
+ 	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): () => void;
+ 	on(event: "session_info_changed", handler: ExtensionHandler<SessionInfoChangedEvent>): () => void;
+ 	on(
+@@ -1794,6 +1815,8 @@ export interface ExtensionAPI {
+ 
+ 	/** Get a copy of the effective settings (global and project settings merged, with overrides). */
+ 	getSettings(): Settings;
++	/** Snapshot accepted resources without discovery, connections, or model calls. Factory references stay in memory. */
++	getResources(): Promise<ResourceSnapshot>;
+ 
+ 	/**
+ 	 * Set the active tools by name. Unknown and `hidden` tools are ignored. Tools with `codemode` or
+@@ -2156,6 +2179,7 @@ export type ToolInfo = Pick<
+ export type GetAllToolsHandler = () => ToolInfo[];
+ 
+ export type GetSettingsHandler = () => Settings;
++export type GetResourcesHandler = () => Promise<ResourceSnapshot>;
+ 
+ export type GetCommandsHandler = () => SlashCommandInfo[];
+ 
+@@ -2220,6 +2244,7 @@ export interface ExtensionActions {
+ 	getActiveTools: GetActiveToolsHandler;
+ 	getAllTools: GetAllToolsHandler;
+ 	getSettings: GetSettingsHandler;
++	getResources: GetResourcesHandler;
+ 	setActiveTools: SetActiveToolsHandler;
+ 	refreshTools: RefreshToolsHandler;
+ 	getCommands: GetCommandsHandler;
+@@ -2290,6 +2315,10 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
+ 
+ /** Loaded extension with all registered items. */
+ export interface Extension {
++	/** Original inline/builtin factory, for isolated resource inheritance. Never serialize this reference. */
++	factory?: ExtensionFactory;
++	/** Process-local identity; an anonymous factory ordinal is not a persistent owner. */
++	factoryId?: string;
+ 	path: string;
+ 	resolvedPath: string;
+ 	hidden?: boolean;
+diff --git a/packages/coding-agent/src/extensions/mcp/index.ts b/packages/coding-agent/src/extensions/mcp/index.ts
+index 8a97d7f..794c6b4 100644
+--- a/packages/coding-agent/src/extensions/mcp/index.ts
++++ b/packages/coding-agent/src/extensions/mcp/index.ts
+@@ -287,6 +287,10 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
+ 		/** Registered servers that `mcp.json` overrides, shown in `/mcp`. */
+ 		let overridden: string[] = [];
+ 		let autoEnableCodemode = true;
++		pi.on("resources_snapshot", () => ({ mcp: {
++			servers: servers.map(({ entry }) => structuredClone(entry)),
++			errors: [...configErrors], autoEnableCodemode,
++		} }));
+ 		/** Whether the "codemode tools unreachable" warning was shown since the session started. */
+ 		let warnedUnreachable = false;
+ 		let pending: Promise<unknown> | undefined;
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 7e25c2c..be15fee 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -149,6 +149,9 @@ export type {
+ 	ResolvedCommand,
+ 	ResourcesDiscoverEvent,
+ 	ResourcesDiscoverResult,
++	ResourcesSnapshotEvent,
++	ResourcesSnapshotResult,
++	ResourceSnapshot,
+ 	SessionBeforeCompactEvent,
+ 	SessionBeforeCompactResult,
+ 	SessionBeforeForkEvent,

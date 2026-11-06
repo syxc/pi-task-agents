@@ -94,17 +94,22 @@ test('Pi loads the plugin and child MCP with host-provided peers and no package 
     getRegisteredProviderIds: () => [], getRegisteredProviderConfig: () => undefined, getRegisteredNativeProvider: () => undefined,
     resolveModel: async () => ({ model, thinkingLevel: 'off' }),
     streamSimple(_model: unknown, context: unknown) {
-      const message = ++calls === 1 ? answer('', { stopReason: 'toolUse', content: [
+      calls++;
+      const replied = (context as any).messages.some(message => message.role === 'toolResult' && message.toolName === 'mcp__owned__echo');
+      const message = !replied ? answer('', { stopReason: 'toolUse', content: [
         { type: 'toolCall', id: 'host-peer', name: 'mcp__owned__echo', arguments: { value: 'host-peer' } },
       ] }) : answer('HOST_PEER_READY');
-      if (calls === 2) assert.match(JSON.stringify(context), /OWNED_MCP_ECHO:host-peer:1:host-peer/);
+      if (replied) assert.match(JSON.stringify(context), /OWNED_MCP_ECHO:host-peer:\d+:host-peer/);
       return { async *[Symbol.asyncIterator]() { yield { type: 'done', reason: message.stopReason, message }; }, result: async () => message };
     },
   };
   t.mock.method(sdk.ModelRuntime, 'create', async () => { runtimeCreations++; return runtime as any; });
   const settings = sdk.SettingsManager.inMemory({ packages: [], skills: [], extensions: [entry], cacheWarming: 'off' }, { projectTrusted: false });
+  const { loadMcpConfig } = await import(pathToFileURL(join(sdk.getPackageDir(), 'dist/extensions/mcp/config.js')).href);
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
-    noContextFiles: true, noPromptTemplates: true, noThemes: true });
+    noContextFiles: true, noPromptTemplates: true, noThemes: true,
+    extensionFactories: [sdk.createMcpExtension({ startupWaitMs: 5000, logPath: join(root, 'parent-mcp.log'),
+      loadConfig: () => loadMcpConfig({ cwd, agentDir, projectTrusted: false }) })] });
   let parent: sdk.AgentSession | undefined;
   const errors: unknown[] = [];
   try {
@@ -114,15 +119,17 @@ test('Pi loads the plugin and child MCP with host-provided peers and no package 
       model: model as any, thinkingLevel: 'off', settingsManager: settings,
       sessionManager: sdk.SessionManager.create(cwd, join(root, 'parent-history')) }));
     await parent.bindExtensions({ mode: 'json', onError: error => errors.push(error), abortHandler() {}, shutdownHandler() {} });
+    await parent.prompt('Call only the owned local MCP fixture.');
+    assert.equal(calls, 2, 'The actual parent connector must work before testing inheritance');
     const task = parent.agent.state.tools.find(tool => tool.name === 'task');
     assert.ok(task, 'Native extension loading must register the public Task entry');
     const result = await task.execute('owned-host-peer', { agent_name: 'worker', description: 'Owned host-peer probe', prompt: 'Use the owned local MCP fixture' });
     const details = result.details as Record<string, any>;
     assert.equal(details.status, 'succeeded', JSON.stringify(result.content));
     assert.equal(details.final_text, 'HOST_PEER_READY');
-    assert.equal(calls, 2); assert.ok(runtimeCreations > 0, 'Child must use the default SDK factory through host module mapping');
+    assert.equal(calls, 4); assert.ok(runtimeCreations > 0, 'Child must use the default SDK factory through host module mapping');
     const events = (await readFile(audit, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    assert.equal(events.filter(event => event.method === 'tools/call').length, 1);
+    assert.equal(events.filter(event => event.method === 'tools/call').length, 2);
     assert.deepEqual(errors, []);
   } finally {
     try { await parent?.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); await parent?.dispose(); }

@@ -61,7 +61,8 @@
 | 信息不足向父会话报告 blocker，Memory 写入遵守所有权 | `V2/assets/agents/_default/prompt-session-branch.md.hbs` | 所有角色共用的 SDK 附加指令 | Pi 适配；`child-contract.test.ts` 检查真实模型请求中的共享指令；没有 child-owned Memory 时将持久结论交父会话处理，不另建 Memory 宿主 |
 | Task 显式模型/思考优先，其次角色配置、父有效选择 | `V2/src/application/session/task-agent-binding-capture.ts` | `config.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；使用 Pi 的 provider/id、thinking 和原生 registry，不复刻 MCode 模型组管理器；见配置和 SDK 选模回归 |
 | 换模型不继承不兼容旧参数，既有子会话不随父切换漂移 | `V2/src/service/model-system/catalog/agent-model-selection.ts` | `resolveProfile`、冻结 profile 与 onProfileResolved | 对应设计；`config.test.ts`、`pi-backend.test.ts`、`engine.test.ts` |
-| Skills、扩展、MCP 按允许范围加载并保留权限上界 | binding capture、最终工具 surface | `resource-*.ts`、`pi-backend.ts` | Pi 适配；`resource-inheritance.test.ts` 通过真实 SDK 主会话及四角色执行受控 Skill、扩展与 stdio MCP；关闭、trust 和快照不扩大 |
+| Skills、扩展、MCP 按允许范围加载并保留权限上界 | binding capture、最终工具 surface | `parent-runtime.ts`、`controller.ts`、`resource-*.ts`、`pi-backend.ts` | 配套 SDK 接口下对应实现；`runtime-inheritance.test.ts` 经过默认控制器验证父关闭、运行态 Skill/MCP、纯 hook、新 API、角色限制、无父历史及 reload 恢复；`parent-runtime.test.ts` 验证身份上界、trust 和取消。既有四角色资源回归保留；原版 SDK 1.5.0 没有该接口，宿主接入状态见下文 |
+| 子执行保留必要父原生 Shell 设置 | Pi 宿主执行上下文 | `parent-runtime.ts`、`pi-backend.ts` | 只继承 `shellPath`/`shellCommandPrefix`；`runtime-inheritance.test.ts` 比较实际父执行、子前台 Bash、受管命令和 native codemode，不以手工注入 child SettingsManager 代替默认链验证 |
 | 原生工具 ceiling 与 Plugin/MCP 来源权限分开 | `V2/.../local-turn-tool-catalog.ts` | `resource-selection.ts`、`resource-tool-inventory.ts` | 对应设计；角色 ceiling、MCP deny、发现与 codemode 回归；外部工具不构成只读沙箱 |
 | codemode 总开关由父 Pi 控制，不由角色或 MCP 另行开启 | Pi 原生 active 工具状态 | `controller.ts`、`controller-owners.ts`、`pi-backend.ts` | 对应实现；`codemode-switch.test.ts`、`controller.test.ts` 和真实父 SDK 四角色资源继承回归；无父状态默认关闭，无新增用户配置开关 |
 | PTC 类程序化工具调用、并行组合及结果整理 | `packages/agent-core/src/tools/ptc.ts`、`V2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs` | Pi 原生 `codemode` | Pi 适配，不是能力排除；`pi-backend-codemode.test.ts` 覆盖四角色原生/扩展组合、显式关闭 MCP、权限 hooks 和已保存上界；受控 MCP 调用另见 `resource-inheritance.test.ts` |
@@ -69,9 +70,10 @@
 
 ## 适配限制与验收要求
 
+- C2 的默认运行态继承依赖配套的 SDK 资源快照接口，原版 SDK 1.5.0 不提供。源码补丁和隔离原生创建链已有受控验证，缺少接口时明确拒绝准入；这不是当前已安装 CLI 已完成接入的证明。SDK bundle 的隔离验证、用户安装及真实服务证据分开记录，见 [SDK 资源快照](pi-sdk-resource-snapshot.md)。
 - C5/C6 的命令运行时已接入，受控验证覆盖范围、关闭和资源故障路径；接缝探针不能代替生产链验收。Engine 在原生命令启动前持久化清理所有权；只有当前 owner 的清理证明或成功处置才能解除占用。崩溃后的未确认所有权进入隔离，不重放执行。
 - C7 的目标观察已接入各适用角色，并验证受管命令的已知目标和停止后的部分写入。仍须参加最终冻结验收；元数据变化不等于内容差异，报告不归因并发写入。
-- C8 当前配置为定期变更检查，更新仍需契约审查、适配和回归。`LR/turns/file-changes.ts` 已纳入监测，抽取的目标函数由固定原文哈希及函数体一致性测试保护，函数体仅适配字面路径空格及未解析的 Shell 父目录遍历；检查通过仍不代表所有核心行为都已同步。
+- C8 当前配置为定期变更检查，更新仍需契约审查、适配和回归。`LR/turns/file-changes.ts` 和生成 queued 行及 owner/Turn/执行模式事实的 `LR/background-task/subagent-task-row.ts` 已纳入监测，抽取的目标函数由固定原文哈希及函数体一致性测试保护，函数体仅适配字面路径空格及未解析的 Shell 父目录遍历；检查通过仍不代表所有核心行为都已同步。
 - C9 的最终验收须在相关生产链补齐后冻结源码并执行。既有定向测试或早期完整门禁只覆盖各自快照，不代表当前全部需求已完成。
 
 ## 实现边界
@@ -105,7 +107,7 @@ MCode PTC 和 Pi codemode 都让模型用程序组合多个工具调用、并行
 
 ## 持续同步
 
-保留 8 个上游任务领域模块，另复用 2 个 child-Bash 生命周期/等待模块，由 Pi 原生命令适配器接入执行与同逻辑任务结果回收。这 10 个文件均有原始/适配哈希和可逆转换核验；另监测 42 个核心参考文件，覆盖公开工具定义、准入/续接、停止/终态/恢复、角色定义及模板、模型装配、实际 task-child 工具 surface、PTC 公共契约、文件观察生产者和许可。文件目标提取仅复用纯函数，以固定原文和函数体一致性测试约束本地差异；除 Pi 品牌路径外，移除路径裁剪以保留 Shell 字面空格，并将可能跨符号目录的父目录遍历标为不确定。原生 write/edit 的别名按 Pi 路径规则单独解析，不引入 diff/数据库宿主。参考文件只用于变化报警，不打包成另一套宿主实现。
+保留 8 个上游任务领域模块，另复用 2 个 child-Bash 生命周期/等待模块，由 Pi 原生命令适配器接入执行与同逻辑任务结果回收。这 10 个文件均有原始/适配哈希和可逆转换核验；另监测 43 个核心参考文件，覆盖公开工具定义、准入/续接、停止/终态/恢复、角色定义及模板、模型装配、实际 task-child 工具 surface、PTC 公共契约、文件观察生产者和许可。文件目标提取仅复用纯函数，以固定原文和函数体一致性测试约束本地差异；除 Pi 品牌路径外，移除路径裁剪以保留 Shell 字面空格，并将可能跨符号目录的父目录遍历标为不确定。原生 write/edit 的别名按 Pi 路径规则单独解析，不引入 diff/数据库宿主。参考文件只用于变化报警，不打包成另一套宿主实现。
 
 ```sh
 npm run upstream:verify

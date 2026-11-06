@@ -32,6 +32,7 @@ export const watches = [
   'packages/local-runtime/src/api/local-task-tool-policy.ts',
   'packages/local-runtime/src/api/injected-conversation-task-turn.ts',
   'packages/local-runtime/src/background-task/runner.ts',
+  'packages/local-runtime/src/background-task/subagent-task-row.ts',
   'packages/local-runtime/src/background-task/terminal.ts',
   'packages/local-runtime/src/background-task/task-stop.ts',
   'packages/local-runtime/src/background-task/startup-recovery.ts',

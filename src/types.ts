@@ -21,6 +21,8 @@ export interface AgentProfile {
   readonly skills?: readonly string[];
   /** Internal creation-time Skill names, intersected with current trusted discovery on restore. */
   readonly skillSnapshot?: readonly string[];
+  /** Accepted extension identities only; never persisted executable factories. */
+  readonly extensionSnapshot?: readonly string[];
   /** Legacy switch: false disables MCP; omission inherits trusted host servers. */
   readonly mcp?: boolean;
   readonly mcpServers?: readonly string[];

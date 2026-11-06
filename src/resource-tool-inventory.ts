@@ -14,7 +14,7 @@ export function filterConfiguredToolDefinitions(base: ReturnType<ResourceLoader[
   return base;
 }
 
-/** Only accepted file extensions may add tools beyond the native selection. */
+/** Only accepted extension sources may add tools beyond the native selection. */
 export function pluginToolNames(loader: ResourceLoader, paths: readonly string[]): string[] {
   return loader.getExtensions().extensions.filter((entry) => paths.includes(entry.resolvedPath))
     .flatMap((entry) => [...entry.tools.keys()]);

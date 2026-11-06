@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TaskController, RESULT_TYPE } from '../src/controller.ts';
 
-function fixture(entries = []) {
+const runtimeAPI = { getAllTools: () => [], getSettings: () => ({}),
+  getResources: async () => ({ extensions: [], skills: [], mcp: null }) };
+
+function fixture(entries = [], roles = {}) {
   const sent = [];
   const engines = [];
   const factories = [];
@@ -16,12 +19,12 @@ function fixture(entries = []) {
     async output(id) { return { ...this.tasks.find((task) => task.task_id === id), output: 'child report' }; }
     async stop(id) { this.tasks.find((task) => task.task_id === id).status = 'canceled'; }
   }
-  const pi = { sendMessage: (...args) => sent.push(args), getThinkingLevel: () => 'high',
+  const pi = { ...runtimeAPI, sendMessage: (...args) => sent.push(args), getThinkingLevel: () => 'high',
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
   const ctx = { cwd: '/project', hasUI: false, isProjectTrusted: () => false,
     sessionManager: { getSessionId: () => 'parent-a', getEntries: () => entries } };
   const controller = new TaskController(pi, { agentDir: '/agent', Engine,
-    configLoader: async () => ({ maxConcurrency: 4, roles: {}, diagnostics: [] }),
+    configLoader: async () => ({ maxConcurrency: 4, roles, diagnostics: [] }),
     childFactory: (options) => { factories.push(options); return () => {}; } });
   return { controller, ctx, engines, sent, entries, pi, factories };
 }
@@ -52,6 +55,32 @@ test('codemode authority follows the attached native parent and is not captured 
     await replacement?.shutdown();
     await f.controller.shutdown();
   }
+});
+
+test('a canceled snapshot cannot overwrite a reattached owners current approval', async () => {
+  const f = fixture([], { worker: { name: 'worker', model: 'fake/model', instructions: '', tools: ['read'],
+    extensions: [], skills: [], mcp: false, timeoutMs: 0 } });
+  let release, entered, replacement;
+  const reading = new Promise(resolve => { entered = resolve; });
+  f.pi.getResources = () => { entered(); return new Promise(resolve => { release = resolve; }); };
+  try {
+    await f.controller.ensure(f.ctx);
+    const read = f.factories[0].getParentRuntime;
+    const pending = f.controller.start({ agent_name: 'worker', description: 'Canceled capture', prompt: '' }, 'old-capture', undefined, f.ctx);
+    const rejected = assert.rejects(pending, { name: 'AbortError' });
+    await reading; await f.controller.shutdown('new'); await rejected;
+    replacement = new TaskController({ ...f.pi, ...runtimeAPI,
+      getSettings: () => ({ shellCommandPrefix: 'export OWNED=REATTACHED' }) }, {
+      agentDir: '/agent', configLoader: async () => ({ roles: { worker: { name: 'worker', model: 'fake/model',
+        instructions: '', tools: ['read'], extensions: [], skills: [], mcp: false, timeoutMs: 0 } }, diagnostics: [] }),
+      childFactory() { throw new Error('Retained owner must keep its original factory'); },
+    });
+    await replacement.ensure(f.ctx); f.engines[0].start = async () => complete();
+    await replacement.start({ agent_name: 'worker', description: 'Current capture', prompt: '' }, 'new-capture', undefined, f.ctx);
+    const current = read(); assert.equal(current.settings.shellCommandPrefix, 'export OWNED=REATTACHED');
+    release({ extensions: [], skills: [], mcp: null }); await Promise.resolve();
+    assert.equal(read(), current);
+  } finally { release?.({ extensions: [], skills: [], mcp: null }); await replacement?.shutdown(); await f.controller.shutdown(); }
 });
 
 const complete = (id = 't1') => ({ task_id: id, agent_name: 'worker', description: 'bounded work', status: 'succeeded', notification_pending: true });
@@ -319,7 +348,7 @@ test('admission snapshots the current inherited model and thinking, and reload c
   const dispatched = [];
   let factoryCalls = 0;
   const base = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 };
-  const pi = { getThinkingLevel: () => thinking, sendMessage() {}, appendEntry() {} };
+  const pi = { ...runtimeAPI, getThinkingLevel: () => thinking, sendMessage() {}, appendEntry() {} };
   const options = { agentDir,
     configLoader: async () => ({ maxConcurrency: 4, diagnostics: [], roles: {
       worker: base, verifier: { ...base, name: 'verifier', model: 'fake/fixed' },
@@ -415,7 +444,7 @@ test('default controller factory forwards extension provider registry before mod
       getModel: (provider, id) => { calls.push(['lookup', provider, id]); return undefined; },
     };
   });
-  const controller = new TaskController({ getThinkingLevel: () => 'off', sendMessage() {}, appendEntry() {} }, {
+  const controller = new TaskController({ ...runtimeAPI, getThinkingLevel: () => 'off', sendMessage() {}, appendEntry() {} }, {
     agentDir,
     configLoader: async () => ({ roles: { worker: { name: 'worker', instructions: '', tools: ['read'],
       extensions: [], skills: [], mcp: false, timeoutMs: 0 } }, diagnostics: [] }),

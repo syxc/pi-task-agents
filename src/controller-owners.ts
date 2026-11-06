@@ -1,4 +1,5 @@
 import type { CreateChild, TaskAgentsConfig, TaskService } from './types.ts';
+import type { ParentRuntimeSnapshot } from './parent-runtime.ts';
 
 export interface ControllerOwner {
   rootDir: string;
@@ -13,6 +14,7 @@ export interface ControllerOwner {
   onChange?: () => void;
   codemodeEnabled?: boolean;
   readCodemodeEnabled?: () => boolean;
+  hostRuntime?: ParentRuntimeSnapshot;
 }
 
 // Pi reloads extension modules on session replacement. Keep detached engines in
