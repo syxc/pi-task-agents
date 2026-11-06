@@ -1,0 +1,161 @@
+import { lstat, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
+import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
+import type { VerificationReport } from './types.ts';
+import { extractToolWritePaths } from './file-write-targets.ts';
+import { within } from './resource-selection.ts';
+import { buildVerification } from './task-verification.ts';
+import { captureWorkspace, type WorkspaceSnapshot } from './workspace-observation.ts';
+
+interface Run { id: string; signal: AbortSignal }
+interface Observation {
+  id: string;
+  before: Map<string, string>;
+  after: Map<string, string>;
+  calls: Map<string, { paths: string[]; targets: string }>;
+  notes: Set<string>;
+  errors: Set<string>;
+  workspace?: Promise<WorkspaceSnapshot>;
+}
+const readonlyTools = new Set(['read', 'grep', 'find', 'ls']);
+const shells = new Set(['bash', 'shell', 'sh', 'zsh', 'powershell', 'pwsh']);
+const scopeNote = 'Tool-target metadata only; file contents are not read. Excluded, dynamic or incomplete targets are uncertain. Observed changes are not attributed to this child and are not a universal write audit.';
+const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value)
+  ? value as Record<string, unknown> : {};
+
+/** Observe actual native tool calls, including nested codemode calls, without reading file contents. */
+export function createToolFileObservation(options: {
+  cwd: string; stateDirectories: readonly string[]; current(): Run | undefined;
+  isBuiltin(name: string): boolean; isProgramTool(name: string): boolean;
+}) {
+  const root = resolve(options.cwd);
+  const excluded = options.stateDirectories.map(path => resolve(path));
+  let state: Observation | undefined;
+  let canonicalRoot: Promise<string> | undefined;
+  const active = () => state && state.id === options.current()?.id ? state : undefined;
+  async function snapshot(state: Observation, file: string): Promise<string | undefined> {
+    const absolute = resolve(root, file);
+    if (isAbsolute(file) || win32.isAbsolute(file) || !within(root, absolute)
+      || excluded.some(path => within(path, absolute))) {
+      state.notes.add('target_outside_observation_scope'); return;
+    }
+    const parts = relative(root, absolute).split(sep);
+    if (parts.some(part => ['.git', 'node_modules', '.pi'].includes(part)) || parts.length > 64) {
+      state.notes.add('target_excluded_or_too_deep'); return;
+    }
+    const deadline = performance.now() + 1000;
+    try {
+      const canonical = await (canonicalRoot ??= realpath(root));
+      if (await realpath(root) !== canonical) { state.notes.add('workspace_alias_changed'); return; }
+      for (let index = 0; index < parts.length; index++) {
+        if (performance.now() > deadline) { state.errors.add('target_observation_time_limit'); return; }
+        const info = await lstat(join(canonical, ...parts.slice(0, index + 1)), { bigint: true });
+        if (info.isSymbolicLink()) { state.notes.add('target_symlink_not_followed'); return; }
+        if (index < parts.length - 1 && !info.isDirectory()) { state.notes.add('target_parent_not_directory'); return; }
+        if (index === parts.length - 1) return `${info.dev}:${info.ino}:${info.mode}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+      }
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'unavailable';
+      if (code === 'ENOENT') return 'missing';
+      state.errors.add(`target_observation_failed:${code}`);
+    }
+  }
+  async function before(id: string, name: string, input: unknown): Promise<void> {
+    const scope = active();
+    if (!scope || readonlyTools.has(name) && options.isBuiltin(name) || options.isProgramTool(name)) return;
+    const args = object(input);
+    const relevant = ['file_path', 'filePath', 'path', 'patch', 'input', '_raw', 'command', 'cmd', 'script'];
+    if (relevant.some(key => typeof args[key] === 'string' && args[key].length > 200000)) {
+      scope.notes.add('target_input_limit'); return;
+    }
+    const extracted = extractToolWritePaths(root, name, args);
+    if (!options.isBuiltin(name)) scope.notes.add('unrecognized_tool_effects');
+    if (extracted.kind === 'ambiguous' || extracted.kind === 'paths' && extracted.ambiguityReason) scope.notes.add('ambiguous_tool_target');
+    const shellFlow = shells.has(name) && typeof args.command === 'string' && /[;&|\n]/.test(args.command);
+    if (shellFlow) scope.notes.add('ambiguous_shell_control_flow');
+    if (shells.has(name) && (extracted.kind !== 'paths' || extracted.ambiguityReason || shellFlow)) {
+      scope.workspace ??= captureWorkspace(root, options.stateDirectories, options.current()?.signal);
+      await scope.workspace;
+      if (extracted.kind === 'ignore') scope.notes.add('ambiguous_shell_effects');
+    }
+    const paths = extracted.kind === 'paths' ? extracted.paths : [];
+    if (!paths.length && !shells.has(name)) scope.notes.add('unobserved_tool_targets');
+    const selected: string[] = [];
+    for (const file of paths.slice(0, 64)) {
+      if (!scope.before.has(file) && scope.before.size >= 256) { scope.notes.add('target_observation_limit'); break; }
+      const value = await snapshot(scope, file);
+      if (value !== undefined) {
+        if (!scope.before.has(file)) scope.before.set(file, value);
+        selected.push(file);
+      }
+    }
+    if (paths.length > 64) scope.notes.add('target_observation_limit');
+    scope.calls.set(id, { paths: selected, targets: JSON.stringify(extracted) });
+  }
+  async function after(id: string, name: string, input: unknown, failed: boolean): Promise<void> {
+    const scope = active();
+    if (!scope || readonlyTools.has(name) && options.isBuiltin(name) || options.isProgramTool(name)) return;
+    if (!scope.calls.has(id)) {
+      scope.notes.add('tool_before_capture_unavailable');
+      return;
+    }
+    const capture = scope.calls.get(id)!;
+    if (JSON.stringify(extractToolWritePaths(root, name, object(input))) !== capture.targets) scope.notes.add('tool_targets_changed');
+    if (failed) scope.notes.add('failed_tool_capture');
+    for (const file of capture.paths) {
+      const value = await snapshot(scope, file);
+      if (value !== undefined) scope.after.set(file, value);
+    }
+    scope.calls.delete(id);
+  }
+  const extension: ExtensionFactory = pi => {
+    pi.on('tool_call', async event => {
+      try { await before(event.toolCallId, event.toolName, event.input); }
+      catch { active()?.errors.add('tool_before_observation_failed'); }
+      if (options.current()?.signal.aborted) return { block: true, reason: 'Child aborted during target observation' };
+    });
+    pi.on('tool_result', async event => {
+      try { await after(event.toolCallId, event.toolName, event.input, event.isError); }
+      catch { active()?.errors.add('tool_after_observation_failed'); }
+    });
+  };
+  return {
+    extension,
+    begin(id: string, workspace?: WorkspaceSnapshot) {
+      state = { id, before: new Map(), after: new Map(), calls: new Map(), notes: new Set(), errors: new Set(),
+        ...(workspace ? { workspace: Promise.resolve(workspace) } : {}) };
+    },
+    baseline(id: string, workspace: WorkspaceSnapshot) {
+      if (state?.id === id) state.workspace = Promise.resolve(workspace);
+    },
+    async finish(id: string): Promise<VerificationReport> {
+      const scope = state;
+      if (!scope || scope.id !== id) throw new Error('File observation owner mismatch');
+      if (scope.calls.size) {
+        scope.notes.add('unfinished_tool_capture');
+        for (const capture of scope.calls.values()) for (const file of capture.paths) {
+          const value = await snapshot(scope, file);
+          if (value !== undefined) scope.after.set(file, value);
+        }
+      }
+      const changed = new Set([...scope.before].filter(([file, value]) => scope.after.has(file) && scope.after.get(file) !== value).map(([file]) => file));
+      const notes: string[] = [scopeNote];
+      if (scope.workspace) {
+        const before = await scope.workspace;
+        const after = await captureWorkspace(root, options.stateDirectories);
+        const broad = buildVerification(before, after, '', false);
+        for (const file of broad.changedFiles ?? []) changed.add(file);
+        notes.push(...broad.observationNotes);
+        if (broad.fileChange === 'recording_failed') scope.errors.add('workspace_recording_failed');
+      }
+      const paths = [...changed].sort();
+      const report: VerificationReport = {
+        fileChange: scope.errors.size ? 'recording_failed' : scope.notes.size ? 'uncertain' : paths.length ? 'change_observed' : 'no_observed_change',
+        ...(!scope.errors.size || paths.length ? { changedFiles: paths.slice(0, 200) } : {}),
+        observationNotes: [...notes, ...scope.errors, ...scope.notes, ...(paths.length > 200 ? ['changed_files_truncated'] : [])],
+      };
+      if (state === scope) state = undefined;
+      return report;
+    },
+  };
+}

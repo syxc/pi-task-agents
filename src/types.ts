@@ -67,6 +67,8 @@ export interface VerificationReport {
 export interface ChildResult {
   /** Internal producer provenance for terminal formatting; never public Task details. */
   outcome?: ChildOutcome;
+  /** Host-produced proof that this turn has no unconfirmed managed-command resources. */
+  commandCleanupConfirmed?: true;
   eventCount?: number;
   subTurnId?: string;
   resolvedAgentName?: string;
@@ -100,6 +102,8 @@ export interface CreateChildOptions {
   sessionPath: string;
   onOutput?: (chunk: string) => void;
   onActivity?: (activity: string) => void;
+  /** Persist cleanup ownership before a native managed command can start. */
+  onOwnedCommandStarted?: (turnId: string) => Promise<void>;
   /** Persist the resolved profile before returning a child that the engine can dispatch. */
   onProfileResolved?: (profile: AgentProfile) => Promise<void>;
 }
@@ -114,6 +118,9 @@ export interface TaskRecord {
   requested_agent_name?: string;
   session_id: string;
   parent_id: string;
+  /** Direct continuation source; absent in historical records and initial tasks. */
+  parent_task_id?: string;
+  execution_mode?: 'foreground' | 'background' | 'append';
   childSessionPath: string;
   profile: AgentProfile;
   input: TaskInput;
@@ -127,6 +134,8 @@ export interface TaskRecord {
   cursor: number;
   notification_pending: boolean;
   notify_completion: boolean;
+  /** Internal durable ownership marker; never a public completion or cleanup claim. */
+  ownedCommandCleanupPending?: true;
   final_text?: string;
   /** Historical runtime completion facts, never a review verdict or file observation. */
   legacyVerification?: { agentSettled: true; stopReason: string; toolErrors: number };
@@ -139,7 +148,7 @@ export interface TaskRecord {
   stopError?: { code: string; message: string };
 }
 
-export type TaskSummary = Omit<TaskRecord, 'profile' | 'input' | 'output' | 'cursor' | 'legacyVerification'> & {
+export type TaskSummary = Omit<TaskRecord, 'profile' | 'input' | 'output' | 'cursor' | 'legacyVerification' | 'ownedCommandCleanupPending'> & {
   output_bytes: number;
   /** Current runtime activity; never persisted or treated as task output. */
   activity?: string;

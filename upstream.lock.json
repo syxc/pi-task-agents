@@ -75,6 +75,23 @@
       "transforms": [
         "relative-import-js-to-ts-v1"
       ]
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/child-bash-lifecycle.ts",
+      "target": "src/vendor/mcode-child-bash/child-bash-lifecycle.ts",
+      "transforms": [
+        "relative-import-js-to-ts-v1",
+        "child-bash-ports-v1"
+      ],
+      "sha256": "d5bd07d439d1d822e8ecabec1c9ed59620817294a00d1b3ed054b766f2b169d9",
+      "adaptedSha256": "c9b41da8ac57fdd56af6f5a63e689511e8970d6dae4d9bd0bceeb6ac3bed08bd"
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/task-waiter-registry.ts",
+      "target": "src/vendor/mcode-child-bash/task-waiter-registry.ts",
+      "transforms": [],
+      "sha256": "7987b1026c64a4da0dd0d62b82a10561b9ca193c446c8483f7b8aabc3b621ad9",
+      "adaptedSha256": "7987b1026c64a4da0dd0d62b82a10561b9ca193c446c8483f7b8aabc3b621ad9"
     }
   ],
   "watch": [
@@ -97,6 +114,196 @@
       "source": "LICENSE",
       "kind": "host",
       "sha256": "28bb5c2948742f9f8d27ed84882844d09dff07cb5df64f20729875e8582a18ea"
+    },
+    {
+      "source": "packages/agent-tools/src/desktop/builtin-defs.ts",
+      "kind": "host",
+      "sha256": "b4f1cee908643b241f24ba1a478988579552a09402120ef328796646dba7cdc5"
+    },
+    {
+      "source": "packages/agent-tools/src/desktop/local-task.ts",
+      "kind": "host",
+      "sha256": "115f3ccd877dadb68d15e985bd26e8931820ec371842378f32d4122067742be7"
+    },
+    {
+      "source": "packages/agent-tools/src/desktop/local-task-append.ts",
+      "kind": "host",
+      "sha256": "8ba58ed43f94acfeff1283807b891091640fb7ebe83dbe707f902772fc34ed13"
+    },
+    {
+      "source": "packages/agent-tools/src/desktop/local-task-control.ts",
+      "kind": "host",
+      "sha256": "9d164421ecff0c333ccdc9829b5e417b904b00e55d0d64329a7a1f4e07dd0cbc"
+    },
+    {
+      "source": "packages/agent-tools/src/desktop/local-mavis.ts",
+      "kind": "host",
+      "sha256": "8c625124656d739d1c58142bf242f9b7ee2dc506519ed8a50adcb8188fc3c123"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-input.ts",
+      "kind": "host",
+      "sha256": "2aa9219a0359ede8be447de1220c9ff05af1bff948183d4509ec7b081d9750bc"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-runner.ts",
+      "kind": "host",
+      "sha256": "a5f907db44f03c4b3c8db43c25b02b7c7290864272b65a2d799c3481cf626b2e"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-append.ts",
+      "kind": "host",
+      "sha256": "bb9df6dad27f1ca82a09845b1d266dfa180349758f0d2dce5e73da5167010f14"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-append-lifecycle.ts",
+      "kind": "host",
+      "sha256": "ef0c5eccad68fa571e91a0908f06ba296cd8151197f7fd20f199473cbc04f2aa"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-subagents.ts",
+      "kind": "host",
+      "sha256": "52375beb83b92983ae3ea6236337bf1dc36a27fa85acf33029434c50ebe72950"
+    },
+    {
+      "source": "packages/local-runtime/src/api/local-task-tool-policy.ts",
+      "kind": "host",
+      "sha256": "85e79499c5b29e462233d8c5feafd46cfe682b8104cef35bf1beb8d7c257bf9d"
+    },
+    {
+      "source": "packages/local-runtime/src/api/injected-conversation-task-turn.ts",
+      "kind": "host",
+      "sha256": "d6935223591ce6cdcc35920ee64b9785e90fb85feddd1f9324d9fc01ee313857"
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/runner.ts",
+      "kind": "host",
+      "sha256": "450d5b7e88a98c9a70e997ad508385c814b59780e40fc6ea17f11988cf7e6637"
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/terminal.ts",
+      "kind": "host",
+      "sha256": "b6119204d4a78b404014cc15b2bdb2ba3ea63b3eaf106687f4e57a7673eb28b3"
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/task-stop.ts",
+      "kind": "host",
+      "sha256": "57432f4f1e220605efdb4520bcdc2aa706de646a3f22b624f22762c6af7762d5"
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/startup-recovery.ts",
+      "kind": "host",
+      "sha256": "7edd49ce56311f2c6ecebdff58c40d2a108d06f814316a22c5dc318a20f13517"
+    },
+    {
+      "source": "packages/local-runtime/src/background-task/conversation-delivery.ts",
+      "kind": "host",
+      "sha256": "5d6dbb98545c159a0faf99702c58cc4cb11b04bf8f2d62f15facee612e143113"
+    },
+    {
+      "source": "packages/local-runtime/src/turns/file-changes.ts",
+      "kind": "host",
+      "sha256": "074ca72f8552b9efa99e3e30e07cfc044a0278c645aed3532050ad4121dbc153"
+    },
+    {
+      "source": "packages/local-runtime-v2/src/application/session/task-agent-binding-capture.ts",
+      "kind": "host",
+      "sha256": "5b2a34e9f91fb0c682218aa420889165995555cef560feaf841ed6ea8c684d16"
+    },
+    {
+      "source": "packages/local-runtime-v2/src/service/model-system/catalog/agent-model-selection.ts",
+      "kind": "host",
+      "sha256": "0e36d33497ff13eb596a3da4071dcb49505448af365d3ffe461492cf3c60377b"
+    },
+    {
+      "source": "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-tool-catalog.ts",
+      "kind": "host",
+      "sha256": "8e66233500ab7f044e934ff17e445406f068cadced1742c7c275a088af9d787c"
+    },
+    {
+      "source": "packages/local-runtime-v2/src/service/agent/builtin/definitions.ts",
+      "kind": "host",
+      "sha256": "d0dc650884d965566bb258407bfb22f08aa13db5c5fe88546dc09e1fe396c7e7"
+    },
+    {
+      "source": "packages/local-runtime-v2/src/service/agent/builtin/catalog.ts",
+      "kind": "host",
+      "sha256": "ae10512c33663dc2d8b3a283512588294dafe206df8e4330218137ac03efc0ed"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/builtin-agents.json",
+      "kind": "host",
+      "sha256": "95ca8f980f197ab29741f82ca552cf731603dbf52c025639f29e7b9a5178c2c0"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_default/prompt-session-branch.md.hbs",
+      "kind": "host",
+      "sha256": "3a209223c78dd78d4b990cae696233c876e95dea612228cabe063c63e39bd7ad"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_v2/explore.md.hbs",
+      "kind": "host",
+      "sha256": "3ebac9511a28fb3aed623b6f24b8c5e0e8db6c3e84b423a50cfac096a34b7e50"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_v2/worker.md.hbs",
+      "kind": "host",
+      "sha256": "345d79e99d45a56137cef9b7b2c8bc55d92cbb68a379b63797dbc0caf0c4573f"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_v2/verifier.md.hbs",
+      "kind": "host",
+      "sha256": "1b0ba045365065bee849bc07af8ea8d669c556b2f1b29582da2ad605d0b5bb6c"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_v2/coding/SYSTEM.md.hbs",
+      "kind": "host",
+      "sha256": "eafb224e565aa8de828d58e9657143b962672b141facbcb3e656e0d9ae220b28"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_v2/AGENT_CONTEXT.md.hbs",
+      "kind": "host",
+      "sha256": "43afd2e78f870cf7b68f4085af05222b660171df9e6e06d2d3b5ae13c6d795fd"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/explore/agent.md",
+      "kind": "host",
+      "sha256": "afdcaef36843a42e709ad53740f589ba822eb646ed70f8edde15c4dbb60a2278"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/worker/agent.md",
+      "kind": "host",
+      "sha256": "f688b5172b419f83a5a63a2e8e44d81a3c8aa235ea249a8e747e121f052ef21b"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/verifier/agent.md",
+      "kind": "host",
+      "sha256": "fef012a4920cc22ed2532c106eb836b42772db448c659152e45ba5ddb281f1fa"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/explore/system-prompt.md.hbs",
+      "kind": "host",
+      "sha256": "415ef7363aeecfff42dd3ea1b19c0bc6334dfb6f795cff02bcab0fa1fe05eb87"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/worker/system-prompt.md.hbs",
+      "kind": "host",
+      "sha256": "2975f87d7702ff197dc11486ba17aaae52c5a698643041f93b65c2e7f0eb6456"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/verifier/system-prompt.md.hbs",
+      "kind": "host",
+      "sha256": "6da210091255b05ae04d3e207112d30ecd9a83c4a16e7fe0e3b1fca64fc3e304"
+    },
+    {
+      "source": "packages/agent-core/src/tools/ptc.ts",
+      "kind": "host",
+      "sha256": "c1806367cec3cb7bafa34f0661461d44dbf14468d64f620131403448bf18b97d"
+    },
+    {
+      "source": "packages/local-runtime-v2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs",
+      "kind": "host",
+      "sha256": "09d925e5038009431dd4d6d18705db27b752812d1179154ccf111ce4ba9806cd"
     }
   ]
 }

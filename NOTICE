@@ -11,6 +11,19 @@ packages/agent-modules/background-task/src. Relative import suffixes change
 from .js to .ts. The error constructor uses an explicit field instead of a
 parameter property. These changes support native Node type stripping.
 
+src/vendor/mcode-child-bash/ contains child-bash-lifecycle.ts and
+task-waiter-registry.ts from packages/local-runtime/src/background-task.
+The lifecycle imports use child-bash-ports.ts instead of MCode host services.
+The lifecycle and waiter bodies are unchanged. The sync script verifies
+and reverses each import change. Pi adapters use this lifecycle for owned
+native commands and result delivery within the same logical task.
+
+src/file-write-targets.ts reuses the pure target-extraction helpers from
+packages/local-runtime/src/turns/file-changes.ts. Pi supplies its brand path
+and metadata observation port, without the MCode diff or database host.
+test/fixtures/file-observation/upstream-file-changes.ts.txt preserves the
+original source. Its hash and helper bodies are checked by offline tests.
+
 src/task-turn-id.ts preserves the upstream task-turn ID encoding.
 Task admission, continuation, terminal output and tool-result adapters also
 follow the upstream task protocol. The unchanged MIT reference sources in
@@ -20,6 +33,10 @@ task-protocol tests. They are not a bundled host runtime.
 upstream.lock.json records vendor and task-reference hashes. The role prompts
 are maintained for this plugin. src/task-verification.ts adapts the upstream
 verdict parser; test/fixtures/task-verification/upstream.ts.txt preserves the
-reference used by its differential tests. Workspace observations use bounded
+reference used by its differential tests. The unchanged local-task-control.ts
+reference in test/fixtures/task-lineage/ checks public continuation lineage.
+Core role, model and child-surface references are monitored for manual review;
+they are not copied into the Pi runtime. Programmatic tool calls map upstream
+PTC to native Pi codemode, not to a separate PTC host. Workspace observations use bounded
 Pi-side metadata snapshots, not the MCode observation database. Child sessions, tools and resources use the
 host Pi SDK. This package does not reproduce the MCode host platform.

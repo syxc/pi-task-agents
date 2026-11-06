@@ -6,7 +6,7 @@ import { verificationText } from './task-verification.ts';
 import { taskElapsed } from './task-presentation.ts';
 
 function executionMode(task: TaskSummary): string | undefined {
-  return task.notify_completion === undefined ? undefined : task.notify_completion ? 'background' : 'foreground';
+  return task.execution_mode ?? (task.notify_completion === undefined ? undefined : task.notify_completion ? 'background' : 'foreground');
 }
 
 function timestamp(value: string | undefined): number | undefined {
@@ -28,7 +28,7 @@ export function summarizeTask(task: TaskSummary): Record<string, unknown> {
     ...(task.cleanup_pending ? { cleanup_pending: true } : {}),
     ...(task.activity ? { activity: task.activity } : {}),
     ...(task.session_id ? { session_id: task.session_id } : {}),
-    parent_task_id: null,
+    parent_task_id: task.parent_task_id ?? null,
     ...(mode ? { execution_mode: mode } : {}),
     ...(task.description ? { description: task.description } : {}),
     ...(created !== undefined ? { created_at: created } : {}),
@@ -41,6 +41,7 @@ export function renderTask(task: TaskSummary): string {
   const mode = executionMode(task);
   const lineage = [
     ...(task.session_id ? [`session_id=${task.session_id}`] : []),
+    ...(task.parent_task_id ? [`parent_task_id=${task.parent_task_id}`] : []),
     ...(mode ? [`execution_mode=${mode}`] : []),
   ];
   return `- ${task.task_id} [subagent/${task.status}]${task.description ? ` ${task.description}` : ''}` +

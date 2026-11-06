@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { portModules, transformChildBashPorts } from './upstream-ports.mjs';
 
 export const repository = 'MiniMax-AI/minimax-code';
 export const domainRoot = 'packages/agent-modules/background-task/src';
@@ -12,12 +13,50 @@ export const modules = [
   'errors.ts', 'id.ts', 'in-memory-output-store.ts', 'in-memory-store.ts',
   'index.ts', 'manager.ts', 'status.ts', 'types.ts',
 ];
-// Only task-protocol reference fixtures are watched; Pi owns the host runtime.
+// Watch core producers and child contracts for review; never copy the host runtime.
 export const watches = [
   'packages/local-runtime-v2/src/service/turn-system/execution/steering/steer-session.service.ts',
   'packages/local-runtime/src/background-task/turn-id.ts',
   'packages/agent-tools/src/desktop/task-verification.ts',
   'LICENSE',
+  'packages/agent-tools/src/desktop/builtin-defs.ts',
+  'packages/agent-tools/src/desktop/local-task.ts',
+  'packages/agent-tools/src/desktop/local-task-append.ts',
+  'packages/agent-tools/src/desktop/local-task-control.ts',
+  'packages/agent-tools/src/desktop/local-mavis.ts',
+  'packages/local-runtime/src/api/local-task-input.ts',
+  'packages/local-runtime/src/api/local-task-runner.ts',
+  'packages/local-runtime/src/api/local-task-append.ts',
+  'packages/local-runtime/src/api/local-task-append-lifecycle.ts',
+  'packages/local-runtime/src/api/local-task-subagents.ts',
+  'packages/local-runtime/src/api/local-task-tool-policy.ts',
+  'packages/local-runtime/src/api/injected-conversation-task-turn.ts',
+  'packages/local-runtime/src/background-task/runner.ts',
+  'packages/local-runtime/src/background-task/terminal.ts',
+  'packages/local-runtime/src/background-task/task-stop.ts',
+  'packages/local-runtime/src/background-task/startup-recovery.ts',
+  'packages/local-runtime/src/background-task/conversation-delivery.ts',
+  'packages/local-runtime/src/turns/file-changes.ts',
+  'packages/local-runtime-v2/src/application/session/task-agent-binding-capture.ts',
+  'packages/local-runtime-v2/src/service/model-system/catalog/agent-model-selection.ts',
+  'packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-tool-catalog.ts',
+  'packages/local-runtime-v2/src/service/agent/builtin/definitions.ts',
+  'packages/local-runtime-v2/src/service/agent/builtin/catalog.ts',
+  'packages/local-runtime-v2/assets/agents/builtin-agents.json',
+  'packages/local-runtime-v2/assets/agents/_default/prompt-session-branch.md.hbs',
+  'packages/local-runtime-v2/assets/agents/_v2/explore.md.hbs',
+  'packages/local-runtime-v2/assets/agents/_v2/worker.md.hbs',
+  'packages/local-runtime-v2/assets/agents/_v2/verifier.md.hbs',
+  'packages/local-runtime-v2/assets/agents/_v2/coding/SYSTEM.md.hbs',
+  'packages/local-runtime-v2/assets/agents/_v2/AGENT_CONTEXT.md.hbs',
+  'packages/local-runtime-v2/assets/agents/explore/agent.md',
+  'packages/local-runtime-v2/assets/agents/worker/agent.md',
+  'packages/local-runtime-v2/assets/agents/verifier/agent.md',
+  'packages/local-runtime-v2/assets/agents/explore/system-prompt.md.hbs',
+  'packages/local-runtime-v2/assets/agents/worker/system-prompt.md.hbs',
+  'packages/local-runtime-v2/assets/agents/verifier/system-prompt.md.hbs',
+  'packages/agent-core/src/tools/ptc.ts',
+  'packages/local-runtime-v2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs',
 ].map((source) => ({ source, kind: 'host' }));
 const root = fileURLToPath(new URL('../', import.meta.url));
 const commitPattern = /^[0-9a-f]{40}$/;
@@ -167,6 +206,8 @@ export function transform(content, transforms, reverse = false) {
       content = transformImports(content, reverse);
     } else if (id === errorTransform) {
       content = replaceOnce(content, reverse ? errorAfter : errorBefore, reverse ? errorBefore : errorAfter);
+    } else if (id === 'child-bash-ports-v1') {
+      content = transformChildBashPorts(content, reverse);
     } else {
       throw new Error(`Unknown transform: ${id}`);
     }
@@ -178,21 +219,24 @@ function transformsFor(name) {
   return name === 'errors.ts' ? [importTransform, errorTransform] : [importTransform];
 }
 
+function sourceFiles() {
+  return [...modules.map(name => ({ source: `${domainRoot}/${name}`, target: `${vendorRoot}/${name}`,
+    transforms: transformsFor(name) })), ...portModules];
+}
+
 export function makeLock(commit, contents) {
   if (!commitPattern.test(commit)) throw new Error('Expected a full lowercase 40-character commit.');
   return {
     version: 1,
     repository: `https://github.com/${repository}`,
     commit,
-    files: modules.map((name) => {
-      const source = `${domainRoot}/${name}`;
+    files: sourceFiles().map(({ source, target, transforms }) => {
       const content = contents.get(source);
-      const transforms = transformsFor(name);
       const adapted = transform(content, transforms);
       if (transform(adapted, transforms, true) !== content) {
         throw new Error(`Non-reversible transform: ${source}`);
       }
-      return { source, target: `${vendorRoot}/${name}`, sha256: sha256(content), adaptedSha256: sha256(adapted), transforms };
+      return { source, target, sha256: sha256(content), adaptedSha256: sha256(adapted), transforms };
     }),
     watch: watches.map((entry) => ({ ...entry, sha256: sha256(contents.get(entry.source)) })),
   };
@@ -202,15 +246,16 @@ function validateLock(lock) {
   if (lock.version !== 1 || lock.repository !== `https://github.com/${repository}` || !commitPattern.test(lock.commit)) {
     throw new Error('Invalid upstream lock identity or version.');
   }
-  if (lock.files?.length !== modules.length || lock.watch?.length !== watches.length) {
+  const expected = sourceFiles();
+  if (lock.files?.length !== expected.length || lock.watch?.length !== watches.length) {
     throw new Error('Unexpected upstream lock inventory; review the manifest.');
   }
   for (const [i, entry] of lock.files.entries()) {
-    const name = modules[i];
-    if (entry.source !== `${domainRoot}/${name}` || entry.target !== `${vendorRoot}/${name}` ||
+    const spec = expected[i];
+    if (entry.source !== spec.source || entry.target !== spec.target ||
         !hashPattern.test(entry.sha256) || !hashPattern.test(entry.adaptedSha256) ||
-        JSON.stringify(entry.transforms) !== JSON.stringify(transformsFor(name))) {
-      throw new Error(`Invalid module lock entry: ${name}`);
+        JSON.stringify(entry.transforms) !== JSON.stringify(spec.transforms)) {
+      throw new Error(`Invalid module lock entry: ${spec.source}`);
     }
   }
   for (const [i, entry] of lock.watch.entries()) {
@@ -236,9 +281,12 @@ export async function verify(localRoot = root, io = fs, snapshots = new Map()) {
       throw new Error(`Source/transform hash mismatch: ${entry.target}`);
     }
   }
-  const names = await io.readdir(join(localRoot, vendorRoot));
-  const extra = names.filter((name) => !modules.includes(name));
-  if (extra.length) throw new Error(`Unrecorded vendor files: ${extra.join(', ')}`);
+  for (const folder of new Set(lock.files.map(entry => dirname(entry.target)))) {
+    const names = await io.readdir(join(localRoot, folder));
+    const allowed = lock.files.filter(entry => dirname(entry.target) === folder).map(entry => basename(entry.target));
+    const extra = names.filter(name => !allowed.includes(name));
+    if (extra.length) throw new Error(`Unrecorded vendor files: ${folder}/${extra.join(', ')}`);
+  }
   return lock;
 }
 

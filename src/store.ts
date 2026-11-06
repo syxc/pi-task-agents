@@ -55,6 +55,9 @@ function task(value: unknown): value is TaskRecord {
   const optionalStrings = ['started_at', 'finished_at', 'final_text', 'error', 'cancel_reason'];
   return requiredStrings.every((key) => typeof value[key] === 'string')
     && optionalStrings.every((key) => value[key] === undefined || typeof value[key] === 'string')
+    && (value.parent_task_id === undefined || (isFactName(value.parent_task_id) && value.parent_task_id !== value.task_id))
+    && (value.execution_mode === undefined || (typeof value.execution_mode === 'string'
+      && ['foreground', 'background', 'append'].includes(value.execution_mode)))
     && profile(value.profile) && input(value.input)
     && (value.verification === undefined || isVerificationReport(value.verification))
     && (value.legacyVerification === undefined || legacyVerification(value.legacyVerification))
@@ -65,6 +68,7 @@ function task(value: unknown): value is TaskRecord {
     && [...ACTIVE_TASK_STATUSES, ...TERMINAL_TASK_STATUSES].some((status) => status === value.status)
     && typeof value.cursor === 'number' && Number.isSafeInteger(value.cursor) && value.cursor >= 0
     && typeof value.notification_pending === 'boolean' && typeof value.notify_completion === 'boolean'
+    && (value.ownedCommandCleanupPending === undefined || value.ownedCommandCleanupPending === true)
     && (value.mode === undefined || (typeof value.mode === 'string'
       && ['activated', 'steered', 'duplicate'].includes(value.mode)))
     && (value.accepted === undefined || typeof value.accepted === 'boolean')

@@ -25,6 +25,35 @@ function fixture(entries = []) {
     childFactory: (options) => { factories.push(options); return () => {}; } });
   return { controller, ctx, engines, sent, entries, pi, factories };
 }
+test('codemode authority follows the attached native parent and is not captured from a stale owner', async () => {
+  const f = fixture();
+  let active = [];
+  f.pi.getActiveTools = () => active;
+  let replacement;
+  try {
+    await f.controller.ensure(f.ctx);
+    const read = f.factories[0].isCodemodeEnabled;
+    assert.equal(read(), false);
+    active = ['read', 'codemode'];
+    assert.equal(read(), true);
+    active = ['read'];
+    assert.equal(read(), false);
+    active = ['codemode'];
+    await f.controller.shutdown('new');
+    f.pi.getActiveTools = () => { throw new Error('Stale parent API must not be called'); };
+    assert.equal(read(), true, 'Detached background owner retains its last approved state, not another session');
+    replacement = new TaskController({ ...f.pi, getActiveTools: () => [] }, {
+      agentDir: '/agent', configLoader: async () => ({ roles: {}, diagnostics: [] }),
+      childFactory() { throw new Error('The retained SDK factory must not be recreated'); },
+    });
+    await replacement.ensure(f.ctx);
+    assert.equal(read(), false, 'Reattachment installs the current parent reader without losing SDK cache');
+  } finally {
+    await replacement?.shutdown();
+    await f.controller.shutdown();
+  }
+});
+
 const complete = (id = 't1') => ({ task_id: id, agent_name: 'worker', description: 'bounded work', status: 'succeeded', notification_pending: true });
 
 test('completion is sent once and stays pending until the persisted message receipt', async () => {
@@ -35,6 +64,7 @@ test('completion is sent once and stays pending until the persisted message rece
   assert.equal(f.sent.length, 1);
   assert.equal(f.engines[0].tasks[0].notification_pending, true);
   assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' });
+  assert.equal(f.sent[0][0].display, false);
   f.controller.receipt(f.sent[0][0]);
   assert.equal(f.engines[0].tasks[0].notification_pending, true);
   f.entries.push({ type: 'custom_message', ...f.sent[0][0] });
@@ -56,6 +86,43 @@ test('background completion delivers verifier facts without treating a failed ve
     assert.match(f.sent[0][0].content, /model_verdict: fail/);
     assert.match(f.sent[0][0].content, /file_change: no_observed_change/);
     assert.equal(f.sent[0][0].details.status, 'succeeded');
+  } finally { await f.controller.shutdown(); }
+});
+
+test('even a short result uses the same native notice and required-read contract as MCode', async () => {
+  const f = fixture();
+  try {
+    await f.controller.ensure(f.ctx);
+    f.engines[0].output = async () => { throw new Error('A notice must not read the full result'); };
+    const handoff = 'Updated owned.ts. Validation passed. Risk: external integration was not checked.';
+    f.engines[0].tasks.push({ ...complete(), final_text: handoff });
+    await f.controller.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0][0].content.includes(handoff), false);
+    assert.match(f.sent[0][0].content, /Use task_output\(.*before using its findings or reporting them/);
+    assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' });
+    assert.equal(f.engines[0].tasks[0].final_text, handoff);
+  } finally { await f.controller.shutdown(); }
+});
+
+test('automatic completion is a bounded notice, not a full-output read or echoed report', async () => {
+  const f = fixture();
+  try {
+    await f.controller.ensure(f.ctx);
+    f.engines[0].output = async () => { throw new Error('A notice must not read the full result'); };
+    f.engines[0].tasks.push({ ...complete(), agent_name: 'verifier', final_text: 'LARGE_CHILD_REPORT_'.repeat(10000),
+      error: 'Full diagnostics remain available with the result',
+      verification: { modelVerdict: 'fail', fileChange: 'uncertain', changedFiles: ['owned.ts'], observationNotes: ['Detailed evidence'] } });
+    await f.controller.flush();
+    assert.equal(f.sent.length, 1);
+    const notice = f.sent[0][0];
+    assert.ok(notice.content.length < 1200);
+    assert.doesNotMatch(notice.content, /LARGE_CHILD_REPORT_|Detailed evidence/);
+    assert.match(notice.content, /model_verdict: fail/);
+    assert.match(notice.content, /file_change: uncertain/);
+    assert.match(notice.content, /task_output/);
+    assert.deepEqual(notice.details, { task_id: 't1', parent_id: 'parent-a', status: 'succeeded' });
+    assert.equal(f.engines[0].tasks[0].final_text.length, 'LARGE_CHILD_REPORT_'.length * 10000);
   } finally { await f.controller.shutdown(); }
 });
 
@@ -124,20 +191,20 @@ test('dialog defers completion delivery until it closes', async () => {
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 
-test('cancel, session switch and shutdown during output prevent a late wakeup', async () => {
+test('cancel, session switch and shutdown during notification discovery prevent a late wakeup', { timeout: 5000 }, async () => {
   for (const action of ['cancel', 'switch', 'shutdown']) {
     const f = fixture();
     await f.controller.ensure(f.ctx);
     f.engines[0].tasks.push(complete());
-    const entered = deferred(), output = deferred();
-    f.engines[0].output = async () => { entered.resolve(); return output.promise; };
+    const entered = deferred(), discovery = deferred();
+    f.engines[0].pendingNotifications = async () => { entered.resolve(); return discovery.promise; };
     const flush = f.controller.flush();
     await entered.promise;
     let closing;
     if (action === 'cancel') await f.controller.stopAll();
     if (action === 'switch') f.ctx.sessionManager.getSessionId = () => 'parent-b';
     if (action === 'shutdown') closing = f.controller.shutdown();
-    output.resolve({ output: 'late report' });
+    discovery.resolve(f.engines[0].tasks);
     await flush;
     await closing;
     assert.equal(f.sent.length, 0, action);

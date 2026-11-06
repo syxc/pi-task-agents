@@ -7,7 +7,8 @@ const pluginRoot = fileURLToPath(new URL('../', import.meta.url));
 export const mcpResources = ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'];
 // Do not expose parent task controls or another delegation entry point in a child.
 export const recursiveTools = ['task', 'task_append', 'task_send', 'task_query', 'task_output', 'task_stop', 'task_agents', 'subagent'];
-export const taskChildBlockedTools = recursiveTools;
+export const taskChildBlockedTools = [...recursiveTools,
+  'todo', 'todowrite', 'ask_user', 'ask_user_question', 'create_goal', 'get_goal', 'until'];
 export const isRecursive = (name: string): boolean => recursiveTools.includes(name);
 export const normalizedSelectorName = (value: string): string => value.trim().normalize('NFKC').toLocaleLowerCase('en-US');
 export const normalizeSelector = (values: readonly string[] | undefined): ReadonlySet<string> | undefined => values === undefined
@@ -74,7 +75,7 @@ export function matchesTool(selector: string, name: string): boolean {
 
 export function roleAllowsTool(role: string, name: string, _source: 'builtin' | 'configured' = 'builtin'): boolean {
   const normalized = normalizedSelectorName(name);
-  if (isRecursive(normalized)) return false;
+  if (taskChildBlockedTools.includes(normalized)) return false;
   return !['explore', 'verifier'].includes(role) || !['write', 'edit'].includes(normalized);
 }
 
@@ -98,7 +99,8 @@ export function childToolPolicy(profile: AgentProfile, tools: readonly string[],
       return nativeScope || exact.has(normalized);
     }
     if (mcpResources.includes(normalized) && (profile.mcp === false || servers?.size === 0)) return false;
-    const discovery = nativeScope && profile.mcp !== false && servers?.size !== 0 && ['codemode', 'tool_search'].includes(normalized);
+    const discovery = normalized === 'codemode' ? !ceiling || ceiling.has(normalized)
+      : nativeScope && profile.mcp !== false && servers?.size !== 0 && normalized === 'tool_search';
     if (nativeScope && pluginTool || discovery) return true;
     return exact.has(normalized) && (pluginTool || !ceiling || ceiling.has(normalized));
   };

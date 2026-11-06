@@ -27,6 +27,7 @@
     "NOTICE",
     "CHANGELOG.md",
     "examples/",
+    "docs/",
     "test/",
     "scripts/",
     "tsconfig.json",

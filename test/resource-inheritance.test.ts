@@ -82,7 +82,7 @@ test('default controller gives every role the main session Skills, extensions an
     const { loadMcpConfig } = await import(new URL('./extensions/mcp/config.js', import.meta.resolve('@earendil-works/pi-coding-agent')).href);
     const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
       noContextFiles: true, noPromptTemplates: true, noThemes: true,
-      extensionFactories: [sdk.createMcpExtension({ startupWaitMs: 10000,
+      extensionFactories: [sdk.createCodemodeExtension({ mode: 'on', models: false }), sdk.createMcpExtension({ startupWaitMs: 10000,
         loadConfig: () => loadMcpConfig({ cwd, agentDir, projectTrusted: false }), logPath: join(root, 'parent-mcp.log'),
       }), (pi) => {
         controller = registerTaskAgents(pi, { agentDir });
@@ -104,12 +104,16 @@ test('default controller gives every role the main session Skills, extensions an
     assert.deepEqual(completed, ['main']);
     const mainTools = parent.getCallableToolNames();
     for (const name of ['owned_extension', 'mcp__owned__echo', 'mcp__extension_owned__echo']) assert.ok(mainTools.includes(name), `main missing ${name}`);
+    parent.setActiveToolsByName([...parent.getActiveToolNames(), 'codemode']);
+    assert.ok(parent.getActiveToolNames().includes('codemode'));
     for (const name of ['explore', 'worker', 'verifier', 'mavis']) {
       role = name; step = 0;
       const result = await controller.start({ agent_name: name, description: `Inherited resources ${name}`, prompt: 'Use the available owned resources' }, name, undefined, ctx);
       assert.equal(result.status, 'succeeded', `${name}: ${result.error}`);
       assert.equal(result.final_text, `RESOURCES_USED:${name}`);
+      assert.ok(controller.engine.task(result.task_id).profile.nativeToolSnapshot.includes('codemode'), name);
     }
+    parent.setActiveToolsByName(parent.getActiveToolNames().filter(name => name !== 'codemode'));
     assert.deepEqual(completed, ['main', 'explore', 'worker', 'verifier', 'mavis']);
     role = 'agent:disabled'; step = 0;
     const disabled = await controller.start({ agent_name: role, description: 'Explicit resource denial', prompt: 'Check the available tools' }, role, undefined, ctx);
@@ -132,7 +136,7 @@ test('default controller gives every role the main session Skills, extensions an
 });
 
 test('inherited MCP tools also execute through native codemode', { timeout: 15000 }, async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, { isCodemodeEnabled: () => true });
   const audit = join(f.root, 'mcp.jsonl');
   await writeFile(join(f.agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { owned: {
     command: process.execPath, args: [server, audit, 'codemode'], exposure: 'codemode',

@@ -78,11 +78,13 @@ export class SessionSafety {
   confirmDisposed(sessions: Set<string>, tasks: TaskRecord[]): boolean {
     const confirmed = new Set(this.state?.cleanupConfirmed);
     const before = confirmed.size;
-    for (const task of tasks) {
-      if (sessions.has(task.session_id) && task.stopError?.code === cleanupFailed) confirmed.add(task.task_id);
+    let markerCleared = false;
+    for (const task of tasks) if (sessions.has(task.session_id)) {
+      if (task.ownedCommandCleanupPending) { delete task.ownedCommandCleanupPending; markerCleared = true; }
+      if (task.stopError?.code === cleanupFailed) confirmed.add(task.task_id);
     }
     if (this.state && confirmed.size !== before) this.state.cleanupConfirmed = [...confirmed];
     for (const id of sessions) this.unresolved.delete(id);
-    return confirmed.size !== before;
+    return markerCleared || confirmed.size !== before;
   }
 }

@@ -97,6 +97,9 @@ export class TaskEngine {
       }
     }
     this.safety.restore(this.getState());
+    for (const task of this.getState().tasks) if (task.ownedCommandCleanupPending) {
+      this.safety.record(task, new Error('Managed command cleanup was not confirmed before the previous owner exited'), true);
+    }
     try { await this.persist(); } catch (error) { await this.store.close(); throw error; }
     return this;
   }
@@ -128,7 +131,7 @@ export class TaskEngine {
   }
 
   summary(task: TaskRecord): TaskSummary {
-    const { output, cursor, input, profile, legacyVerification, ...result } = task;
+    const { output, cursor, input, profile, legacyVerification, ownedCommandCleanupPending, ...result } = task;
     const runtime = this.runtimes.get(task.task_id);
     return { ...clone(result), ...(task.stopError ? { stopError: clone(this.safety.publicStopError(task)) } : {}),
       output_bytes: Buffer.byteLength(output),
@@ -191,6 +194,8 @@ export class TaskEngine {
     const sessionId = previous?.session_id ?? randomUUID();
     const task: TaskRecord = {
       task_id: id, session_id: sessionId, parent_id: this.parentId, ...admittedFacts(id, input, profile, previous),
+      ...(previous ? { parent_task_id: previous.task_id } : {}),
+      execution_mode: input.run_in_background === true ? (previous ? 'append' : 'background') : 'foreground',
       childSessionPath: previous?.childSessionPath ?? join(this.store.dir, `${sessionId}.jsonl`),
       profile: freeze(clone(profile)), input: clone(input), status: 'queued',
       description: input.description ?? '', agent_name: input.agent_name ?? profile.name,
@@ -276,6 +281,14 @@ export class TaskEngine {
               throw error;
             }
           },
+          onOwnedCommandStarted: async () => {
+            const active = session.active, owner = active && this.runtimes.get(active.task_id);
+            if (this.closed || !active || !owner?.accepting || owner.stopReason || owner.sealed) throw new Error('Command owner is not accepting work');
+            this.assertDispatch();
+            active.ownedCommandCleanupPending = true;
+            try { await this.persist(); }
+            catch (error) { this.storageError = error || new Error('Command ownership persistence failed'); throw error; }
+          },
           onOutput: () => { if (session.active) this.changed(session.active); },
           onActivity: (activity) => {
             const active = session.active;
@@ -308,6 +321,7 @@ export class TaskEngine {
         const prompting = child.prompt(task.input.prompt, { turnId: task.sub_turn_id });
         startedResolve(child);
         const result = await prompting;
+        if (result.commandCleanupConfirmed === true) delete task.ownedCommandCleanupPending;
         recordChildFacts(task, result);
         outcome = runnerOutcome(result);
       } else {
@@ -315,6 +329,8 @@ export class TaskEngine {
       }
     } catch (error) {
       const failure = recordChildFailure(task, error);
+      if (failure.partialResult && typeof failure.partialResult === 'object' && 'commandCleanupConfirmed' in failure.partialResult
+        && failure.partialResult.commandCleanupConfirmed === true) delete task.ownedCommandCleanupPending;
       outcome = exceptionOutcome(task.input.run_in_background === true, error, failure.partialResult,
         runtime.backgroundRunner ? runtime.shutdownReason : undefined);
       if (this.safety.record(task, error) && !runtime.stopReason) runtime.stopStatus = 'failed';
@@ -326,6 +342,10 @@ export class TaskEngine {
       if (runtime.delivery) await runtime.delivery;
       // Seal synchronously before manager completion yields, so cancellation cannot reopen this slot.
       if (runtime.aborting) await runtime.aborting;
+      if (task.ownedCommandCleanupPending) {
+        this.safety.record(task, new Error('Managed command cleanup is unconfirmed'), true);
+        runtime.stopStatus ??= 'failed';
+      }
       runtime.sealed = true;
       session.active = undefined;
       try {

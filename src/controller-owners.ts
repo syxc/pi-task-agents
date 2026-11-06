@@ -11,6 +11,8 @@ export interface ControllerOwner {
   attached?: object;
   notify?: () => void;
   onChange?: () => void;
+  codemodeEnabled?: boolean;
+  readCodemodeEnabled?: () => boolean;
 }
 
 // Pi reloads extension modules on session replacement. Keep detached engines in

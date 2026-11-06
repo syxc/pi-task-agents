@@ -11,7 +11,7 @@ test('default SDK native Bash writes an owned file; facts come from real message
   const f = await fixture(t);
   let resolved!: AgentProfile;
   const child = await f.child({ tools: ['bash'] }, undefined, async (value) => { resolved = value; });
-  assert.deepEqual(f.session().getCallableToolNames(), ['bash']);
+  assert.deepEqual(f.session().getCallableToolNames(), ['bash', 'bash_task']);
   assert.equal(f.options().customTools, undefined);
   f.script((step) => step === 1 ? tool('bash', { command: "printf 'owned bytes' > actual.txt" }) : answer('Finished'));
   const before = f.events();
@@ -23,7 +23,7 @@ test('default SDK native Bash writes an owned file; facts come from real message
   assert.deepEqual(result.usage, { input: 4, output: 6, cacheRead: 8, cacheWrite: 10, totalTokens: 28, cost: 0.02 });
   assert.equal(result.eventCount, f.events() - before);
   assert.equal(resolved.model, 'offline/local');
-  assert.deepEqual(resolved.nativeToolSnapshot, ['bash']);
+  assert.deepEqual(resolved.nativeToolSnapshot, ['bash', 'bash_task']);
   assert.equal(Object.isFrozen(resolved.tools), true);
   assert.equal((await stat(child.sessionPath)).mode & 0o777, 0o600);
   assert.equal((await stat(join(f.root, 'sessions'))).mode & 0o777, 0o700);

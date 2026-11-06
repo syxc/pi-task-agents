@@ -73,10 +73,39 @@ async function fixture() {
   };
 }
 
-test('upstream monitoring stays within task protocol reference fixtures', () => {
-  assert.equal(watches.length, 4);
-  assert.ok(watches.every((entry) => entry.kind === 'host'));
-  assert.equal(watches.some((entry) => /website|ptc|file-changes|web-fetch|mcp|assets\/agents/.test(entry.source)), false);
+test('upstream monitoring covers core task, role, model and child-surface contracts without importing hosts', () => {
+  const paths = new Set(watches.map(entry => entry.source));
+  assert.equal(paths.size, watches.length);
+  for (const suffix of ['desktop/builtin-defs.ts', 'desktop/local-task-control.ts',
+    'api/local-task-append-lifecycle.ts', 'api/injected-conversation-task-turn.ts', 'background-task/conversation-delivery.ts', 'turns/file-changes.ts',
+    'session/task-agent-binding-capture.ts', 'catalog/agent-model-selection.ts',
+    'assembly/local-turn-tool-catalog.ts', 'builtin/catalog.ts', 'assets/agents/builtin-agents.json',
+    'assets/agents/_v2/verifier.md.hbs', 'assets/agents/_default/prompt-session-branch.md.hbs',
+    'agent-core/src/tools/ptc.ts', 'assets/agents/_v2/PTC_TOOL_CALLS.md.hbs']) {
+    assert.ok([...paths].some(path => path.endsWith(suffix)), suffix);
+  }
+  for (const role of ['explore', 'worker', 'verifier']) {
+    assert.ok([...paths].some(path => path.endsWith('/' + role + '/agent.md')), role);
+    assert.ok([...paths].some(path => path.endsWith('/_v2/' + role + '.md.hbs')), role);
+  }
+  assert.ok(watches.every(entry => entry.kind === 'host'));
+  assert.equal(watches.some(entry => /website|web-fetch|\/mcp\//.test(entry.source)), false);
+});
+
+test('each watched core contract blocks unreviewed sync and missing sources cannot be acknowledged away', async () => {
+  const f = await fixture();
+  const before = f.snapshot();
+  for (const entry of watches) {
+    const original = f.remote.get(entry.source)!;
+    f.remote.set(entry.source, original + '\nchanged contract');
+    assert.equal(await main(['--check'], f.options), 1, entry.source);
+    await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /manual adaptation\/review/);
+    f.remote.delete(entry.source);
+    assert.equal(await main(['--check'], f.options), 1, entry.source);
+    await assert.rejects(main(['--sync', '--ref', nextCommit, '--accept-contract-changes'], f.options), /missing\/moved/);
+    f.remote.set(entry.source, original);
+    assert.deepEqual(f.snapshot(), before, 'No Pi production files were changed');
+  }
 });
 
 test('module transforms preserve import-like text in strings, comments and template text', () => {
@@ -156,8 +185,24 @@ test('module changes are reported and sync preserves transforms with the lock in
   assert.notEqual(updated.files.find((entry: { source: string }) => entry.source === source).sha256,
     f.lock.files.find((entry: { source: string }) => entry.source === source).sha256);
   assert.equal(f.renames.at(-1), join(fixtureRoot, 'upstream.lock.json'));
-  assert.equal(f.snapshot().length, 9);
+  assert.equal(f.snapshot().length, f.lock.files.length + 1);
   assert.match(f.files.get(join(fixtureRoot, vendorRoot, 'errors.ts'))!, /readonly code: string;/);
+});
+
+test('native child Bash ports sync unchanged bodies and reject changed host imports before writes', async () => {
+  const f = await fixture();
+  const spec = f.lock.files.find(entry => entry.target.endsWith('/child-bash-lifecycle.ts'))!;
+  assert.ok(spec);
+  f.remote.set(spec.source, f.remote.get(spec.source) + '\n// Lifecycle update.\n');
+  assert.equal(await main(['--check', '--ref', nextCommit], f.options), 1);
+  assert.equal(await main(['--sync', '--ref', nextCommit], f.options), 0);
+  const adapted = f.files.get(join(fixtureRoot, spec.target))!;
+  assert.match(adapted, /child-bash-ports\.ts/);
+  assert.match(adapted, /Lifecycle update/);
+  const before = f.snapshot();
+  f.remote.set(spec.source, f.remote.get(spec.source)!.replace("'./service.js'", "'./changed-service.js'"));
+  await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /Child Bash imports changed/);
+  assert.deepEqual(f.snapshot(), before);
 });
 
 test('task protocol changes block sync until explicitly acknowledged', async () => {
@@ -170,10 +215,11 @@ test('task protocol changes block sync until explicitly acknowledged', async () 
   await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /manual adaptation\/review/);
   assert.deepEqual(f.snapshot(), before);
   assert.equal(await main(['--sync', '--ref', nextCommit, '--accept-contract-changes'], f.options), 0);
-  assert.equal(f.snapshot().length, 9);
+  assert.equal(f.snapshot().length, f.lock.files.length + 1);
   const updated = await verify(fixtureRoot, f.io);
   assert.notEqual(updated.watch[0].sha256, f.lock.watch[0].sha256);
-  assert.ok(f.snapshot().every(([path]) => path.includes(vendorRoot) || path.endsWith('upstream.lock.json')));
+  const allowed = new Set([...f.lock.files.map(entry => join(fixtureRoot, entry.target)), join(fixtureRoot, 'upstream.lock.json')]);
+  assert.ok(f.snapshot().every(([path]) => allowed.has(path)));
 });
 
 test('local vendor edits stop sync before fetching or writing', async () => {
@@ -183,6 +229,13 @@ test('local vendor edits stop sync before fetching or writing', async () => {
   await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /Local vendor modification/);
   assert.equal(f.calls(), 0);
   assert.deepEqual(f.snapshot(), before);
+});
+
+test('unrecorded files in the native child Bash vendor folder block syncing before fetch', async () => {
+  const f = await fixture();
+  f.files.set(join(fixtureRoot, 'src/vendor/mcode-child-bash/unrecorded.ts'), 'unexpected vendor file');
+  await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /Unrecorded vendor files/);
+  assert.equal(f.calls(), 0);
 });
 
 test('local edits made during upstream reads are checked again before install', async () => {
@@ -206,14 +259,14 @@ test('edits after the final verification stop install without overwriting vendor
     let reads = 0;
     f.io.readdir = async (path: string) => {
       const names = await readdir(path);
-      if (++reads === 2) f.files.set(join(fixtureRoot, target), 'edit after final verify');
+      if (path === join(fixtureRoot, vendorRoot) && ++reads === 2) f.files.set(join(fixtureRoot, target), 'edit after final verify');
       return names;
     };
     await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /Local modification during install/);
     assert.equal(f.files.get(join(fixtureRoot, target)), 'edit after final verify');
     assert.equal(f.renames.length, 0);
     assert.equal(f.recovery().length, 0);
-    assert.equal(f.snapshot().length, 9);
+    assert.equal(f.snapshot().length, f.lock.files.length + 1);
   }
 });
 
@@ -229,7 +282,7 @@ test('edits during staging are checked again immediately before replacing a targ
   await assert.rejects(main(['--sync', '--ref', nextCommit], f.options), /Local modification during install/);
   assert.equal(f.files.get(target), 'edit during staging');
   assert.equal(f.renames.length, 0);
-  assert.equal(f.snapshot().length, 9);
+  assert.equal(f.snapshot().length, f.lock.files.length + 1);
 });
 
 test('edits in the final check/rename window are captured and restored', async () => {

@@ -13,8 +13,9 @@ import { createChildSteering } from './child-steering.ts';
 import { acquireSessionLease, prepareSession } from './child-session-file.ts';
 import { createChildMessageWindow } from './child-message-window.ts';
 import { captureWorkspace } from './workspace-observation.ts';
-import type { WorkspaceSnapshot } from './workspace-observation.ts';
-import { buildVerification } from './task-verification.ts';
+import { parseModelVerdict } from './task-verification.ts';
+import { createToolFileObservation } from './tool-file-observation.ts';
+import { createChildCommands } from './child-commands.ts';
 
 type PiSdk = Pick<typeof import('@earendil-works/pi-coding-agent'),
   'ModelRuntime' | 'SessionManager' | 'SettingsManager' | 'DefaultResourceLoader' | 'createMcpExtension' | 'createAgentSession' |
@@ -32,6 +33,8 @@ export interface PiChildFactoryOptions {
   inheritedModel?: Model<Api>;
   inheritedThinking?: ThinkingLevel;
   inheritedModelRegistry?: InheritedModelRegistry;
+  /** Host tool state, not a child configuration switch. Missing authority keeps codemode off. */
+  isCodemodeEnabled?: () => boolean;
   projectTrusted?: boolean;
   /** Resources already loaded under host trust, including package resources. */
   resourceLoader?: HostResources;
@@ -83,13 +86,13 @@ function notify(callback: ((value: string) => void) | undefined, value: string):
 
 /** Create isolated leaf sessions with Pi's native tools. Tool restrictions are not an OS sandbox. */
 export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedModel, inheritedThinking, inheritedModelRegistry,
-  projectTrusted = false, resourceLoader, customTools }: PiChildFactoryOptions = {}): CreateChild {
+  isCodemodeEnabled, projectTrusted = false, resourceLoader, customTools }: PiChildFactoryOptions = {}): CreateChild {
   if (!agentDir) throw new Error('agentDir is required');
   const configDir = resolve(agentDir);
   let sdkPromise: Promise<PiSdk> | undefined;
   let runtimePromise: Promise<ModelRuntime> | undefined;
   const seededProviders = new Set<string>();
-  return async function createChild({ profile, cwd, sessionPath, onActivity, onProfileResolved }: CreateChildOptions): Promise<ChildSession> {
+  return async function createChild({ profile, cwd, sessionPath, onActivity, onProfileResolved, onOwnedCommandStarted }: CreateChildOptions): Promise<ChildSession> {
     const api = await (sdkPromise ??= Promise.resolve((sdk as PiSdk | undefined) ?? import('@earendil-works/pi-coding-agent')));
     const required = { createAgentSession: api.createAgentSession, DefaultResourceLoader: api.DefaultResourceLoader,
       'SessionManager.create': api.SessionManager?.create, 'SessionManager.open': api.SessionManager?.open,
@@ -109,6 +112,11 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       throw new Error('Child tool selectors must be nonempty strings');
     }
     const tools = [...new Set(requested.map(normalizedSelectorName))];
+    const canManageCommands = profile.name !== 'explore' && tools.includes('bash')
+      && !profile.disallowedTools?.some(name => ['bash', 'bash_task'].includes(normalizedSelectorName(name)))
+      && (profile.nativeToolSnapshot === undefined || profile.nativeToolSnapshot.some(name => normalizedSelectorName(name) === 'bash_task'));
+    if (canManageCommands && !tools.includes('bash_task')) tools.push('bash_task');
+    if (!canManageCommands) { const index = tools.indexOf('bash_task'); if (index >= 0) tools.splice(index, 1); }
     for (const snapshot of [profile.skillSnapshot, profile.nativeToolSnapshot, profile.toolInventory]) {
       if (snapshot !== undefined && (!Array.isArray(snapshot) || snapshot.some((name) => typeof name !== 'string' || !name.trim()))) {
         throw new Error('Child resource snapshots must contain names');
@@ -154,23 +162,37 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       const messages = createChildMessageWindow<ChildRun>(manager);
       const configuredTools = customTools?.filter((tool) => roleAllowsTool(profile.name, tool.name, 'configured'));
       const extraTools = new Set(configuredTools?.map((tool) => tool.name));
+      const fileObservation = createToolFileObservation({ cwd: workDir, stateDirectories: [configDir, dirname(path)],
+        current: () => current ? { id: current.id, signal: current.controller.signal } : undefined,
+        isBuiltin: name => {
+          const source = session.getAllTools?.().find(tool => tool.name === name)?.sourceInfo;
+          return !extraTools.has(name) && (!source || source.source === 'builtin');
+        },
+        isProgramTool: name => ['codemode', 'bash_task'].includes(name) && !extraTools.has(name),
+      });
+      const commands = canManageCommands ? await createChildCommands({ manager, sessionPath: path,
+        current: () => current ? { id: current.id, signal: current.controller.signal, last: current.last } : undefined,
+        isNativeBash: () => !extraTools.has('bash') && session.getAllTools?.().find(tool => tool.name === 'bash')?.sourceInfo.source === 'builtin',
+        onStarted: onOwnedCommandStarted,
+      }) : undefined;
       let serverFor = (_name: string): string | undefined => undefined;
       let policy = childToolPolicy(profile, tools, extraTools, (name) => serverFor(name));
-      const allow = (name: string): boolean => policy(name);
+      const allow = (name: string): boolean => policy(name)
+        && (normalizedSelectorName(name) !== 'codemode' || isCodemodeEnabled?.() === true);
       const guard: ExtensionFactory = (pi) => {
         pi.on('tool_call', (event) => {
           if (!allow(event.toolName)) return { block: true, reason: 'Tool is outside the child allowlist' };
         });
       };
-      const factories: InlineExtension[] = [guard];
+      const factories: InlineExtension[] = [guard, fileObservation.extension, ...(commands ? [commands.extension] : [])];
       const mcpEnabled = profile.mcp !== false && profile.mcpServers?.length !== 0;
       const discovery: string[] = [];
       let initialDiscovery: string[] = [];
+      if (allow('codemode') && api.createCodemodeExtension) { factories.push(api.createCodemodeExtension({ mode: 'on', models: false })); discovery.push('codemode'); }
       if (mcpEnabled) {
         const mcp = await childMcpFactory(api, { ...profile, extensions: resources.extensions }, configDir, workDir, projectTrusted, path,
           profile.timeoutMs > 0 ? Math.min(profile.timeoutMs, 10000) : 10000);
         serverFor = mcp.serverFor; initialDiscovery = mcp.indirect;
-        if (allow('codemode') && api.createCodemodeExtension) { factories.push(api.createCodemodeExtension({ mode: 'on', models: false })); discovery.push('codemode'); }
         if (allow('tool_search') && api.createToolSearchExtension) { factories.push(api.createToolSearchExtension()); discovery.push('tool_search'); }
         factories.push(mcp.extension);
       }
@@ -185,7 +207,16 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
         promptsOverride: (base) => ({ ...base, prompts: [] }), themesOverride: (base) => ({ ...base, themes: [] }),
         systemPromptOverride: () => undefined,
         appendSystemPromptOverride: () => [
-          'You are a leaf worker. Complete the assigned task. Do not create or delegate tasks.', profile.instructions ?? '',
+          '## Delegated Task Contract',
+          'You are a leaf Agent reporting to the parent, not the end user. Complete only the assigned task and return a concise handoff.',
+          'You do not inherit the parent conversation. Use the supplied briefing and your own child-session history only.',
+          'Do not delegate or create/control Agent tasks, manage parent todos or goals, or schedule independent future work.',
+          'Do not ask the end user questions. Return the exact blocker and the smallest question the parent must resolve.',
+          'Read authorized Memory sources when needed. Write only to an explicitly available child-owned Memory store; never modify User, shared project, or another Agent Memory. Otherwise return durable findings to the parent.',
+          'Use only provided tools. When codemode is enabled, batch independent calls and filter bulky results when useful; prefer direct tools for a single simple call.',
+          'Return a concise handoff with results, relevant paths, validation and blockers/risks. Do not repeat the briefing or raw logs unless needed as evidence.',
+          'Report evidence and validation honestly; never claim checks you did not run.',
+          profile.instructions ?? '',
         ].filter(Boolean),
         skillsOverride: (base) => {
           const skills = [...resources.inheritedSkills, ...base.skills.filter((skill) =>
@@ -197,8 +228,10 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       });
       await loader.reload();
       const plugins = [...pluginToolNames(loader, resources.extensions), ...(configuredTools?.map((tool) => tool.name) ?? [])];
+      if (commands && plugins.includes('bash_task')) throw new Error('Configured tool conflicts with the owned bash_task control');
       for (const name of plugins) extraTools.add(name);
       const excludeTools = [...new Set([...recursiveTools, ...taskChildBlockedTools])];
+      if (!allow('codemode')) excludeTools.push('codemode');
       if (!mcpEnabled) excludeTools.push('mcp__*', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource');
       const { session } = await api.createAgentSession({
         cwd: workDir, agentDir: configDir, modelRuntime: steering.scopeRuntime(runtime), model, thinkingLevel,
@@ -206,7 +239,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
         customTools: configuredTools?.filter((tool) => allow(tool.name)), settingsManager: settings, resourceLoader: loader, sessionManager: manager,
       });
       if (session.setActiveToolsByName && session.getActiveToolNames) session.setActiveToolsByName(session.getActiveToolNames()
-        .filter((name) => !discovery.includes(name) || tools.includes(name) || initialDiscovery.includes(name)));
+        .filter((name) => !discovery.includes(name) || name === 'codemode' && allow(name) || tools.includes(name) || initialDiscovery.includes(name)));
       let profileReady = false;
       const sessionPrompt = session.prompt.bind(session);
       session.prompt = (text, options) => profileReady ? sessionPrompt(text, options) :
@@ -243,6 +276,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       });
       async function shutdown(): Promise<void> {
         if (!shutdownComplete) {
+          await commands?.close();
           const priorError = extensionError;
           if (session.extensionRunner.hasHandlers('session_shutdown')) await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
           if (extensionError !== priorError) throw extensionError;
@@ -264,11 +298,11 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
           const settled = new Promise<void>((resolve) => { run.resolve = resolve; });
           current = run;
           messages.begin(run);
+          fileObservation.begin(run.id);
           let timer: ReturnType<typeof setTimeout> | undefined;
           run.done = (async (): Promise<ChildResult> => {
             let returnedStatus: 'succeeded' | 'failed' | 'aborted' | undefined;
             let failure: unknown, cleanupSucceeded = true;
-            let before: WorkspaceSnapshot | undefined;
             try {
               if (profile.timeoutMs > 0) timer = setTimeout(() => {
                 run.failure = Object.assign(new Error('Child session timed out'), { name: 'TimeoutError' });
@@ -276,7 +310,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
               }, profile.timeoutMs);
               if (profile.name === 'verifier') {
                 notify(onActivity, 'Inspecting workspace metadata');
-                before = await captureWorkspace(workDir, [configDir, dirname(path)], run.controller.signal);
+                fileObservation.baseline(run.id, await captureWorkspace(workDir, [configDir, dirname(path)], run.controller.signal));
               }
               notify(onActivity, 'Running');
               await steering.prompt(session, run, text, { expandPromptTemplates: false, source: 'extension',
@@ -299,12 +333,16 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
             } finally { clearTimeout(timer); }
             try { await steering.close(run, session); await chmod(path, 0o600); }
             catch (error) { cleanupSucceeded = false; returnedStatus = undefined; failure = cleanupFailure(error); }
+            try { await commands?.finish(run.id, returnedStatus !== 'succeeded' || !!failure); }
+            catch (error) { cleanupSucceeded = false; returnedStatus = undefined; failure = cleanupFailure(error); }
             const committed = messages.read(run);
             if (!committed.available && returnedStatus) { returnedStatus = undefined; failure = new Error('Child committed messages are unavailable'); }
-            const verification = before ? buildVerification(before, await captureWorkspace(workDir, [configDir, dirname(path)]),
-              committed.text, returnedStatus === 'succeeded') : undefined;
+            const observation = await fileObservation.finish(run.id);
+            const modelVerdict = profile.name === 'verifier' && returnedStatus === 'succeeded' ? parseModelVerdict(committed.text) : undefined;
+            const verification = { ...observation, ...(modelVerdict ? { modelVerdict } : {}) };
             const result: ChildResult = { text: redact(committed.text), usage: run.usage, eventCount: run.eventCount,
               ...(verification ? { verification } : {}),
+              ...(commands && cleanupSucceeded ? { commandCleanupConfirmed: true as const } : {}),
               outcome: returnedStatus ? { kind: 'returned', status: returnedStatus } : { kind: 'exception' },
               subTurnId: run.id, resolvedAgentName: profile.name };
             if (cleanupSucceeded) current = undefined;
@@ -318,11 +356,14 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
           if (typeof text !== 'string') throw Object.assign(new Error('Steering input must be a string'), { steerAccepted: false });
           if (closed || !current || current.settled || !session.isStreaming) throw Object.assign(new Error('Child session is not running'), { steerAccepted: false });
           if (current.aborted || current.controller.signal.aborted) throw Object.assign(abortError(), { steerAccepted: false });
-          return steering.steer(session, text);
+          const result = await steering.steer(session, text);
+          commands?.steered();
+          return result;
         },
         async abort(): Promise<void> {
           if (current) { current.aborted = true; current.controller.abort(abortError()); }
-          await session.abort();
+          if (commands) await commands.abortWith(() => session.abort());
+          else await session.abort();
         },
         dispose(): Promise<void> {
           if (!closing) {
@@ -356,6 +397,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
           throw new Error('Could not load the explicitly configured child resources');
         }
         if (extensionError) throw extensionError;
+        await commands?.ready();
         for (const name of pluginToolNames(loader, resources.extensions)) extraTools.add(name);
         if (session.getCallableToolNames().some((name) => !allow(name))) throw new Error('Pi exposed tools outside the child allowlist');
         const names = [...new Set(loader.getSkills().skills.map((skill) => skill.name))];

@@ -7,6 +7,7 @@ import type {
   TaskOutputRef, TaskOutputStore, TaskStore,
 } from './vendor/mcode-background-task/types.ts';
 import type { TaskRecord, TaskState, TaskStatus } from './types.ts';
+import { utf8Output } from './utf8-output.ts';
 
 function view(task: TaskRecord): BackgroundTask {
   return {
@@ -107,19 +108,7 @@ export class TaskDomain {
 
   private read(id: string, { offset = 0, limitBytes }: TaskOutputReadOptions = {}): TaskOutputReadResult {
     const task = this.task(id);
-    const bytes = Buffer.from(task.output);
-    let start = Math.min(bytes.length, Math.max(0, offset));
-    // Pi output cursors must never split a UTF-8 code point.
-    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
-    let end = limitBytes === undefined ? bytes.length : Math.min(bytes.length, start + limitBytes);
-    while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
-    if (end === start && start < bytes.length) {
-      end++;
-      while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end++;
-    }
-    return {
-      content: bytes.subarray(start, end).toString('utf8'), nextOffset: end,
-      truncated: end < bytes.length, summary: task.final_text, outputRef: this.outputRef(task),
-    };
+    return { ...utf8Output(Buffer.from(task.output), offset, limitBytes),
+      summary: task.final_text, outputRef: this.outputRef(task) };
   }
 }
