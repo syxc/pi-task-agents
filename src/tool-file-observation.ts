@@ -1,5 +1,7 @@
 import { lstat, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
+import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type { VerificationReport } from './types.ts';
 import { extractToolWritePaths } from './file-write-targets.ts';
@@ -27,12 +29,31 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
 export function createToolFileObservation(options: {
   cwd: string; stateDirectories: readonly string[]; current(): Run | undefined;
   isBuiltin(name: string): boolean; isProgramTool(name: string): boolean;
+  shellCommandPrefix?(): string | undefined;
 }) {
   const root = resolve(options.cwd);
   const excluded = options.stateDirectories.map(path => resolve(path));
   let state: Observation | undefined;
   let canonicalRoot: Promise<string> | undefined;
   const active = () => state && state.id === options.current()?.id ? state : undefined;
+  function targets(name: string, args: Record<string, unknown>): ReturnType<typeof extractToolWritePaths> {
+    if (options.isBuiltin(name) && ['write', 'edit'].includes(name) && typeof args.path === 'string') {
+      // Pi file tools normalize these spellings; shell paths retain their literal spelling.
+      let file = args.path.replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, ' ');
+      if (file.startsWith('@')) file = file.slice(1);
+      if (process.platform === 'win32' && file.startsWith('/') && !file.startsWith('//') && !file.includes('\\')) {
+        const drive = /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i.exec(file);
+        if (drive) file = `${drive[1].toUpperCase()}:\\${(drive[2] ?? '').replaceAll('/', '\\')}`;
+      }
+      if (file === '~' || file.startsWith('~/') || process.platform === 'win32' && file.startsWith('~\\')) file = join(homedir(), file.slice(2));
+      if (file.startsWith('file://')) file = fileURLToPath(file);
+      const absolute = resolve(root, file);
+      return { kind: 'paths', paths: [within(root, absolute) ? relative(root, absolute).split(sep).join('/') : absolute] };
+    }
+    const prefix = name === 'bash' && options.isBuiltin(name) ? options.shellCommandPrefix?.() : undefined;
+    return extractToolWritePaths(root, name, prefix && typeof args.command === 'string'
+      ? { ...args, command: `${prefix}\n${args.command}` } : args);
+  }
   async function snapshot(state: Observation, file: string): Promise<string | undefined> {
     const absolute = resolve(root, file);
     if (isAbsolute(file) || win32.isAbsolute(file) || !within(root, absolute)
@@ -68,10 +89,11 @@ export function createToolFileObservation(options: {
     if (relevant.some(key => typeof args[key] === 'string' && args[key].length > 200000)) {
       scope.notes.add('target_input_limit'); return;
     }
-    const extracted = extractToolWritePaths(root, name, args);
+    const extracted = targets(name, args);
     if (!options.isBuiltin(name)) scope.notes.add('unrecognized_tool_effects');
     if (extracted.kind === 'ambiguous' || extracted.kind === 'paths' && extracted.ambiguityReason) scope.notes.add('ambiguous_tool_target');
-    const shellFlow = shells.has(name) && typeof args.command === 'string' && /[;&|\n]/.test(args.command);
+    const shellFlow = shells.has(name) && (typeof args.command === 'string' && /[;&|\n]/.test(args.command)
+      || name === 'bash' && options.isBuiltin(name) && Boolean(options.shellCommandPrefix?.()));
     if (shellFlow) scope.notes.add('ambiguous_shell_control_flow');
     if (shells.has(name) && (extracted.kind !== 'paths' || extracted.ambiguityReason || shellFlow)) {
       scope.workspace ??= captureWorkspace(root, options.stateDirectories, options.current()?.signal);
@@ -100,7 +122,7 @@ export function createToolFileObservation(options: {
       return;
     }
     const capture = scope.calls.get(id)!;
-    if (JSON.stringify(extractToolWritePaths(root, name, object(input))) !== capture.targets) scope.notes.add('tool_targets_changed');
+    if (JSON.stringify(targets(name, object(input))) !== capture.targets) scope.notes.add('tool_targets_changed');
     if (failed) scope.notes.add('failed_tool_capture');
     for (const file of capture.paths) {
       const value = await snapshot(scope, file);

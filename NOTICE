@@ -21,8 +21,11 @@ native commands and result delivery within the same logical task.
 src/file-write-targets.ts reuses the pure target-extraction helpers from
 packages/local-runtime/src/turns/file-changes.ts. Pi supplies its brand path
 and metadata observation port, without the MCode diff or database host.
+Two narrow path ports preserve literal whitespace and treat unresolved
+shell parent traversal as ambiguous before lexical path resolution.
 test/fixtures/file-observation/upstream-file-changes.ts.txt preserves the
-original source. Its hash and helper bodies are checked by offline tests.
+original source. Offline tests check its hash and the helper bodies with
+these explicit ports.
 
 src/task-turn-id.ts preserves the upstream task-turn ID encoding.
 Task admission, continuation, terminal output and tool-result adapters also

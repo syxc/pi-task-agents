@@ -34,6 +34,33 @@ test('a failed native FileHandle close retains explicit resource ownership until
   } finally { blocked = false; await f.output.close(); }
 });
 
+test('an initially unavailable native spool is retried after abort drops the final metadata', async t => {
+  const f = await fixture(t), source = join(tmpdir(), 'pi-bash-' + randomBytes(8).toString('hex') + '.log');
+  f.sources.push(source);
+  f.output.update(snapshot(source));
+  await (f.output as any).opening;
+  const bytes = Buffer.from('complete native stdout\n'.repeat(5000));
+  await writeFile(source, bytes, { mode: 0o600, flag: 'wx' });
+  await f.output.finish({ content: [{ type: 'text', text: 'ALLOWED_PREVIEW\nCommand aborted' }] });
+  assert.equal((await readFile(join(f.logs.root, f.id + '.log'))).equals(bytes), true);
+  assert.equal(f.output.incomplete, false); assert.equal(f.output.hasOpenResources, false);
+});
+
+test('a missing truncated spool cannot become a complete result after metadata-free failure', async t => {
+  const f = await fixture(t), source = join(tmpdir(), 'pi-bash-' + randomBytes(8).toString('hex') + '.log');
+  f.output.update(snapshot(source)); await (f.output as any).opening;
+  await f.output.finish({ content: [{ type: 'text', text: 'ALLOWED_PREVIEW\nCommand timed out' }] });
+  assert.equal(f.output.incomplete, true); assert.equal(f.output.hasOpenResources, false);
+});
+
+test('complete structured output can recover a missing spool without claiming data loss', async t => {
+  const f = await fixture(t), source = join(tmpdir(), 'pi-bash-' + randomBytes(8).toString('hex') + '.log');
+  f.output.update(snapshot(source)); await (f.output as any).opening;
+  await f.output.finish({ content: [{ type: 'text', text: 'ALLOWED_PREVIEW' }], structuredContent: { output: 'complete captured output', truncated: false } });
+  assert.equal(f.output.incomplete, false);
+  assert.equal(await readFile(join(f.logs.root, f.id + '.log'), 'utf8'), 'complete captured output');
+});
+
 test('an undecodable native UTF-8 tail is retained on disk and explicitly marked incomplete', async t => {
   const f = await fixture(t), bytes = Buffer.concat([Buffer.alloc(100000, 'x'), Buffer.from([0xe4])]);
   const source = await f.native(bytes);

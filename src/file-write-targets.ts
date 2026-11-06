@@ -1,5 +1,5 @@
 // Derived from MCode 3c21163c85a9684030cb147bfef48c6284fa3c46, local-runtime/turns/file-changes.ts (MIT).
-// Only target extraction is reused; Pi supplies observation, persistence and state-directory filtering.
+// Pi preserves literal whitespace and treats unresolved shell parent traversal as ambiguous.
 import path from 'node:path';
 
 const BRAND = { APP_DIR: '.pi' };
@@ -220,7 +220,7 @@ function collectPathToken(
 }
 
 function normalizeCapturePath(workspaceDir: string, filePath: string): string | undefined {
-  let trimmed = filePath.trim();
+  let trimmed = filePath;
   if (!trimmed || isDiscardTarget(trimmed)) return undefined;
   // Convert MSYS-style paths (/c/Users/...) to Windows paths on win32.
   // Git Bash output uses this format; path.resolve() would misinterpret it.
@@ -253,7 +253,7 @@ function hasDynamicShellPathToken(token: string): boolean {
     /[*?[]/.test(token) ||
     token.startsWith('<(') ||
     token.startsWith('>(') ||
-    token.startsWith('~')
+    token.startsWith('~') || token.replaceAll(path.win32.sep, '/').split('/').includes('..')
   );
 }
 

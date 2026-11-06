@@ -23,6 +23,8 @@ export class CommandOutput {
   private watcher?: FSWatcher;
   private opening?: Promise<void>;
   private adoptionFailed = false;
+  private nativePath?: string;
+  private nativeTruncated = false;
   private prefix = '';
   incomplete = false;
   private constructor(logs: CommandLogs, id: string, changed: () => void) { this.logs = logs; this.id = id; this.changed = changed; }
@@ -46,8 +48,10 @@ export class CommandOutput {
   update(value: unknown): void {
     try {
       const details = object(object(value).details), path = details.fullOutputPath;
+      this.nativeTruncated ||= object(details.truncation).truncated === true;
       if (!this.source && !this.opening && !this.adoptionFailed && typeof path === 'string' && /^pi-bash-[a-f0-9]{16}\.log$/.test(basename(path))
         && realpathSync(dirname(path)) === realpathSync(tmpdir())) {
+        this.nativePath = path;
         this.opening = this.adopt(path).catch(error => {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.incomplete = true; this.adoptionFailed = true; }
         }).finally(() => { this.opening = undefined; this.changed(); });
@@ -84,6 +88,8 @@ export class CommandOutput {
   private async persist(value?: unknown): Promise<void> {
     await this.opening;
     if (value) this.update(value);
+    // Abort/timeout errors omit metadata; retry the live producer's validated path after its flush.
+    if (!this.source && !this.opening && this.nativePath) this.update({ details: { fullOutputPath: this.nativePath } });
     await this.opening;
     if (!this.source) {
       const structured = object(object(value).structuredContent);
@@ -92,7 +98,7 @@ export class CommandOutput {
         await this.writer.truncate(0);
         this.logs.append(this.writer.fd, Buffer.from(output), 0);
       } else if (this.writer) {
-        if (structured.truncated === true || object(object(object(value).details).truncation).truncated === true) this.incomplete = true;
+        if (this.nativeTruncated || structured.truncated === true) this.incomplete = true;
         const text = textOf(value);
         if (text.startsWith(this.prefix)) this.logs.append(this.writer.fd, Buffer.from(text.slice(this.prefix.length)));
         else if (text && !this.prefix) this.logs.append(this.writer.fd, Buffer.from(text));

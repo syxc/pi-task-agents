@@ -169,6 +169,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
           return !extraTools.has(name) && (!source || source.source === 'builtin');
         },
         isProgramTool: name => ['codemode', 'bash_task'].includes(name) && !extraTools.has(name),
+        shellCommandPrefix: () => settings.getShellCommandPrefix(),
       });
       const commands = canManageCommands ? await createChildCommands({ manager, sessionPath: path,
         current: () => current ? { id: current.id, signal: current.controller.signal, last: current.last } : undefined,
