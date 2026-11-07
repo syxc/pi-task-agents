@@ -9,6 +9,7 @@ import type {
 import type { AgentProfile } from './types.ts'
 import {
   isResourceName,
+  isUnavailablePath,
   localPaths,
   sameFile,
   within,
@@ -196,7 +197,7 @@ export async function childResources(
         await access(candidate)
         skillPaths.push(candidate)
       } catch (error) {
-        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+        if (!isUnavailablePath(error)) {
           throw error
         }
       }

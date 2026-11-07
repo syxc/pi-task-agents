@@ -3,7 +3,7 @@ import { lstat, readFile, realpath, stat } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AgentProfile, ConfigLoadOptions, TaskAgentsConfig } from './types.ts'
-import { isResourceName, within } from './resource-selection.ts'
+import { isResourceName, isUnavailablePath, within } from './resource-selection.ts'
 import { DEFAULT_MAX_CONCURRENCY, resolveMaxConcurrency } from './concurrency.ts'
 
 type RoleOptions = { -readonly [K in keyof Omit<AgentProfile, 'name'>]?: AgentProfile[K] }
@@ -198,7 +198,7 @@ async function resourcePaths(
         // oxlint-disable-next-line no-await-in-loop -- Preserve configuration order and stop at the first invalid resource.
         await stat(resolve(dirname(file), path))
       } catch (error) {
-        if (!isMissing(error)) {
+        if (!isUnavailablePath(error)) {
           throw error
         }
         result.push(path)
@@ -244,15 +244,11 @@ async function resourcePaths(
   return result
 }
 
-function isMissing(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
-}
-
 async function configFileIdentity(file: string): Promise<BigIntStats | undefined> {
   try {
     return await stat(file, { bigint: true })
   } catch (error: unknown) {
-    if (isMissing(error)) {
+    if (isUnavailablePath(error)) {
       return
     }
     throw error
@@ -273,7 +269,7 @@ async function readConfig(file: string): Promise<ParsedConfig | undefined> {
   try {
     content = await readFile(file, 'utf8')
   } catch (error: unknown) {
-    if (isMissing(error)) {
+    if (isUnavailablePath(error)) {
       return
     }
     throw error
@@ -441,7 +437,7 @@ export async function loadConfig({
           '. Set projectTrusted: true only after reviewing its instructions, tools, extensions, skills, and MCP access.'
       )
     } catch (error: unknown) {
-      if (!isMissing(error)) {
+      if (!isUnavailablePath(error)) {
         throw error
       }
     }

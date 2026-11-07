@@ -149,7 +149,7 @@ PTC 类调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。父 Pi 
 工具、资源、超时和并发均非入门必填项。加载顺序为默认值 → `<agentDir>/task-agents.json` → 已信任项目的 `.pi/task-agents.json`；未信任项目配置不生效。指令逐层追加，其他字段替换，示例见 [examples/task-agents.json](examples/task-agents.json)。
 
 - 超时：`timeoutMs: 0` 表示不限时。
-- 角色名称：裸名配置可覆盖内置角色；自定义 `researcher` 可用 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。
+- 角色名称：裸名配置可覆盖内置角色；自定义 `researcher` 可用 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。配置键区分大小写，请求中的内置名按大小写不敏感匹配，因此配置 `"Worker"` 是独立的 `agent:Worker`，而请求 `Worker` 会选择内置 `worker`；自定义角色应使用与调用一致的大小写。
 - 兼容性：旧配置的显式模型、工具和空资源列表仍有优先权，不自动迁移；MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。
 
 ### 资源选择与权限快照

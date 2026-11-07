@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadConfig, resolveProfile } from '../src/config.ts'
-import { childToolPolicy, roleAllowsTool } from '../src/resource-selection.ts'
+import { childToolPolicy, roleAllowsTool, sameFile } from '../src/resource-selection.ts'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const readonly = ['read', 'grep', 'find', 'ls']
@@ -244,6 +244,46 @@ test('a dangling untrusted config symlink is still reported', async (t) => {
   await symlink(join(paths.dir, 'missing.json'), paths.project)
   const config = await loadConfig(paths)
   assert.equal(config.diagnostics.length, 1)
+})
+
+test('a non-directory .pi entry cannot disable global configuration loading', async (t) => {
+  const paths = await setup(t)
+  await save(paths.global, { maxConcurrency: 7 })
+  await rm(join(paths.cwd, '.pi'), { recursive: true })
+  await writeFile(join(paths.cwd, '.pi'), 'not a directory')
+  const untrusted = await loadConfig(paths)
+  assert.equal(untrusted.maxConcurrency, 7)
+  assert.deepEqual(untrusted.sources, [paths.global])
+  assert.deepEqual(untrusted.diagnostics, [])
+  const trusted = await loadConfig({ ...paths, projectTrusted: true })
+  assert.equal(trusted.maxConcurrency, 7)
+  assert.deepEqual(trusted.sources, [paths.global])
+  assert.deepEqual(trusted.diagnostics, [])
+})
+
+test('alias detection treats unresolvable workspace paths as distinct files', async (t) => {
+  const paths = await setup(t)
+  const file = join(paths.dir, 'file')
+  await writeFile(file, 'content')
+  assert.equal(await sameFile(file, join(file, 'child')), false)
+  const loop = join(paths.dir, 'loop.json')
+  await symlink(loop, loop)
+  assert.equal(await sameFile(loop, paths.dir), false)
+})
+
+test('an unresolvable project config symlink cannot disable global configuration loading', async (t) => {
+  const paths = await setup(t)
+  await save(paths.global, { maxConcurrency: 5 })
+  await symlink(paths.project, paths.project)
+  const untrusted = await loadConfig(paths)
+  assert.equal(untrusted.maxConcurrency, 5)
+  assert.deepEqual(untrusted.sources, [paths.global])
+  assert.equal(untrusted.diagnostics.length, 1)
+  assert.ok(untrusted.diagnostics[0].includes(paths.project))
+  const trusted = await loadConfig({ ...paths, projectTrusted: true })
+  assert.equal(trusted.maxConcurrency, 5)
+  assert.deepEqual(trusted.sources, [paths.global])
+  assert.deepEqual(trusted.diagnostics, [])
 })
 
 test('custom namespace preserves builtin collisions and custom roles have isolated generic defaults', async (t) => {
