@@ -1,7 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { TaskController, RESULT_TYPE } from '../src/controller.ts'
-import { InteractiveMode, initTheme } from '@earendil-works/pi-coding-agent'
+import {
+  AgentSession,
+  InteractiveMode,
+  SessionManager,
+  initTheme
+} from '@earendil-works/pi-coding-agent'
 import {
   Container,
   TuiMainScreen,
@@ -459,8 +464,11 @@ test('cancel pauses delivery across reload and stops running children', async ()
 
 test('session replacement retains the old owner and never sends its result to the new session', async () => {
   const f = fixture()
+  const notices = []
+  f.ctx.hasUI = true
+  f.ctx.ui = { setStatus() {}, setWidget() {}, notify: (...args) => notices.push(args) }
   await f.controller.ensure(f.ctx)
-  f.engines[0].tasks.push(complete())
+  f.engines[0].tasks.push({ ...complete(), status: 'failed' })
   const other = {
     ...f.ctx,
     sessionManager: { getSessionId: () => 'parent-b', getEntries: () => [] }
@@ -471,11 +479,13 @@ test('session replacement retains the old owner and never sends its result to th
   await f.controller.flush()
   assert.equal(f.sent.length, 0)
   assert.equal(f.engines[1].options.parentId, 'parent-b')
+  assert.equal(notices.length, 0)
   await f.controller.ensure(f.ctx)
   assert.equal(f.controller.engine, f.engines[0])
   await f.controller.flush()
   assert.equal(f.sent.length, 1)
   assert.equal(f.sent[0][0].details.parent_id, 'parent-a')
+  assert.equal(notices.length, 1)
   await f.controller.shutdown()
   assert.equal(f.engines[0].closed, true)
   assert.equal(f.engines[1].closed, true)
@@ -509,8 +519,11 @@ test(
     /* oxlint-disable no-await-in-loop -- Cases observe or mutate shared fixture state; retain the ordered execution contract. */
     for (const action of ['cancel', 'switch', 'shutdown']) {
       const f = fixture()
+      const notices = []
+      f.ctx.hasUI = true
+      f.ctx.ui = { setStatus() {}, setWidget() {}, notify: (...args) => notices.push(args) }
       await f.controller.ensure(f.ctx)
-      f.engines[0].tasks.push(complete())
+      f.engines[0].tasks.push({ ...complete(), status: 'failed' })
       const entered = deferred(),
         discovery = deferred()
       f.engines[0].pendingNotifications = async () => {
@@ -533,6 +546,7 @@ test(
       await flush
       await closing
       assert.equal(f.sent.length, 0, action)
+      assert.equal(notices.length, 0, action)
       await f.controller.shutdown()
     }
     /* oxlint-enable no-await-in-loop */
@@ -868,6 +882,242 @@ test('default controller factory forwards extension provider registry before mod
     assert.deepEqual(calls[lookup], ['lookup', 'extension-fixture', 'offline-model'])
   } finally {
     await controller.shutdown()
+  }
+})
+
+test('SDK failure notices remain readable after terminal widgets disappear without another model message', async () => {
+  /* oxlint-disable no-await-in-loop -- Each case owns and closes the same controller lease. */
+  for (const status of ['failed', 'lost']) {
+    const f = fixture()
+    const { host, tui } = widgetHost()
+    const manager = SessionManager.inMemory('/project')
+    const queued = []
+    const statuses = new Map()
+    host.chatContainer = new Container()
+    host.footerDataProvider = { setExtensionStatus: (key, value) => statuses.set(key, value) }
+    tui.addChild(host.chatContainer)
+    f.ctx.sessionManager = manager
+    f.ctx.hasUI = true
+    f.ctx.ui = {
+      setStatus: (key, value) => host.setExtensionStatus(key, value),
+      setWidget: (...args) => host.setExtensionWidget(...args),
+      notify: (...args) => host.showExtensionNotify(...args)
+    }
+    f.pi.appendEntry = (type, data) => manager.appendCustomEntry(type, data)
+    const sends = []
+    f.pi.sendMessage = (message, options) => {
+      f.sent.push([message, options])
+      sends.push(
+        AgentSession.prototype.sendCustomMessage.call(
+          { isStreaming: true, agent: { followUp: (message) => queued.push(message) } },
+          message,
+          options
+        )
+      )
+    }
+    try {
+      await f.controller.ensure(f.ctx)
+      const task = { ...complete(), status: 'running', notification_pending: false }
+      f.engines[0].tasks.push(task)
+      await f.controller.updateUI()
+      assert.match(statuses.get('task-agents'), /Agents 1/)
+      assert.ok(host.widgetContainerAbove.render(80).length > 0)
+      task.status = status
+      task.notification_pending = true
+      await f.controller.updateUI()
+      assert.equal(statuses.get('task-agents'), undefined)
+      assert.equal(host.widgetContainerAbove.render(80).join('').trim(), '')
+      await Promise.all([f.controller.flush(), f.controller.flush()])
+      await Promise.all(sends)
+      assert.equal(queued.length, 1, 'only the existing followUp reaches the agent queue')
+      assert.equal(queued[0].display, false)
+      host.addMessageToChat(queued[0])
+      for (const width of [20, 40, 80]) {
+        const lines = host.chatContainer.render(width).map(stripTerminalSequences)
+        const text = lines.join(' ').replace(/\s+/g, ' ')
+        assert.match(text, new RegExp(`${status} task t1`))
+        assert.match(text, /\/tasks list/)
+        assert.ok(lines.every((line) => visibleWidth(line) <= width))
+        assert.doesNotMatch(text, /succeeded/)
+      }
+      assert.deepEqual(
+        manager.buildSessionContext().messages,
+        [],
+        'notice receipts add no model context'
+      )
+      assert.equal(manager.getEntries().length, 1)
+      assert.equal(f.sent.length, 1)
+      assert.equal(f.controller.uiTimer, undefined, 'no terminal animation or polling timer')
+    } finally {
+      await f.controller.shutdown()
+      tui.stop()
+    }
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
+test('SDK failure notice receipts survive disk reload without suppressing the native result notification', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'controller-notice-'))
+  let manager = SessionManager.create('/project', dir)
+  manager.appendMessage({ role: 'user', content: 'Fixture only', timestamp: Date.now() })
+  const f = fixture()
+  f.ctx.sessionManager = manager
+  f.pi.appendEntry = (type, data) => manager.appendCustomEntry(type, data)
+  const notices = []
+  f.ctx.hasUI = true
+  f.ctx.ui = { setStatus() {}, setWidget() {}, notify: (...args) => notices.push(args) }
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push({ ...complete(), status: 'failed' })
+    await f.controller.flush()
+    assert.equal(notices.length, 1)
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.engines[0].tasks[0].notification_pending, true)
+    await f.controller.shutdown('reload')
+    manager = SessionManager.open(manager.getSessionFile())
+    f.ctx.sessionManager = manager
+    await f.controller.ensure(f.ctx)
+    f.engines[1].tasks.push({ ...complete(), status: 'failed' })
+    await f.controller.flush()
+    assert.equal(notices.length, 1)
+    assert.equal(f.sent.length, 2, 'an unreceipted owner message is still recoverable')
+    const result = f.sent[1][0]
+    manager.appendCustomMessageEntry(
+      result.customType,
+      result.content,
+      result.display,
+      result.details
+    )
+    await f.controller.flush()
+    assert.equal(notices.length, 1)
+    assert.equal(f.sent.length, 2)
+    assert.equal(f.engines[1].tasks[0].notification_pending, false)
+  } finally {
+    await f.controller.shutdown()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('visible failures follow pause, dialog and session ownership gates', async () => {
+  const f = fixture([
+    {
+      type: 'custom',
+      customType: 'pi-task-agents:failure-notice',
+      data: { parent_id: 'other-parent', task_id: 't1' }
+    }
+  ])
+  const notices = []
+  f.ctx.hasUI = true
+  f.ctx.ui = { setStatus() {}, setWidget() {}, notify: (...args) => notices.push(args) }
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push({ ...complete(), status: 'lost' })
+    f.controller.pause()
+    await f.controller.flush()
+    f.controller.resume()
+    f.controller.dialogOpen = true
+    await f.controller.flush()
+    f.controller.dialogOpen = false
+    f.ctx.sessionManager.getSessionId = () => 'parent-b'
+    await f.controller.flush()
+    assert.equal(notices.length, 0)
+    assert.equal(f.sent.length, 0)
+    f.ctx.sessionManager.getSessionId = () => 'parent-a'
+    await f.controller.flush()
+    assert.equal(notices.length, 1)
+    assert.equal(f.sent.length, 1)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('restored result receipts, foreground failures and ordinary terminal states are not re-announced', async () => {
+  const f = fixture([
+    {
+      type: 'custom_message',
+      customType: RESULT_TYPE,
+      details: { task_id: 'seen', parent_id: 'parent-a' }
+    }
+  ])
+  const notices = []
+  f.ctx.hasUI = true
+  f.ctx.ui = { setStatus() {}, setWidget() {}, notify: (...args) => notices.push(args) }
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(
+      { ...complete('seen'), status: 'failed' },
+      { ...complete('foreground'), status: 'failed', notification_pending: false },
+      { ...complete('canceled'), status: 'canceled' },
+      { ...complete('success'), verification: { modelVerdict: 'fail' } }
+    )
+    await f.controller.flush()
+    assert.equal(notices.length, 0)
+    assert.equal(f.sent.length, 2)
+    assert.equal(f.entries.length, 1)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('headless failure delivery creates no visual receipt and unavailable UI does not block the owner', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push({ ...complete(), status: 'failed' })
+    await f.controller.flush()
+    assert.equal(f.entries.length, 0)
+    assert.equal(f.sent.length, 1)
+    f.controller.inFlight.clear()
+    f.ctx.hasUI = true
+    f.ctx.ui = {
+      notify() {
+        throw new Error('UI unavailable')
+      }
+    }
+    await f.controller.flush()
+    assert.equal(f.sent.length, 2)
+  } finally {
+    f.ctx.hasUI = false
+    await f.controller.shutdown()
+  }
+})
+
+test('failure text excludes diagnostics and escapes untrusted IDs, and receipt write failure cannot block delivery', async () => {
+  const f = fixture()
+  const notices = []
+  f.ctx.hasUI = true
+  f.ctx.ui = { setStatus() {}, setWidget() {}, notify: (...args) => notices.push(args) }
+  const append = f.pi.appendEntry
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push({
+      ...complete('task\u001B[31m\n\u202E-id'),
+      status: 'failed',
+      error: 'PRIVATE_DIAGNOSTICS',
+      description: 'PRIVATE_DESCRIPTION'
+    })
+    f.pi.appendEntry = () => {
+      throw new Error('Receipt storage unavailable')
+    }
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    assert.equal(notices.length, 0)
+    f.pi.appendEntry = append
+    f.controller.inFlight.clear()
+    await f.controller.flush()
+    assert.equal(notices.length, 1)
+    assert.match(notices[0][0], /failed task task\?\?31m\?\?-id/)
+    assert.doesNotMatch(notices[0][0], /PRIVATE_/)
+    assert.ok(['\u001B', '\n', '\u202E'].every((character) => !notices[0][0].includes(character)))
+    f.controller.inFlight.clear()
+    await f.controller.flush()
+    assert.equal(notices.length, 1)
+    assert.equal(f.sent.length, 3, 'only existing native retry semantics apply')
+  } finally {
+    await f.controller.shutdown()
   }
 })
 
