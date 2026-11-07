@@ -1,3 +1,5 @@
+import type { Theme } from '@earendil-works/pi-coding-agent'
+import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui'
 import type { AgentProfile, TaskSummary } from './types.ts'
 
 // oxlint-disable-next-line no-control-regex -- Strip control characters from displayed task text intentionally.
@@ -89,18 +91,68 @@ export function taskCompletionNotice(task: TaskSummary): string {
   ].join('\n')
 }
 
-export function taskProgress(task: TaskSummary, now = Date.now()): string {
-  const description = clean(task.description || task.task_id).slice(0, 100)
+const taskIdentifier = (task: TaskSummary) => truncateToWidth(clean(task.task_id), 8, '')
+
+function taskDetails(task: TaskSummary, now: number): string {
   const reason = task.stopError?.message ?? task.error ?? task.cancel_reason
   return [
-    task.status,
-    clean(task.agent_name ?? ''),
-    description,
-    taskElapsed(task, now),
-    ...(task.cleanup_pending ? ['cleanup pending'] : []),
+    ...(reason ? [clean(reason)] : []),
     ...(task.activity ? [clean(task.activity)] : []),
-    ...(reason ? [clean(reason).slice(0, 160)] : [])
+    taskElapsed(task, now),
+    clean(task.agent_name ?? ''),
+    clean(task.description || task.task_id)
   ]
     .filter(Boolean)
     .join(' · ')
+}
+
+export function taskProgress(task: TaskSummary, now = Date.now()): string {
+  return [
+    task.status,
+    ...(task.cleanup_pending ? ['cleanup pending'] : []),
+    taskIdentifier(task),
+    taskDetails(task, now)
+  ].join(' · ')
+}
+
+export function taskWidget(
+  tasks: readonly TaskSummary[],
+  hidden: number,
+  theme: Theme,
+  now = Date.now()
+): Component {
+  return {
+    invalidate() {},
+    render(width) {
+      const columns = Math.max(0, Math.floor(width))
+      if (!columns) {
+        return []
+      }
+      const lines = tasks.flatMap((task) => {
+        const color = task.cleanup_pending
+          ? 'warning'
+          : task.status === 'failed'
+            ? 'error'
+            : 'muted'
+        // Reserve identity before diagnostics, even when cleanup needs its own row.
+        const splitCleanup =
+          task.cleanup_pending &&
+          visibleWidth(`${task.status} · cleanup pending · ${taskIdentifier(task)}`) > columns
+        const rows = splitCleanup
+          ? [
+              `${task.status} · ${taskIdentifier(task)}`,
+              `cleanup pending · ${taskDetails(task, now)}`
+            ]
+          : [taskProgress(task, now)]
+        return rows.map((line) => theme.fg(color, truncateToWidth(line, columns, '…')))
+      })
+      if (hidden) {
+        const full = `${hidden} more tasks · /tasks list`
+        const label = visibleWidth(full) <= columns ? full : `${hidden} more · /tasks list`
+        // Preserve the count before the hint, even in extremely narrow terminals.
+        lines.push(theme.fg('dim', truncateToWidth(label, columns, '')))
+      }
+      return lines
+    }
+  }
 }

@@ -1,6 +1,52 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { TaskController, RESULT_TYPE } from '../src/controller.ts'
+import { InteractiveMode, initTheme } from '@earendil-works/pi-coding-agent'
+import {
+  Container,
+  TuiMainScreen,
+  stripTerminalSequences,
+  visibleWidth
+} from '@earendil-works/pi-tui'
+
+function widgetHost(width = 80) {
+  const writes = []
+  const terminal = {
+    columns: width,
+    rows: 40,
+    write: (data) => writes.push(data),
+    hideCursor() {},
+    showCursor() {},
+    stop() {}
+  }
+  const tui = new TuiMainScreen(terminal)
+  // Exercise the SDK widget adapter without starting an authenticated agent session.
+  initTheme('dark', false)
+  const host = Object.create(InteractiveMode.prototype)
+  Object.assign(host, {
+    ui: tui,
+    extensionWidgetsAbove: new Map(),
+    extensionWidgetsBelow: new Map(),
+    widgetContainerAbove: new Container(),
+    widgetContainerBelow: new Container()
+  })
+  tui.addChild(host.widgetContainerAbove)
+  return { host, tui, terminal, writes }
+}
+
+function widgetLines(content, width = 200) {
+  const { host, tui } = widgetHost(width)
+  try {
+    host.setExtensionWidget('task-agents', content)
+    // The SDK adds one leading spacer, which is not part of the widget.
+    return host.widgetContainerAbove
+      .render(width)
+      .slice(1)
+      .map((line) => stripTerminalSequences(line).trim())
+  } finally {
+    tui.stop()
+  }
+}
 
 const runtimeAPI = {
   getAllTools: () => [],
@@ -880,7 +926,7 @@ test('task UI separates queued work from occupied capacity and includes current 
     )
     await f.controller.updateUI()
     assert.equal(statuses.at(-1), 'Agents 1/4 · queued 1')
-    assert.match(widgets.at(-1).join('\n'), /bash: running/)
+    assert.match(widgetLines(widgets.at(-1)).join('\n'), /bash: running/)
     assert.ok(f.controller.uiTimer)
     await f.controller.shutdown()
     assert.equal(f.controller.uiTimer, undefined)
@@ -918,12 +964,272 @@ test('terminal cleanup holds stay visible and running tasks are not hidden behin
     )
     await f.controller.updateUI()
     assert.equal(statuses.at(-1), 'Agents 1/4 · queued 8 · cleanup pending 1')
-    assert.match(widgets.at(-1)[0], /Owned cleanup/)
-    assert.match(widgets.at(-1)[0], /cleanup pending/)
-    assert.equal(widgets.at(-1).length, 7)
-    assert.equal(widgets.at(-1)[6], '3 more tasks · /tasks list')
+    const lines = widgetLines(widgets.at(-1))
+    assert.match(lines[0], /Owned cleanup/)
+    assert.match(lines[0], /cleanup pending/)
+    assert.equal(lines.length, 7)
+    assert.equal(lines[6], '3 more tasks · /tasks list')
   } finally {
     await f.controller.shutdown()
+  }
+})
+
+test('SDK task widget bounds CJK rows, prioritizes cleanup and retains hidden counts', async () => {
+  const f = fixture()
+  const { host, tui } = widgetHost()
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget: (...args) => host.setExtensionWidget(...args),
+    notify() {}
+  }
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = [
+      {
+        task_id: 'cleanup',
+        status: 'failed',
+        cleanup_pending: true,
+        agent_name: 'worker',
+        description: '长中文任务'.repeat(100),
+        stopError: { code: 'CHILD_CLEANUP_FAILED', message: 'dispose failed' }
+      },
+      {
+        task_id: 'active',
+        status: 'running',
+        agent_name: 'worker',
+        description: '长中文任务'.repeat(100),
+        activity: 'bash: running'
+      },
+      ...Array.from({ length: 7 }, (_, i) => ({ task_id: `q${i}`, status: 'queued' }))
+    ]
+    const original = JSON.stringify(engine.tasks)
+    await f.controller.updateUI()
+    for (const width of [20, 40, 80, 240]) {
+      const lines = host.widgetContainerAbove.render(width).slice(1).map(stripTerminalSequences)
+      assert.ok(lines.length <= 8, `${width}: ${lines.length} rows`)
+      assert.ok(
+        lines.every((line) => visibleWidth(line) <= width),
+        `${width}: column overflow`
+      )
+      assert.match(lines.slice(0, 2).join('\n'), /failed/)
+      assert.match(lines.slice(0, 2).join('\n'), /cleanup pending/)
+      assert.match(lines.at(-1), /3 more.*\/tasks list/)
+      if (width >= 40) {
+        assert.match(lines[0], /cleanup/)
+        assert.match(lines[1], /bash: running/)
+      }
+      if (width >= 80) {
+        assert.match(lines[0], /dispose failed/)
+      }
+    }
+    for (const width of [0, 1, 2, 3, 7, 14, 19]) {
+      const component = host.extensionWidgetsAbove.get('task-agents')
+      const lines = component.render(width)
+      assert.ok(lines.length <= 13)
+      assert.ok(lines.every((line) => visibleWidth(line) <= width))
+      if (width === 0) {
+        assert.deepEqual(lines, [])
+      }
+    }
+    assert.equal(
+      JSON.stringify(await engine.query()),
+      original,
+      '/tasks list retains full summaries'
+    )
+    engine.tasks = [
+      'failed',
+      'canceled',
+      'succeeded',
+      'stopping',
+      'running',
+      'queued',
+      'queued'
+    ].map((status, i) => ({ task_id: `held${i}`, status, cleanup_pending: true }))
+    await f.controller.updateUI()
+    const held = host.extensionWidgetsAbove.get('task-agents')
+    const narrow = held.render(20).map(stripTerminalSequences)
+    assert.equal(narrow.length, 13, 'at most two rows per visible task plus the hidden count')
+    assert.equal(narrow.filter((line) => line.includes('cleanup pending')).length, 6)
+    assert.match(narrow.at(-1), /1 more.*\/tasks list/)
+    assert.equal(held.render(40).length, 7)
+  } finally {
+    await f.controller.shutdown()
+    tui.stop()
+  }
+})
+
+test('SDK cleanup rows identify tasks before identical long errors at 20/40/80 columns', async () => {
+  const f = fixture()
+  const { host, tui } = widgetHost()
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget: (...args) => host.setExtensionWidget(...args),
+    notify() {}
+  }
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = ['alpha123-rest', 'bravo456-rest'].map((id) => ({
+      task_id: id,
+      status: 'failed',
+      cleanup_pending: true,
+      description: `Different task ${id}`,
+      error: 'Cannot confirm cleanup '.repeat(30)
+    }))
+    await f.controller.updateUI()
+    const component = host.extensionWidgetsAbove.get('task-agents')
+    for (const width of [20, 40, 80]) {
+      const rows = component.render(width).map(stripTerminalSequences)
+      const perTask = rows.length / 2
+      const first = rows.slice(0, perTask).join('\n')
+      const second = rows.slice(perTask).join('\n')
+      assert.match(first, /alpha123/, `${width}: first identity`)
+      assert.match(second, /bravo456/, `${width}: second identity`)
+      for (const text of [first, second]) {
+        if (width === 80) {
+          assert.match(text, /Cannot/)
+        }
+        assert.match(text, /failed/)
+        assert.match(text, /cleanup pending/)
+        if (text.includes('Cannot')) {
+          assert.ok(text.search(/alpha123|bravo456/) < text.indexOf('Cannot'))
+        }
+      }
+      assert.notEqual(first, second)
+      assert.ok(rows.every((line) => visibleWidth(line) <= width))
+    }
+  } finally {
+    await f.controller.shutdown()
+    tui.stop()
+  }
+})
+
+test('SDK task selection promotes cleanup at the end without placing queued work ahead of running', async () => {
+  const f = fixture()
+  const { host, tui } = widgetHost()
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget: (...args) => host.setExtensionWidget(...args),
+    notify() {}
+  }
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = [
+      { task_id: 'queued', status: 'queued' },
+      ...Array.from({ length: 6 }, (_, i) => ({ task_id: `run${i}`, status: 'running' })),
+      { task_id: 'cleanup', status: 'failed', cleanup_pending: true }
+    ]
+    await f.controller.updateUI()
+    const rows = host.extensionWidgetsAbove
+      .get('task-agents')
+      .render(80)
+      .map(stripTerminalSequences)
+    assert.match(rows[0], /cleanup pending/)
+    assert.match(rows[0], /cleanup/)
+    assert.ok(rows.slice(1, 6).every((row) => row.startsWith('running')))
+    assert.match(rows.at(-1), /2 more tasks.*\/tasks list/)
+    assert.equal(rows.length, 7)
+  } finally {
+    await f.controller.shutdown()
+    tui.stop()
+  }
+})
+
+test('SDK task widget preserves grapheme prefixes and follows live themes on invalidation', async () => {
+  const f = fixture()
+  const { host, tui } = widgetHost()
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget: (...args) => host.setExtensionWidget(...args),
+    notify() {}
+  }
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    const description = '中'.repeat(99) + '👩‍🚒🇨🇳é✊🏽😀 tail'
+    engine.tasks = [{ task_id: 'active', status: 'running', description }]
+    await f.controller.updateUI()
+    const component = host.extensionWidgetsAbove.get('task-agents')
+    const full = component.render(1000).map(stripTerminalSequences)
+    assert.ok(full[0].endsWith(description))
+    const prefixes = new Set([''])
+    let prefix = ''
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
+      full[0]
+    )) {
+      prefix += segment
+      prefixes.add(prefix)
+    }
+    for (let width = 0; width <= 240; width++) {
+      const lines = component.render(width).map(stripTerminalSequences)
+      assert.equal(lines.length, width ? 1 : 0)
+      for (const line of lines) {
+        assert.ok(line.isWellFormed())
+        assert.ok(visibleWidth(line) <= width)
+        assert.ok(prefixes.has(line.replace(/…$/, '')), `grapheme split at ${width}`)
+      }
+    }
+    const dark = component.render(80)
+    initTheme('light', false)
+    component.invalidate()
+    const light = component.render(80)
+    assert.notDeepEqual(light, dark)
+    assert.deepEqual(light.map(stripTerminalSequences), dark.map(stripTerminalSequences))
+    assert.match(light.map(stripTerminalSequences).join('\n'), /^running/)
+  } finally {
+    initTheme('dark', false)
+    await f.controller.shutdown()
+    tui.stop()
+  }
+})
+
+test('SDK task widget refresh uses differential rendering and only the existing polling timer', async (t) => {
+  const f = fixture()
+  const { host, tui, terminal, writes } = widgetHost(80)
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget: (...args) => host.setExtensionWidget(...args),
+    notify() {}
+  }
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = [{ task_id: 'active', status: 'running', description: '中文👩‍🚒é'.repeat(50) }]
+    const timeout = t.mock.method(globalThis, 'setTimeout')
+    const interval = t.mock.method(globalThis, 'setInterval')
+    await f.controller.updateUI()
+    tui.renderNow()
+    assert.ok(writes.join('').includes('running'))
+    const redraws = tui.fullRedraws
+    writes.length = 0
+    await f.controller.updateUI()
+    tui.renderNow()
+    assert.equal(writes.join(''), '', 'unchanged content must not repaint')
+    assert.equal(tui.fullRedraws, redraws)
+    assert.deepEqual(
+      timeout.mock.calls.map((call) => call.arguments[1]),
+      [1000, 1000]
+    )
+    assert.equal(interval.mock.calls.length, 0)
+    assert.ok(f.controller.uiTimer)
+    engine.tasks[0].activity = 'read: running'
+    await f.controller.updateUI()
+    tui.renderNow()
+    assert.match(stripTerminalSequences(writes.join('')), /read: running/)
+    assert.equal(tui.fullRedraws, redraws, 'activity changes must not force a full repaint')
+    assert.equal(writes.join('').includes('\u001B[2J'), false)
+    terminal.columns = 20
+    tui.renderNow()
+    assert.ok(tui.render(20).every((line) => visibleWidth(line) <= 20))
+    engine.tasks = []
+    await f.controller.updateUI()
+    assert.equal(f.controller.uiTimer, undefined)
+    assert.equal(host.extensionWidgetsAbove.size, 0)
+  } finally {
+    await f.controller.shutdown()
+    tui.stop()
   }
 })
 

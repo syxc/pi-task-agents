@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { TaskEngine } from './engine.ts'
-import { taskCompletionNotice, taskProgress } from './task-presentation.ts'
+import { taskCompletionNotice, taskWidget } from './task-presentation.ts'
 import { loadConfig, resolveProfile } from './config.ts'
 import { createPiChildFactory, type PiChildFactoryOptions } from './pi-backend.ts'
 import { captureParentRuntime, type ParentRuntimeAPI } from './parent-runtime.ts'
@@ -324,17 +324,16 @@ export class TaskController {
         : undefined
     )
     const visible = pending
-      .sort((a, b) => Number(a.status === 'queued') - Number(b.status === 'queued'))
+      .sort(
+        (a, b) =>
+          Number(Boolean(b.cleanup_pending)) - Number(Boolean(a.cleanup_pending)) ||
+          Number(a.status === 'queued') - Number(b.status === 'queued')
+      )
       .slice(0, 6)
     ctx.ui.setWidget(
       'task-agents',
       visible.length
-        ? [
-            ...visible.map((task) => taskProgress(task)),
-            ...(pending.length > visible.length
-              ? [`${pending.length - visible.length} more tasks · /tasks list`]
-              : [])
-          ]
+        ? (_tui, theme) => taskWidget(visible, pending.length - visible.length, theme)
         : undefined
     )
     if (pending.length && !this.uiTimer) {
