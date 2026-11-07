@@ -31,6 +31,7 @@ export interface TaskControllerOptions {
   Engine?: TaskEngineConstructor;
   configLoader?: ConfigLoader;
   childFactory?: (options: PiChildFactoryOptions) => CreateChild;
+  captureRuntime?: (ctx: ExtensionContext, signal?: AbortSignal) => ReturnType<typeof captureParentRuntime>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,6 +48,7 @@ export class TaskController {
   private readonly Engine: TaskEngineConstructor;
   private readonly configLoader: ConfigLoader;
   private readonly childFactory: (options: PiChildFactoryOptions) => CreateChild;
+  private readonly captureRuntime: NonNullable<TaskControllerOptions['captureRuntime']>;
   private owner?: ControllerOwner;
   private readonly inFlight = new Map<string, number>();
   private readonly attempts = new Map<string, number>();
@@ -71,6 +73,7 @@ export class TaskController {
     this.Engine = options.Engine ?? TaskEngine;
     this.configLoader = options.configLoader ?? loadConfig;
     this.childFactory = options.childFactory ?? createPiChildFactory;
+    this.captureRuntime = options.captureRuntime ?? ((_ctx, signal) => captureParentRuntime(this.pi, signal));
   }
 
   async ensure(ctx: ExtensionContext): Promise<TaskService> {
@@ -261,7 +264,7 @@ export class TaskController {
     const combined = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
     try {
       const owner = this.owner;
-      const runtime = await captureParentRuntime(this.pi, combined);
+      const runtime = await this.captureRuntime(ctx, combined);
       if (combined.aborted || epoch !== this.cancelEpoch || this.closing || !owner || owner !== this.owner
         || ctx.sessionManager.getSessionId() !== this.parentId) throw canceled();
       owner.hostRuntime = runtime;
@@ -435,9 +438,9 @@ export class TaskController {
   async shutdown(reason: 'quit' | 'reload' | 'new' | 'resume' | 'fork' = 'quit'): Promise<void> {
     this.generation++;
     this.cancelEpoch++;
-    const preserve = reason === 'new' || reason === 'resume' || reason === 'fork';
-    // Foreground waits are bound to the parent operation. Admitted background
-    // work ignores this signal and stays with its original owner on a switch.
+    const preserve = !this.owner?.hostRuntime?.tools && (reason === 'new' || reason === 'resume' || reason === 'fork');
+    // Admission cancellation stops foreground waits; closeOwner drains tool-bound
+    // background work before Pi invalidates its owner context.
     for (const admission of this.admissions) admission.abort();
     await this.initializing;
     try { await this.closeOwner(preserve); }

@@ -9,12 +9,10 @@ export const mcpResources = ['list_mcp_resources', 'list_mcp_resource_templates'
 export const recursiveTools = ['task', 'task_append', 'task_send', 'task_query', 'task_output', 'task_stop', 'task_agents', 'subagent'];
 export const taskChildBlockedTools = [...recursiveTools,
   'todo', 'todowrite', 'ask_user', 'ask_user_question', 'create_goal', 'get_goal', 'until'];
-export const isRecursive = (name: string): boolean => recursiveTools.includes(name);
 export const normalizedSelectorName = (value: string): string => value.trim().normalize('NFKC').toLocaleLowerCase('en-US');
 export const normalizeSelector = (values: readonly string[] | undefined): ReadonlySet<string> | undefined => values === undefined
   ? undefined : new Set(values.map(normalizedSelectorName).filter(Boolean));
 export const isSelectorMcp = (name: string): boolean => normalizedSelectorName(name).startsWith('mcp__');
-export const isMcp = (name: string): boolean => isSelectorMcp(name) || mcpResources.includes(normalizedSelectorName(name));
 export const within = (root: string, path: string): boolean => {
   const child = relative(root, path);
   return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child));
@@ -69,11 +67,7 @@ export async function localPaths(paths: readonly string[], cwd: string, extensio
   return [...new Set(result)];
 }
 
-export function matchesTool(selector: string, name: string): boolean {
-  return normalizedSelectorName(selector) === normalizedSelectorName(name);
-}
-
-export function roleAllowsTool(role: string, name: string, _source: 'builtin' | 'configured' = 'builtin'): boolean {
+export function roleAllowsTool(role: string, name: string): boolean {
   const normalized = normalizedSelectorName(name);
   if (taskChildBlockedTools.includes(normalized)) return false;
   return !['explore', 'verifier'].includes(role) || !['write', 'edit'].includes(normalized);
@@ -89,10 +83,10 @@ export function childToolPolicy(profile: AgentProfile, tools: readonly string[],
   return (name) => {
     const normalized = normalizedSelectorName(name);
     const pluginTool = extra?.has(name) === true;
-    if (!roleAllowsTool(profile.name, name, pluginTool || isSelectorMcp(name) ? 'configured' : 'builtin') || blocked?.has(normalized)) return false;
+    if (!roleAllowsTool(profile.name, name) || blocked?.has(normalized)) return false;
     if (isSelectorMcp(name)) {
       if (profile.mcp === false || servers?.size === 0) return false;
-      if (isSelectorMcp(name) && servers) {
+      if (servers) {
         const server = serverFor?.(name);
         if (!server || !servers.has(normalizedSelectorName(server))) return false;
       }

@@ -7,6 +7,7 @@ import type { AgentProfile, CreateChild, ChildSession, ChildResult, CreateChildO
 import { childResources, type HostResources } from './resource-loader.ts';
 import { childMcpFactory } from './resource-mcp.ts';
 import { seedInheritedProvider, type InheritedModelRegistry } from './model-providers.ts';
+import { thinkingLevels } from './config.ts';
 import { childToolPolicy, normalizedSelectorName, normalizeSelector, recursiveTools, taskChildBlockedTools, roleAllowsTool, within } from './resource-selection.ts';
 import { filterConfiguredToolDefinitions, observedToolFacts, pluginToolNames, sdkToolSelection } from './resource-tool-inventory.ts';
 import { createChildSteering } from './child-steering.ts';
@@ -17,6 +18,7 @@ import { parseModelVerdict } from './task-verification.ts';
 import { createToolFileObservation } from './tool-file-observation.ts';
 import { createChildCommands } from './child-commands.ts';
 import type { ParentRuntimeSnapshot } from './parent-runtime.ts';
+import { selectParentTools } from './child-parent-tools.ts';
 
 type PiSdk = Pick<typeof import('@earendil-works/pi-coding-agent'),
   'ModelRuntime' | 'SessionManager' | 'SettingsManager' | 'DefaultResourceLoader' | 'createMcpExtension' | 'createAgentSession' |
@@ -98,6 +100,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
   return async function createChild({ profile, cwd, sessionPath, onActivity, onProfileResolved, onOwnedCommandStarted }: CreateChildOptions): Promise<ChildSession> {
     const api = await (sdkPromise ??= Promise.resolve((sdk as PiSdk | undefined) ?? import('@earendil-works/pi-coding-agent')));
     const parentRuntime = getParentRuntime?.();
+    const shared = parentRuntime?.tools && selectParentTools(parentRuntime.tools, profile, resolve(cwd));
     const resourceHost = parentRuntime?.resources ?? resourceLoader;
     const required = { createAgentSession: api.createAgentSession, DefaultResourceLoader: api.DefaultResourceLoader,
       'SessionManager.create': api.SessionManager?.create, 'SessionManager.open': api.SessionManager?.open,
@@ -117,7 +120,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       throw new Error('Child tool selectors must be nonempty strings');
     }
     const tools = [...new Set(requested.map(normalizedSelectorName))];
-    const canManageCommands = profile.name !== 'explore' && tools.includes('bash')
+    const canManageCommands = (!shared || shared.native.has('bash')) && profile.name !== 'explore' && tools.includes('bash')
       && !profile.disallowedTools?.some(name => ['bash', 'bash_task'].includes(normalizedSelectorName(name)))
       && (profile.nativeToolSnapshot === undefined || profile.nativeToolSnapshot.some(name => normalizedSelectorName(name) === 'bash_task'));
     if (canManageCommands && !tools.includes('bash_task')) tools.push('bash_task');
@@ -149,7 +152,7 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       : 'Child model requires an inherited host model. Select a model in the parent conversation first.');
     // Accept only native Pi levels. Provider effort/managed protocol translation belongs to the SDK, not this plugin.
     const requestedThinking = profile.effort ?? profile.thinking ?? (profile.model ? undefined : inheritedThinking);
-    if (requestedThinking !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(requestedThinking)) {
+    if (requestedThinking !== undefined && !thinkingLevels.includes(requestedThinking)) {
       throw new Error('Invalid Pi thinking level');
     }
     const thinkingLevel = requestedThinking as ThinkingLevel | undefined;
@@ -166,25 +169,28 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       let current: ChildRun | undefined;
       const steering = createChildSteering(() => current);
       const messages = createChildMessageWindow<ChildRun>(manager);
-      const configuredTools = customTools?.filter((tool) => roleAllowsTool(profile.name, tool.name, 'configured'));
-      const extraTools = new Set(configuredTools?.map((tool) => tool.name));
+      const configuredTools = [...(shared?.tools ?? []), ...(customTools ?? [])].filter(tool => roleAllowsTool(profile.name, tool.name));
+      const extraTools = new Set([...configuredTools.filter(tool => !shared?.native.has(tool.name)).map(tool => tool.name)]);
+      if (shared) resources.extensionSnapshot = shared.extensionSnapshot;
       const fileObservation = createToolFileObservation({ cwd: workDir, stateDirectories: [configDir, dirname(path)],
         current: () => current ? { id: current.id, signal: current.controller.signal } : undefined,
         isBuiltin: name => {
           const source = session.getAllTools?.().find(tool => tool.name === name)?.sourceInfo;
-          return !extraTools.has(name) && (!source || source.source === 'builtin');
+          return shared?.native.has(name) === true || !extraTools.has(name) && (!source || source.source === 'builtin');
         },
         isProgramTool: name => ['codemode', 'bash_task'].includes(name) && !extraTools.has(name),
         shellCommandPrefix: () => settings.getShellCommandPrefix(),
       });
       const commands = canManageCommands ? await createChildCommands({ manager, sessionPath: path,
         current: () => current ? { id: current.id, signal: current.controller.signal, last: current.last } : undefined,
-        isNativeBash: () => !extraTools.has('bash') && session.getAllTools?.().find(tool => tool.name === 'bash')?.sourceInfo.source === 'builtin',
+        isNativeBash: () => shared?.native.has('bash') === true || !extraTools.has('bash') && session.getAllTools?.().find(tool => tool.name === 'bash')?.sourceInfo.source === 'builtin',
         onStarted: onOwnedCommandStarted,
       }) : undefined;
-      let serverFor = (_name: string): string | undefined => undefined;
+      let serverFor: (name: string) => string | undefined = shared?.serverFor ?? (() => undefined);
       let policy = childToolPolicy(profile, tools, extraTools, (name) => serverFor(name));
+      const sharedNames = shared && new Set(shared.tools.map(tool => tool.name));
       const allow = (name: string): boolean => policy(name)
+        && (!sharedNames || sharedNames.has(name) || ['codemode', 'tool_search'].includes(name) || name === 'bash_task' && canManageCommands)
         && (normalizedSelectorName(name) !== 'codemode' || isCodemodeEnabled?.() === true);
       const guard: ExtensionFactory = (pi) => {
         pi.on('tool_call', (event) => {
@@ -193,11 +199,14 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
       };
       const factories: InlineExtension[] = [guard, fileObservation.extension, ...(commands ? [commands.extension] : [])];
       const mcpEnabled = profile.mcp !== false && profile.mcpServers?.length !== 0
-        && (!parentRuntime || parentRuntime.mcp !== null);
-      const mcpFactoryNeeded = mcpEnabled || parentRuntime?.mcp != null;
+        && (!parentRuntime || !!shared || parentRuntime.mcp !== null);
+      const mcpFactoryNeeded = !shared && (mcpEnabled || parentRuntime?.mcp != null);
       const discovery: string[] = [];
       let initialDiscovery: string[] = [];
       if (allow('codemode') && api.createCodemodeExtension) { factories.push(api.createCodemodeExtension({ mode: 'on', models: false })); discovery.push('codemode'); }
+      if (shared && allow('tool_search') && api.createToolSearchExtension) {
+        factories.push(api.createToolSearchExtension()); discovery.push('tool_search');
+      }
       if (mcpFactoryNeeded) {
         const mcp = await childMcpFactory(api, { ...profile, extensions: resources.extensions, extensionSnapshot: resources.extensionSnapshot }, configDir, workDir, projectTrusted, path,
           profile.timeoutMs > 0 ? Math.min(profile.timeoutMs, 10000) : 10000, parentRuntime?.mcp ?? undefined);
@@ -237,16 +246,16 @@ export function createPiChildFactory({ agentDir, modelRuntime, sdk, inheritedMod
         },
       });
       await loader.reload();
-      const plugins = [...pluginToolNames(loader, resources.extensionSources), ...(configuredTools?.map((tool) => tool.name) ?? [])];
+      const plugins = [...pluginToolNames(loader, resources.extensionSources), ...configuredTools.map(tool => tool.name)];
       if (commands && plugins.includes('bash_task')) throw new Error('Configured tool conflicts with the owned bash_task control');
-      for (const name of plugins) extraTools.add(name);
+      for (const name of plugins) if (!shared?.native.has(name)) extraTools.add(name);
       const excludeTools = [...new Set([...recursiveTools, ...taskChildBlockedTools])];
       if (!allow('codemode')) excludeTools.push('codemode');
       if (!mcpEnabled) excludeTools.push('mcp__*', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource');
       const { session } = await api.createAgentSession({
         cwd: workDir, agentDir: configDir, modelRuntime: steering.scopeRuntime(runtime), model, thinkingLevel,
         tools: sdkToolSelection(tools, plugins, allow, discovery, mcpEnabled), excludeTools,
-        customTools: configuredTools?.filter((tool) => allow(tool.name)), settingsManager: settings, resourceLoader: loader, sessionManager: manager,
+        customTools: configuredTools.length ? configuredTools.filter((tool) => allow(tool.name)) : undefined, settingsManager: settings, resourceLoader: loader, sessionManager: manager,
       });
       if (session.setActiveToolsByName && session.getActiveToolNames) session.setActiveToolsByName(session.getActiveToolNames()
         .filter((name) => !discovery.includes(name) || name === 'codemode' && allow(name) || tools.includes(name) || initialDiscovery.includes(name)));

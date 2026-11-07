@@ -30,7 +30,6 @@
     "docs/",
     "test/",
     "scripts/",
-    "sdk-patches/",
     "tsconfig.json",
     "upstream.lock.json"
   ],
@@ -40,6 +39,7 @@
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
@@ -53,6 +53,7 @@
     "upstream:sync": "node scripts/upstream.mjs --sync"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
     "@earendil-works/pi-coding-agent": "1.5.0",
     "@types/node": "22.20.5",
     "typebox": "1.3.27",

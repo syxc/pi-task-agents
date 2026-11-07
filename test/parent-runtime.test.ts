@@ -7,7 +7,7 @@ const extension = (name, extra = {}) => ({ path: '<inline:' + name + '>', resolv
   sourceInfo: { scope: 'user', kind: 'extension', path: '<inline:' + name + '>' }, factory() {}, ...extra });
 const profile = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0, mcp: false };
 const host = extensions => ({ getExtensions: () => ({ extensions }), getSkills: () => ({ skills: [] }) });
-const api = snapshot => ({ getResources: async () => snapshot, getAllTools: () => [], getSettings: () => ({}) });
+const api = snapshot => ({ captureResources: async () => snapshot, getAllTools: () => [], getSettings: () => ({}) });
 
 test('parent snapshot absence fails explicitly rather than rediscovering disk resources', async () => {
   await assert.rejects(captureParentRuntime({ getAllTools() { assert.fail('No metadata guessing'); },
@@ -40,12 +40,12 @@ test('capture rejects malformed resource and native setting contracts', async ()
 test('capture cancellation does not wait for a held connector or expose its late value', async () => {
   let release;
   const held = new Promise(resolve => { release = resolve; }), cancel = new AbortController();
-  const result = captureParentRuntime({ ...api(null), getResources: () => held }, cancel.signal);
+  const result = captureParentRuntime({ ...api(null), captureResources: () => held }, cancel.signal);
   cancel.abort(); await assert.rejects(result, { name: 'AbortError' });
   release({ extensions: [extension('late')], skills: [], mcp: null });
   await Promise.resolve();
   const already = new AbortController(); already.abort();
-  await assert.rejects(captureParentRuntime({ ...api(null), getResources() { assert.fail('No late snapshot reads'); } }, already.signal),
+  await assert.rejects(captureParentRuntime({ ...api(null), captureResources() { assert.fail('No late snapshot reads'); } }, already.signal),
     { name: 'AbortError' });
 });
 

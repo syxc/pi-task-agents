@@ -7,7 +7,7 @@ export function filterConfiguredToolDefinitions(base: ReturnType<ResourceLoader[
   paths: readonly string[], role: string): typeof base {
   for (const extension of base.extensions) {
     if (!paths.includes(extension.resolvedPath)) continue;
-    for (const name of extension.tools.keys()) if (!roleAllowsTool(role, name, 'configured')) {
+    for (const name of extension.tools.keys()) if (!roleAllowsTool(role, name)) {
       extension.tools.delete(name);
     }
   }

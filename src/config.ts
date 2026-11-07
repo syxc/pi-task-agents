@@ -1,9 +1,9 @@
 import type { BigIntStats } from 'node:fs';
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentProfile, ConfigLoadOptions, TaskAgentsConfig } from './types.ts';
-import { isResourceName } from './resource-selection.ts';
+import { isResourceName, within } from './resource-selection.ts';
 
 type RoleOptions = { -readonly [K in keyof Omit<AgentProfile, 'name'>]?: AgentProfile[K] };
 type RoleInput = Omit<RoleOptions, 'thinking'> & { thinking?: string };
@@ -16,7 +16,7 @@ interface ParsedConfig {
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url));
 const builtins: readonly string[] = ['explore', 'worker', 'verifier', 'mavis'];
 const readTools: readonly string[] = ['read', 'grep', 'find', 'ls'];
-const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const thinkingLevels: readonly string[] = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const roleKeys: readonly string[] = [
   'model', 'thinking', 'effort', 'instructions', 'tools', 'extensions', 'skills', 'mcp', 'mcpServers', 'disallowedTools', 'timeoutMs',
 ];
@@ -86,7 +86,7 @@ function roleName(value: string, path: string, request = false): string {
   return !explicit && builtins.includes(name) ? name : 'agent:' + name;
 }
 
-function checkRole(role: unknown, name: string, path: string): asserts role is RoleInput {
+function checkRole(role: unknown, path: string): asserts role is RoleInput {
   object(role, path, roleKeys);
   if (role.model !== undefined) model(role.model, path + '.model');
   if (role.thinking !== undefined) text(role.thinking, path + '.thinking');
@@ -115,11 +115,6 @@ function freeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
-}
-
-function within(root: string, path: string): boolean {
-  const child = relative(root, path);
-  return child === '' || (child !== '..' && !child.startsWith('..' + sep) && !isAbsolute(child));
 }
 
 async function resourcePaths(paths: readonly string[], file: string, key: string): Promise<string[]> {
@@ -205,7 +200,7 @@ async function readConfig(file: string): Promise<ParsedConfig | undefined> {
   for (const [key, value] of Object.entries(configuredRoles)) {
     const name = roleName(key, file + '.roles.' + key);
     if (own(roles, name)) fail(file + '.roles.' + key, 'duplicate normalized role name: ' + name);
-    checkRole(value, name, file + '.roles.' + key);
+    checkRole(value, file + '.roles.' + key);
     const rawEffort = value.effort ?? value.thinking;
     const override: RoleOptions = { ...value, thinking: undefined,
       ...(rawEffort === undefined ? {} : { effort: rawEffort.trim() }) };
@@ -229,7 +224,7 @@ function mergeRole(base: AgentProfile, override: RoleOptions): AgentProfile {
 
 function checkEffective(role: AgentProfile, name: string): void {
   const { name: ignored, skillSnapshot, nativeToolSnapshot, toolInventory, ...options } = role;
-  checkRole(role.effort === undefined ? options : { ...options, thinking: undefined }, name, 'roles.' + name);
+  checkRole(role.effort === undefined ? options : { ...options, thinking: undefined }, 'roles.' + name);
   for (const [field, value] of Object.entries({ skillSnapshot, nativeToolSnapshot, toolInventory })) {
     if (value !== undefined) strings(value, 'roles.' + name + '.' + field);
   }

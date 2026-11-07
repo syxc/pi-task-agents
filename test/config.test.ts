@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveProfile } from '../src/config.ts';
-import { childToolPolicy, isRecursive } from '../src/resource-selection.ts';
+import { childToolPolicy, roleAllowsTool } from '../src/resource-selection.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const readonly = ['read', 'grep', 'find', 'ls'];
@@ -272,10 +272,10 @@ test('selectors do not grant readonly mutation, delegation, or wildcard expansio
 
 test('parent task controls remain unavailable and MCP business names are not overblocked', () => {
   for (const name of ['task', 'task_append', 'task_send', 'task_query', 'task_output', 'task_stop', 'task_agents', 'subagent']) {
-    assert.equal(isRecursive(name), true, name);
+    assert.equal(roleAllowsTool('worker', name), false, name);
   }
   for (const name of ['task_update', 'subagent_status', 'mcp__tracker__task', 'mcp__tracker__task_update']) {
-    assert.equal(isRecursive(name), false, name);
+    assert.equal(roleAllowsTool('worker', name), true, name);
   }
   const selected = { name: 'verifier', tools: ['read'], timeoutMs: 0 };
   const allow = childToolPolicy(selected, selected.tools, new Set(['write', 'edit', 'task_query', 'search_docs']));

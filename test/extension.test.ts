@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerTaskAgents, toolResult } from '../src/extension.ts';
+import * as config from '../src/config.ts';
 
 test('a full output page is preserved when the engine has advanced its byte cursor', () => {
   const output = 'a'.repeat(65536);
@@ -14,7 +15,7 @@ test('a full output page is preserved when the engine has advanced its byte curs
 
 
 const runtimeAPI = { getAllTools: () => [], getSettings: () => ({}),
-  getResources: async () => ({ extensions: [], skills: [], mcp: null }) };
+  captureResources: async () => ({ extensions: [], skills: [], mcp: null }) };
 
 function fixture() {
   const tools = new Map(), handlers = new Map(), commands = new Map(), engines = [], factories = [];
@@ -54,6 +55,7 @@ function fixture() {
   const profile = { name: 'worker', model: 'fake/model', thinking: 'high', instructions: '',
     tools: ['read'], extensions: [], skills: [], mcp: false, timeoutMs: 0 };
   const controller = registerTaskAgents(pi, { agentDir: '/agent-tools', Engine,
+    captureRuntime: async () => ({ resources: { getExtensions: () => ({ extensions: [] }), getSkills: () => ({ skills: [] }) }, mcp: null, settings: {} }),
     configLoader: async () => ({ maxConcurrency: 4, roles: { worker: profile }, diagnostics: [] }),
     childFactory: (options) => { factories.push(options); return () => {}; },
   });
@@ -266,6 +268,10 @@ test('task schema accepts raw effort and prepares blank optional model/effort wi
     assert.equal(task.parameters.properties.effort.type, 'string');
     assert.equal(task.parameters.properties.effort.minLength, 1);
     assert.equal(task.parameters.properties.effort.anyOf, undefined);
+    const nativeLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    assert.deepEqual(config.thinkingLevels, nativeLevels);
+    assert.equal(Object.isFrozen(config.thinkingLevels), true);
+    for (const level of nativeLevels) assert.match(task.parameters.properties.effort.description, new RegExp(`\\b${level}\\b`));
     const input = { agent_name: 'worker', description: 'title', prompt: 'work', model: '', effort: '  ' };
     assert.deepEqual(task.prepareArguments(input), { agent_name: 'worker', description: 'title', prompt: 'work' });
     assert.equal(input.model, '', 'argument preparation must not mutate raw input');
@@ -324,6 +330,7 @@ test('real engine adapter waits by default, continues the same child and enforce
     getThinkingLevel: () => 'high', appendEntry() {}, sendMessage: (...args) => sent.push(args) };
   const profile = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 };
   const controller = registerTaskAgents(pi, { agentDir,
+    captureRuntime: async () => ({ resources: { getExtensions: () => ({ extensions: [] }), getSkills: () => ({ skills: [] }) }, mcp: null, settings: {} }),
     configLoader: async () => ({ maxConcurrency: 4, roles: { worker: profile }, diagnostics: [] }),
     childFactory: () => async ({ sessionPath }) => {
       const child = { sessionPath, prompts: [], turns: [],
