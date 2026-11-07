@@ -1,555 +1,891 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { TaskController, RESULT_TYPE } from '../src/controller.ts';
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { TaskController, RESULT_TYPE } from '../src/controller.ts'
 
-const runtimeAPI = { getAllTools: () => [], getSettings: () => ({}),
-  captureResources: async () => ({ extensions: [], skills: [], mcp: null }) };
+const runtimeAPI = {
+  getAllTools: () => [],
+  getSettings: () => ({}),
+  captureResources: async () => ({ extensions: [], skills: [], mcp: null })
+}
 
 function fixture(entries = [], roles = {}) {
-  const sent = [];
-  const engines = [];
-  const factories = [];
+  const sent = []
+  const engines = []
+  const factories = []
   class Engine {
-    constructor(options) { this.options = options; this.tasks = []; engines.push(this); }
+    constructor(options) {
+      this.options = options
+      this.tasks = []
+      engines.push(this)
+    }
     async init() {}
-    async close() { this.closed = true; }
-    async query() { return this.tasks; }
-    async pendingNotifications() { return this.tasks.filter((task) => task.notification_pending); }
-    async ackNotification(id) { this.tasks.find((task) => task.task_id === id).notification_pending = false; }
-    async output(id) { return { ...this.tasks.find((task) => task.task_id === id), output: 'child report' }; }
-    async stop(id) { this.tasks.find((task) => task.task_id === id).status = 'canceled'; }
+    async close() {
+      this.closed = true
+    }
+    async query() {
+      return this.tasks
+    }
+    async pendingNotifications() {
+      return this.tasks.filter((task) => task.notification_pending)
+    }
+    async ackNotification(id) {
+      this.tasks.find((task) => task.task_id === id).notification_pending = false
+    }
+    async output(id) {
+      return { ...this.tasks.find((task) => task.task_id === id), output: 'child report' }
+    }
+    async stop(id) {
+      this.tasks.find((task) => task.task_id === id).status = 'canceled'
+    }
   }
-  const pi = { ...runtimeAPI, sendMessage: (...args) => sent.push(args), getThinkingLevel: () => 'high',
-    appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }) };
-  const ctx = { cwd: '/project', hasUI: false, isProjectTrusted: () => false,
-    sessionManager: { getSessionId: () => 'parent-a', getEntries: () => entries } };
-  const controller = new TaskController(pi, { agentDir: '/agent', Engine,
+  const pi = {
+    ...runtimeAPI,
+    sendMessage: (...args) => sent.push(args),
+    getThinkingLevel: () => 'high',
+    appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data })
+  }
+  const ctx = {
+    cwd: '/project',
+    hasUI: false,
+    isProjectTrusted: () => false,
+    sessionManager: { getSessionId: () => 'parent-a', getEntries: () => entries }
+  }
+  const controller = new TaskController(pi, {
+    agentDir: '/agent',
+    Engine,
     configLoader: async () => ({ maxConcurrency: 4, roles, diagnostics: [] }),
-    childFactory: (options) => { factories.push(options); return () => {}; } });
-  return { controller, ctx, engines, sent, entries, pi, factories };
+    childFactory: (options) => {
+      factories.push(options)
+      return () => {}
+    }
+  })
+  return { controller, ctx, engines, sent, entries, pi, factories }
 }
 test('codemode authority follows the attached native parent and is not captured from a stale owner', async () => {
-  const f = fixture();
-  let active = [];
-  f.pi.getActiveTools = () => active;
-  let replacement;
+  const f = fixture()
+  let active = []
+  f.pi.getActiveTools = () => active
+  let replacement
   try {
-    await f.controller.ensure(f.ctx);
-    const read = f.factories[0].isCodemodeEnabled;
-    assert.equal(read(), false);
-    active = ['read', 'codemode'];
-    assert.equal(read(), true);
-    active = ['read'];
-    assert.equal(read(), false);
-    active = ['codemode'];
-    await f.controller.shutdown('new');
-    f.pi.getActiveTools = () => { throw new Error('Stale parent API must not be called'); };
-    assert.equal(read(), true, 'Detached background owner retains its last approved state, not another session');
-    replacement = new TaskController({ ...f.pi, getActiveTools: () => [] }, {
-      agentDir: '/agent', configLoader: async () => ({ roles: {}, diagnostics: [] }),
-      childFactory() { throw new Error('The retained SDK factory must not be recreated'); },
-    });
-    await replacement.ensure(f.ctx);
-    assert.equal(read(), false, 'Reattachment installs the current parent reader without losing SDK cache');
+    await f.controller.ensure(f.ctx)
+    const read = f.factories[0].isCodemodeEnabled
+    assert.equal(read(), false)
+    active = ['read', 'codemode']
+    assert.equal(read(), true)
+    active = ['read']
+    assert.equal(read(), false)
+    active = ['codemode']
+    await f.controller.shutdown('new')
+    f.pi.getActiveTools = () => {
+      throw new Error('Stale parent API must not be called')
+    }
+    assert.equal(
+      read(),
+      true,
+      'Detached background owner retains its last approved state, not another session'
+    )
+    replacement = new TaskController(
+      { ...f.pi, getActiveTools: () => [] },
+      {
+        agentDir: '/agent',
+        configLoader: async () => ({ roles: {}, diagnostics: [] }),
+        childFactory() {
+          throw new Error('The retained SDK factory must not be recreated')
+        }
+      }
+    )
+    await replacement.ensure(f.ctx)
+    assert.equal(
+      read(),
+      false,
+      'Reattachment installs the current parent reader without losing SDK cache'
+    )
   } finally {
-    await replacement?.shutdown();
-    await f.controller.shutdown();
+    await replacement?.shutdown()
+    await f.controller.shutdown()
   }
-});
+})
 
 test('a canceled snapshot cannot overwrite a reattached owners current approval', async () => {
-  const f = fixture([], { worker: { name: 'worker', model: 'fake/model', instructions: '', tools: ['read'],
-    extensions: [], skills: [], mcp: false, timeoutMs: 0 } });
-  let release, entered, replacement;
-  const reading = new Promise(resolve => { entered = resolve; });
-  f.pi.captureResources = () => { entered(); return new Promise(resolve => { release = resolve; }); };
+  const f = fixture([], {
+    worker: {
+      name: 'worker',
+      model: 'fake/model',
+      instructions: '',
+      tools: ['read'],
+      extensions: [],
+      skills: [],
+      mcp: false,
+      timeoutMs: 0
+    }
+  })
+  let release, entered, replacement
+  const reading = new Promise((resolve) => {
+    entered = resolve
+  })
+  f.pi.captureResources = () => {
+    entered()
+    return new Promise((resolve) => {
+      release = resolve
+    })
+  }
   try {
-    await f.controller.ensure(f.ctx);
-    const read = f.factories[0].getParentRuntime;
-    const pending = f.controller.start({ agent_name: 'worker', description: 'Canceled capture', prompt: '' }, 'old-capture', undefined, f.ctx);
-    const rejected = assert.rejects(pending, { name: 'AbortError' });
-    await reading; await f.controller.shutdown('new'); await rejected;
-    replacement = new TaskController({ ...f.pi, ...runtimeAPI,
-      getSettings: () => ({ shellCommandPrefix: 'export OWNED=REATTACHED' }) }, {
-      agentDir: '/agent', configLoader: async () => ({ roles: { worker: { name: 'worker', model: 'fake/model',
-        instructions: '', tools: ['read'], extensions: [], skills: [], mcp: false, timeoutMs: 0 } }, diagnostics: [] }),
-      childFactory() { throw new Error('Retained owner must keep its original factory'); },
-    });
-    await replacement.ensure(f.ctx); f.engines[0].start = async () => complete();
-    await replacement.start({ agent_name: 'worker', description: 'Current capture', prompt: '' }, 'new-capture', undefined, f.ctx);
-    const current = read(); assert.equal(current.settings.shellCommandPrefix, 'export OWNED=REATTACHED');
-    release({ extensions: [], skills: [], mcp: null }); await Promise.resolve();
-    assert.equal(read(), current);
-  } finally { release?.({ extensions: [], skills: [], mcp: null }); await replacement?.shutdown(); await f.controller.shutdown(); }
-});
+    await f.controller.ensure(f.ctx)
+    const read = f.factories[0].getParentRuntime
+    const pending = f.controller.start(
+      { agent_name: 'worker', description: 'Canceled capture', prompt: '' },
+      'old-capture',
+      undefined,
+      f.ctx
+    )
+    const rejected = assert.rejects(pending, { name: 'AbortError' })
+    await reading
+    await f.controller.shutdown('new')
+    await rejected
+    replacement = new TaskController(
+      {
+        ...f.pi,
+        ...runtimeAPI,
+        getSettings: () => ({ shellCommandPrefix: 'export OWNED=REATTACHED' })
+      },
+      {
+        agentDir: '/agent',
+        configLoader: async () => ({
+          roles: {
+            worker: {
+              name: 'worker',
+              model: 'fake/model',
+              instructions: '',
+              tools: ['read'],
+              extensions: [],
+              skills: [],
+              mcp: false,
+              timeoutMs: 0
+            }
+          },
+          diagnostics: []
+        }),
+        childFactory() {
+          throw new Error('Retained owner must keep its original factory')
+        }
+      }
+    )
+    await replacement.ensure(f.ctx)
+    f.engines[0].start = async () => complete()
+    await replacement.start(
+      { agent_name: 'worker', description: 'Current capture', prompt: '' },
+      'new-capture',
+      undefined,
+      f.ctx
+    )
+    const current = read()
+    assert.equal(current.settings.shellCommandPrefix, 'export OWNED=REATTACHED')
+    release({ extensions: [], skills: [], mcp: null })
+    await Promise.resolve()
+    assert.equal(read(), current)
+  } finally {
+    release?.({ extensions: [], skills: [], mcp: null })
+    await replacement?.shutdown()
+    await f.controller.shutdown()
+  }
+})
 
-const complete = (id = 't1') => ({ task_id: id, agent_name: 'worker', description: 'bounded work', status: 'succeeded', notification_pending: true });
+const complete = (id = 't1') => ({
+  task_id: id,
+  agent_name: 'worker',
+  description: 'bounded work',
+  status: 'succeeded',
+  notification_pending: true
+})
 
 test('completion is sent once and stays pending until the persisted message receipt', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  await Promise.all([f.controller.flush(), f.controller.flush()]);
-  assert.equal(f.sent.length, 1);
-  assert.equal(f.engines[0].tasks[0].notification_pending, true);
-  assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' });
-  assert.equal(f.sent[0][0].display, false);
-  f.controller.receipt(f.sent[0][0]);
-  assert.equal(f.engines[0].tasks[0].notification_pending, true);
-  f.entries.push({ type: 'custom_message', ...f.sent[0][0] });
-  await f.controller.reconcile();
-  assert.equal(f.engines[0].tasks[0].notification_pending, false);
-  await f.controller.flush();
-  assert.equal(f.sent.length, 1);
-  await f.controller.shutdown();
-});
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  await Promise.all([f.controller.flush(), f.controller.flush()])
+  assert.equal(f.sent.length, 1)
+  assert.equal(f.engines[0].tasks[0].notification_pending, true)
+  assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' })
+  assert.equal(f.sent[0][0].display, false)
+  f.controller.receipt(f.sent[0][0])
+  assert.equal(f.engines[0].tasks[0].notification_pending, true)
+  f.entries.push({ type: 'custom_message', ...f.sent[0][0] })
+  await f.controller.reconcile()
+  assert.equal(f.engines[0].tasks[0].notification_pending, false)
+  await f.controller.flush()
+  assert.equal(f.sent.length, 1)
+  await f.controller.shutdown()
+})
 
 test('background completion delivers verifier facts without treating a failed verdict as execution failure', async () => {
-  const f = fixture();
+  const f = fixture()
   try {
-    await f.controller.ensure(f.ctx);
-    f.engines[0].tasks.push({ ...complete(), agent_name: 'verifier', final_text: 'VERDICT: FAIL',
-      verification: { modelVerdict: 'fail', fileChange: 'no_observed_change', observationNotes: ['best effort'] } });
-    await f.controller.flush();
-    assert.equal(f.sent.length, 1);
-    assert.match(f.sent[0][0].content, /model_verdict: fail/);
-    assert.match(f.sent[0][0].content, /file_change: no_observed_change/);
-    assert.equal(f.sent[0][0].details.status, 'succeeded');
-  } finally { await f.controller.shutdown(); }
-});
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push({
+      ...complete(),
+      agent_name: 'verifier',
+      final_text: 'VERDICT: FAIL',
+      verification: {
+        modelVerdict: 'fail',
+        fileChange: 'no_observed_change',
+        observationNotes: ['best effort']
+      }
+    })
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    assert.match(f.sent[0][0].content, /model_verdict: fail/)
+    assert.match(f.sent[0][0].content, /file_change: no_observed_change/)
+    assert.equal(f.sent[0][0].details.status, 'succeeded')
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('even a short result uses the same native notice and required-read contract as MCode', async () => {
-  const f = fixture();
+  const f = fixture()
   try {
-    await f.controller.ensure(f.ctx);
-    f.engines[0].output = async () => { throw new Error('A notice must not read the full result'); };
-    const handoff = 'Updated owned.ts. Validation passed. Risk: external integration was not checked.';
-    f.engines[0].tasks.push({ ...complete(), final_text: handoff });
-    await f.controller.flush();
-    assert.equal(f.sent.length, 1);
-    assert.equal(f.sent[0][0].content.includes(handoff), false);
-    assert.match(f.sent[0][0].content, /Use task_output\(.*before using its findings or reporting them/);
-    assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' });
-    assert.equal(f.engines[0].tasks[0].final_text, handoff);
-  } finally { await f.controller.shutdown(); }
-});
+    await f.controller.ensure(f.ctx)
+    f.engines[0].output = async () => {
+      throw new Error('A notice must not read the full result')
+    }
+    const handoff =
+      'Updated owned.ts. Validation passed. Risk: external integration was not checked.'
+    f.engines[0].tasks.push({ ...complete(), final_text: handoff })
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.sent[0][0].content.includes(handoff), false)
+    assert.match(
+      f.sent[0][0].content,
+      /Use task_output\(.*before using its findings or reporting them/
+    )
+    assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' })
+    assert.equal(f.engines[0].tasks[0].final_text, handoff)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('automatic completion is a bounded notice, not a full-output read or echoed report', async () => {
-  const f = fixture();
+  const f = fixture()
   try {
-    await f.controller.ensure(f.ctx);
-    f.engines[0].output = async () => { throw new Error('A notice must not read the full result'); };
-    f.engines[0].tasks.push({ ...complete(), agent_name: 'verifier', final_text: 'LARGE_CHILD_REPORT_'.repeat(10000),
+    await f.controller.ensure(f.ctx)
+    f.engines[0].output = async () => {
+      throw new Error('A notice must not read the full result')
+    }
+    f.engines[0].tasks.push({
+      ...complete(),
+      agent_name: 'verifier',
+      final_text: 'LARGE_CHILD_REPORT_'.repeat(10000),
       error: 'Full diagnostics remain available with the result',
-      verification: { modelVerdict: 'fail', fileChange: 'uncertain', changedFiles: ['owned.ts'], observationNotes: ['Detailed evidence'] } });
-    await f.controller.flush();
-    assert.equal(f.sent.length, 1);
-    const notice = f.sent[0][0];
-    assert.ok(notice.content.length < 1200);
-    assert.doesNotMatch(notice.content, /LARGE_CHILD_REPORT_|Detailed evidence/);
-    assert.match(notice.content, /model_verdict: fail/);
-    assert.match(notice.content, /file_change: uncertain/);
-    assert.match(notice.content, /task_output/);
-    assert.deepEqual(notice.details, { task_id: 't1', parent_id: 'parent-a', status: 'succeeded' });
-    assert.equal(f.engines[0].tasks[0].final_text.length, 'LARGE_CHILD_REPORT_'.length * 10000);
-  } finally { await f.controller.shutdown(); }
-});
+      verification: {
+        modelVerdict: 'fail',
+        fileChange: 'uncertain',
+        changedFiles: ['owned.ts'],
+        observationNotes: ['Detailed evidence']
+      }
+    })
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    const notice = f.sent[0][0]
+    assert.ok(notice.content.length < 1200)
+    assert.doesNotMatch(notice.content, /LARGE_CHILD_REPORT_|Detailed evidence/)
+    assert.match(notice.content, /model_verdict: fail/)
+    assert.match(notice.content, /file_change: uncertain/)
+    assert.match(notice.content, /task_output/)
+    assert.deepEqual(notice.details, { task_id: 't1', parent_id: 'parent-a', status: 'succeeded' })
+    assert.equal(f.engines[0].tasks[0].final_text.length, 'LARGE_CHILD_REPORT_'.length * 10000)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('recovery reconciles a durable custom message before attempting redelivery', async () => {
-  const f = fixture([{ type: 'custom_message', customType: RESULT_TYPE, details: { task_id: 't1', parent_id: 'parent-a' } }]);
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  await f.controller.reconcile();
-  await f.controller.flush();
-  assert.equal(f.sent.length, 0);
-  await f.controller.shutdown();
-});
+  const f = fixture([
+    {
+      type: 'custom_message',
+      customType: RESULT_TYPE,
+      details: { task_id: 't1', parent_id: 'parent-a' }
+    }
+  ])
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  await f.controller.reconcile()
+  await f.controller.flush()
+  assert.equal(f.sent.length, 0)
+  await f.controller.shutdown()
+})
 
 test('cancel pauses delivery across reload and stops running children', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete(), { task_id: 't2', status: 'running' });
-  await f.controller.stopAll();
-  assert.equal(f.engines[0].tasks[1].status, 'canceled');
-  await f.controller.flush();
-  assert.equal(f.sent.length, 0);
-  await f.controller.shutdown();
-  await f.controller.ensure(f.ctx);
-  f.engines[1].tasks.push(complete());
-  await f.controller.flush();
-  assert.equal(f.sent.length, 0);
-  f.controller.resume();
-  await f.controller.flush();
-  assert.equal(f.sent.length, 1);
-  await f.controller.shutdown();
-});
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete(), { task_id: 't2', status: 'running' })
+  await f.controller.stopAll()
+  assert.equal(f.engines[0].tasks[1].status, 'canceled')
+  await f.controller.flush()
+  assert.equal(f.sent.length, 0)
+  await f.controller.shutdown()
+  await f.controller.ensure(f.ctx)
+  f.engines[1].tasks.push(complete())
+  await f.controller.flush()
+  assert.equal(f.sent.length, 0)
+  f.controller.resume()
+  await f.controller.flush()
+  assert.equal(f.sent.length, 1)
+  await f.controller.shutdown()
+})
 
 test('session replacement retains the old owner and never sends its result to the new session', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  const other = { ...f.ctx, sessionManager: { getSessionId: () => 'parent-b', getEntries: () => [] } };
-  await f.controller.ensure(other);
-  assert.notEqual(f.engines[0].closed, true);
-  await f.engines[0].options.notify();
-  await f.controller.flush();
-  assert.equal(f.sent.length, 0);
-  assert.equal(f.engines[1].options.parentId, 'parent-b');
-  await f.controller.ensure(f.ctx);
-  assert.equal(f.controller.engine, f.engines[0]);
-  await f.controller.flush();
-  assert.equal(f.sent.length, 1);
-  assert.equal(f.sent[0][0].details.parent_id, 'parent-a');
-  await f.controller.shutdown();
-  assert.equal(f.engines[0].closed, true);
-  assert.equal(f.engines[1].closed, true);
-});
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  const other = {
+    ...f.ctx,
+    sessionManager: { getSessionId: () => 'parent-b', getEntries: () => [] }
+  }
+  await f.controller.ensure(other)
+  assert.notEqual(f.engines[0].closed, true)
+  await f.engines[0].options.notify()
+  await f.controller.flush()
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.engines[1].options.parentId, 'parent-b')
+  await f.controller.ensure(f.ctx)
+  assert.equal(f.controller.engine, f.engines[0])
+  await f.controller.flush()
+  assert.equal(f.sent.length, 1)
+  assert.equal(f.sent[0][0].details.parent_id, 'parent-a')
+  await f.controller.shutdown()
+  assert.equal(f.engines[0].closed, true)
+  assert.equal(f.engines[1].closed, true)
+})
 
 test('dialog defers completion delivery until it closes', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  f.controller.dialogOpen = true;
-  await f.controller.flush();
-  assert.equal(f.sent.length, 0);
-  f.controller.dialogOpen = false;
-  await f.controller.flush();
-  assert.equal(f.sent.length, 1);
-  await f.controller.shutdown();
-});
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  f.controller.dialogOpen = true
+  await f.controller.flush()
+  assert.equal(f.sent.length, 0)
+  f.controller.dialogOpen = false
+  await f.controller.flush()
+  assert.equal(f.sent.length, 1)
+  await f.controller.shutdown()
+})
 
-const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
+const deferred = () => {
+  let resolve
+  const promise = new Promise((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
 
-test('cancel, session switch and shutdown during notification discovery prevent a late wakeup', { timeout: 5000 }, async () => {
-  for (const action of ['cancel', 'switch', 'shutdown']) {
-    const f = fixture();
-    await f.controller.ensure(f.ctx);
-    f.engines[0].tasks.push(complete());
-    const entered = deferred(), discovery = deferred();
-    f.engines[0].pendingNotifications = async () => { entered.resolve(); return discovery.promise; };
-    const flush = f.controller.flush();
-    await entered.promise;
-    let closing;
-    if (action === 'cancel') await f.controller.stopAll();
-    if (action === 'switch') f.ctx.sessionManager.getSessionId = () => 'parent-b';
-    if (action === 'shutdown') closing = f.controller.shutdown();
-    discovery.resolve(f.engines[0].tasks);
-    await flush;
-    await closing;
-    assert.equal(f.sent.length, 0, action);
-    await f.controller.shutdown();
+test(
+  'cancel, session switch and shutdown during notification discovery prevent a late wakeup',
+  { timeout: 5000 },
+  async () => {
+    /* oxlint-disable no-await-in-loop -- Cases observe or mutate shared fixture state; retain the ordered execution contract. */
+    for (const action of ['cancel', 'switch', 'shutdown']) {
+      const f = fixture()
+      await f.controller.ensure(f.ctx)
+      f.engines[0].tasks.push(complete())
+      const entered = deferred(),
+        discovery = deferred()
+      f.engines[0].pendingNotifications = async () => {
+        entered.resolve()
+        return discovery.promise
+      }
+      const flush = f.controller.flush()
+      await entered.promise
+      let closing
+      if (action === 'cancel') {
+        await f.controller.stopAll()
+      }
+      if (action === 'switch') {
+        f.ctx.sessionManager.getSessionId = () => 'parent-b'
+      }
+      if (action === 'shutdown') {
+        closing = f.controller.shutdown()
+      }
+      discovery.resolve(f.engines[0].tasks)
+      await flush
+      await closing
+      assert.equal(f.sent.length, 0, action)
+      await f.controller.shutdown()
+    }
+    /* oxlint-enable no-await-in-loop */
   }
-});
+)
 
 test('a canceled admission waiting for ensure never resumes notifications', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  const gate = deferred(), entered = deferred();
-  f.controller.ensure = async () => { entered.resolve(); await gate.promise; return f.engines[0]; };
-  const signal = new AbortController();
-  const start = f.controller.start({}, 'call', signal.signal, f.ctx);
-  await entered.promise;
-  signal.abort();
-  await f.controller.stopAll();
-  gate.resolve();
-  await assert.rejects(start, { name: 'AbortError' });
-  assert.equal(f.controller.suppressed, true);
-  assert.deepEqual(f.entries.map((entry) => entry.data.paused), [true]);
-  await f.controller.shutdown();
-});
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  const gate = deferred(),
+    entered = deferred()
+  f.controller.ensure = async () => {
+    entered.resolve()
+    await gate.promise
+    return f.engines[0]
+  }
+  const signal = new AbortController()
+  const start = f.controller.start({}, 'call', signal.signal, f.ctx)
+  await entered.promise
+  signal.abort()
+  await f.controller.stopAll()
+  gate.resolve()
+  await assert.rejects(start, { name: 'AbortError' })
+  assert.equal(f.controller.suppressed, true)
+  assert.deepEqual(
+    f.entries.map((entry) => entry.data.paused),
+    [true]
+  )
+  await f.controller.shutdown()
+})
 
 test('async send loss and cleared queues can retry without duplicating queued reports', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  f.ctx.isIdle = () => true;
-  let queued = true;
-  f.ctx.hasPendingMessages = () => queued;
-  await f.controller.flush();
-  f.controller.inFlight.set('t1', Date.now() - 2000);
-  await f.controller.flush();
-  assert.equal(f.sent.length, 1);
-  queued = false;
-  await f.controller.flush();
-  assert.equal(f.sent.length, 2);
-  assert.equal(f.engines[0].tasks[0].notification_pending, true);
-  await f.controller.shutdown();
-});
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  f.ctx.isIdle = () => true
+  let queued = true
+  f.ctx.hasPendingMessages = () => queued
+  await f.controller.flush()
+  f.controller.inFlight.set('t1', Date.now() - 2000)
+  await f.controller.flush()
+  assert.equal(f.sent.length, 1)
+  queued = false
+  await f.controller.flush()
+  assert.equal(f.sent.length, 2)
+  assert.equal(f.engines[0].tasks[0].notification_pending, true)
+  await f.controller.shutdown()
+})
 
 test('receipt checks use disk even when Pi in-memory entries already contain the result', async () => {
-  const { mkdir, mkdtemp, writeFile } = await import('node:fs/promises');
-  const root = new URL('../artifacts/controller-tests/', import.meta.url);
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const dir = await mkdtemp(new URL('receipt-', root).pathname);
-  const file = dir + '/parent.jsonl';
-  await writeFile(file, '', { mode: 0o600 });
-  const f = fixture([{ type: 'custom_message', customType: RESULT_TYPE, details: { task_id: 't1', parent_id: 'parent-a' } }]);
-  f.ctx.sessionManager.getSessionFile = () => file;
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  f.controller.receipt({ customType: RESULT_TYPE, details: { task_id: 't1', parent_id: 'parent-a' } });
-  await f.controller.reconcile();
-  assert.equal(f.engines[0].tasks[0].notification_pending, true);
-  await writeFile(file, JSON.stringify(f.entries[0]) + '\n', { mode: 0o600 });
-  await f.controller.reconcile();
-  assert.equal(f.engines[0].tasks[0].notification_pending, false);
-  await f.controller.shutdown();
-});
+  const { mkdir, mkdtemp, writeFile } = await import('node:fs/promises')
+  const root = new URL('../artifacts/controller-tests/', import.meta.url)
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const dir = await mkdtemp(new URL('receipt-', root).pathname)
+  const file = dir + '/parent.jsonl'
+  await writeFile(file, '', { mode: 0o600 })
+  const f = fixture([
+    {
+      type: 'custom_message',
+      customType: RESULT_TYPE,
+      details: { task_id: 't1', parent_id: 'parent-a' }
+    }
+  ])
+  f.ctx.sessionManager.getSessionFile = () => file
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  f.controller.receipt({
+    customType: RESULT_TYPE,
+    details: { task_id: 't1', parent_id: 'parent-a' }
+  })
+  await f.controller.reconcile()
+  assert.equal(f.engines[0].tasks[0].notification_pending, true)
+  await writeFile(file, JSON.stringify(f.entries[0]) + '\n', { mode: 0o600 })
+  await f.controller.reconcile()
+  assert.equal(f.engines[0].tasks[0].notification_pending, false)
+  await f.controller.shutdown()
+})
 
 test('shutdown during initialization cannot leave a new task owner alive', async () => {
-  const f = fixture();
-  const entered = deferred(), config = deferred();
-  f.controller.configLoader = async () => { entered.resolve(); return config.promise; };
-  const opening = f.controller.ensure(f.ctx);
-  await entered.promise;
-  const closing = f.controller.shutdown();
-  config.resolve({ maxConcurrency: 4, roles: {}, diagnostics: [] });
-  await assert.rejects(opening, { name: 'AbortError' });
-  await closing;
-  assert.equal(f.controller.engine, undefined);
-  assert.equal(f.engines.length, 0);
-});
-
+  const f = fixture()
+  const entered = deferred(),
+    config = deferred()
+  f.controller.configLoader = async () => {
+    entered.resolve()
+    return config.promise
+  }
+  const opening = f.controller.ensure(f.ctx)
+  await entered.promise
+  const closing = f.controller.shutdown()
+  config.resolve({ maxConcurrency: 4, roles: {}, diagnostics: [] })
+  await assert.rejects(opening, { name: 'AbortError' })
+  await closing
+  assert.equal(f.controller.engine, undefined)
+  assert.equal(f.engines.length, 0)
+})
 
 test('replacement extension instances reclaim detached engines without cross-session callbacks', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  const engine = f.engines[0];
-  engine.tasks.push({ task_id: 'background', status: 'running' });
-  await f.controller.shutdown('new');
-  assert.notEqual(engine.closed, true);
-  await engine.options.notify();
-  assert.equal(f.sent.length, 0);
-  let replacementFactories = 0;
-  const replacement = new TaskController(f.pi, { agentDir: '/agent',
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  const engine = f.engines[0]
+  engine.tasks.push({ task_id: 'background', status: 'running' })
+  await f.controller.shutdown('new')
+  assert.notEqual(engine.closed, true)
+  await engine.options.notify()
+  assert.equal(f.sent.length, 0)
+  let replacementFactories = 0
+  const replacement = new TaskController(f.pi, {
+    agentDir: '/agent',
     configLoader: async () => ({ maxConcurrency: 4, roles: {}, diagnostics: [] }),
-    childFactory: () => { replacementFactories++; return () => {}; },
-  });
+    childFactory: () => {
+      replacementFactories++
+      return () => {}
+    }
+  })
   try {
-    await replacement.ensure(f.ctx);
-    assert.equal(replacement.engine, engine);
-    assert.equal(f.factories.length, 1);
-    assert.equal(replacementFactories, 0);
-    engine.tasks[0] = complete('background');
-    await engine.options.notify();
-    await replacement.flush();
-    assert.equal(f.sent.length, 1);
-    assert.equal(f.sent[0][0].details.parent_id, 'parent-a');
-  } finally { await replacement.shutdown(); }
-  assert.equal(engine.closed, true);
-});
+    await replacement.ensure(f.ctx)
+    assert.equal(replacement.engine, engine)
+    assert.equal(f.factories.length, 1)
+    assert.equal(replacementFactories, 0)
+    engine.tasks[0] = complete('background')
+    await engine.options.notify()
+    await replacement.flush()
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.sent[0][0].details.parent_id, 'parent-a')
+  } finally {
+    await replacement.shutdown()
+  }
+  assert.equal(engine.closed, true)
+})
 
 test('admission snapshots the current inherited model and thinking, and reload continuation does not drift', async () => {
-  const { mkdir, mkdtemp } = await import('node:fs/promises');
-  const root = new URL('../artifacts/controller-tests/', import.meta.url);
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const agentDir = await mkdtemp(new URL('models-', root).pathname);
-  let thinking = 'high';
-  const dispatched = [];
-  let factoryCalls = 0;
-  const base = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 };
-  const pi = { ...runtimeAPI, getThinkingLevel: () => thinking, sendMessage() {}, appendEntry() {} };
-  const options = { agentDir,
-    configLoader: async () => ({ maxConcurrency: 4, diagnostics: [], roles: {
-      worker: base, verifier: { ...base, name: 'verifier', model: 'fake/fixed' },
-      explore: { ...base, name: 'explore', thinking: 'medium' },
-    } }),
+  const { mkdir, mkdtemp } = await import('node:fs/promises')
+  const root = new URL('../artifacts/controller-tests/', import.meta.url)
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const agentDir = await mkdtemp(new URL('models-', root).pathname)
+  let thinking = 'high'
+  const dispatched = []
+  let factoryCalls = 0
+  const base = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 }
+  const pi = { ...runtimeAPI, getThinkingLevel: () => thinking, sendMessage() {}, appendEntry() {} }
+  const options = {
+    agentDir,
+    configLoader: async () => ({
+      maxConcurrency: 4,
+      diagnostics: [],
+      roles: {
+        worker: base,
+        verifier: { ...base, name: 'verifier', model: 'fake/fixed' },
+        explore: { ...base, name: 'explore', thinking: 'medium' }
+      }
+    }),
     childFactory: () => {
-      factoryCalls++;
+      factoryCalls++
       return async ({ profile, sessionPath, onProfileResolved }) => {
-        await onProfileResolved?.({ ...profile, skillSnapshot: [] });
-        dispatched.push({ profile, sessionPath });
-        return { sessionPath, async prompt() { return { text: 'done' }; },
-          async steer() {}, async abort() {}, async dispose() {} };
-      };
-    },
-  };
-  const ctx = { cwd: agentDir, hasUI: false, model: { provider: 'fake', id: 'parent-a' },
-    sessionManager: { getSessionId: () => 'snapshot-parent', getEntries: () => [] } };
-  const input = { agent_name: 'worker', description: 'snapshot', prompt: 'work' };
-  let controller = new TaskController(pi, options);
+        await onProfileResolved?.({ ...profile, skillSnapshot: [] })
+        dispatched.push({ profile, sessionPath })
+        return {
+          sessionPath,
+          async prompt() {
+            return { text: 'done' }
+          },
+          async steer() {},
+          async abort() {},
+          async dispose() {}
+        }
+      }
+    }
+  }
+  const ctx = {
+    cwd: agentDir,
+    hasUI: false,
+    model: { provider: 'fake', id: 'parent-a' },
+    sessionManager: { getSessionId: () => 'snapshot-parent', getEntries: () => [] }
+  }
+  const input = { agent_name: 'worker', description: 'snapshot', prompt: 'work' }
+  let controller = new TaskController(pi, options)
   try {
-    const first = await controller.start(input, 'first', undefined, ctx);
-    assert.equal(dispatched[0].profile.model, 'fake/parent-a');
-    assert.equal(dispatched[0].profile.thinking, 'high');
-    ctx.model = { provider: 'fake', id: 'parent-b' };
-    thinking = 'low';
-    await controller.start(input, 'second', undefined, ctx);
-    assert.equal(dispatched[1].profile.model, 'fake/parent-b');
-    assert.equal(dispatched[1].profile.thinking, 'low');
-    await controller.start({ ...input, agent_name: 'verifier' }, 'role-model', undefined, ctx);
-    assert.equal(dispatched[2].profile.model, 'fake/fixed');
-    assert.equal(dispatched[2].profile.thinking, undefined);
-    await controller.start({ ...input, model: 'fake/override' }, 'input-model', undefined, ctx);
-    assert.equal(dispatched[3].profile.model, 'fake/override');
-    assert.equal(dispatched[3].profile.thinking, undefined);
-    await controller.start({ ...input, agent_name: 'explore' }, 'role-thinking', undefined, ctx);
-    assert.equal(dispatched[4].profile.model, 'fake/parent-b');
-    assert.equal(dispatched[4].profile.thinking, 'medium');
-    await controller.start({ ...input, effort: 'high' }, 'explicit-effort', undefined, ctx);
-    assert.equal(dispatched[5].profile.model, 'fake/parent-b');
-    assert.equal(dispatched[5].profile.effort, 'high');
-    assert.equal(dispatched[5].profile.thinking, undefined, 'an override must not inherit a contradictory Pi level');
-    await controller.ensure(ctx);
-    await controller.engine.query();
-    await controller.ensure(ctx);
-    assert.equal(factoryCalls, 1, 'all tasks and repeated queries share one factory');
-    await controller.shutdown('reload');
-    ctx.model = { provider: 'fake', id: 'parent-c' };
-    thinking = 'xhigh';
-    controller = new TaskController(pi, options);
-    const continued = await controller.send({ task_id: first.task_id, content: 'continue' }, 'continuation', undefined, ctx);
-    assert.equal(continued.session_id, first.session_id);
-    assert.equal(dispatched[6].sessionPath, dispatched[0].sessionPath);
-    assert.equal(dispatched[6].profile.model, 'fake/parent-a');
-    assert.equal(dispatched[6].profile.thinking, 'high');
-    assert.equal(factoryCalls, 2, 'reload creates exactly one replacement factory');
-  } finally { await controller.shutdown(); }
-});
+    const first = await controller.start(input, 'first', undefined, ctx)
+    assert.equal(dispatched[0].profile.model, 'fake/parent-a')
+    assert.equal(dispatched[0].profile.thinking, 'high')
+    ctx.model = { provider: 'fake', id: 'parent-b' }
+    thinking = 'low'
+    await controller.start(input, 'second', undefined, ctx)
+    assert.equal(dispatched[1].profile.model, 'fake/parent-b')
+    assert.equal(dispatched[1].profile.thinking, 'low')
+    await controller.start({ ...input, agent_name: 'verifier' }, 'role-model', undefined, ctx)
+    assert.equal(dispatched[2].profile.model, 'fake/fixed')
+    assert.equal(dispatched[2].profile.thinking, undefined)
+    await controller.start({ ...input, model: 'fake/override' }, 'input-model', undefined, ctx)
+    assert.equal(dispatched[3].profile.model, 'fake/override')
+    assert.equal(dispatched[3].profile.thinking, undefined)
+    await controller.start({ ...input, agent_name: 'explore' }, 'role-thinking', undefined, ctx)
+    assert.equal(dispatched[4].profile.model, 'fake/parent-b')
+    assert.equal(dispatched[4].profile.thinking, 'medium')
+    await controller.start({ ...input, effort: 'high' }, 'explicit-effort', undefined, ctx)
+    assert.equal(dispatched[5].profile.model, 'fake/parent-b')
+    assert.equal(dispatched[5].profile.effort, 'high')
+    assert.equal(
+      dispatched[5].profile.thinking,
+      undefined,
+      'an override must not inherit a contradictory Pi level'
+    )
+    await controller.ensure(ctx)
+    await controller.engine.query()
+    await controller.ensure(ctx)
+    assert.equal(factoryCalls, 1, 'all tasks and repeated queries share one factory')
+    await controller.shutdown('reload')
+    ctx.model = { provider: 'fake', id: 'parent-c' }
+    thinking = 'xhigh'
+    controller = new TaskController(pi, options)
+    const continued = await controller.send(
+      { task_id: first.task_id, content: 'continue' },
+      'continuation',
+      undefined,
+      ctx
+    )
+    assert.equal(continued.session_id, first.session_id)
+    assert.equal(dispatched[6].sessionPath, dispatched[0].sessionPath)
+    assert.equal(dispatched[6].profile.model, 'fake/parent-a')
+    assert.equal(dispatched[6].profile.thinking, 'high')
+    assert.equal(factoryCalls, 2, 'reload creates exactly one replacement factory')
+  } finally {
+    await controller.shutdown()
+  }
+})
 
 test('controller passes the public parent registry object into its one owner factory', async () => {
-  const f = fixture();
-  const registry = { getRegisteredProviderIds: () => [], getRegisteredProviderConfig: () => undefined,
-    getRegisteredNativeProvider: () => undefined };
-  f.ctx.modelRegistry = registry;
+  const f = fixture()
+  const registry = {
+    getRegisteredProviderIds: () => [],
+    getRegisteredProviderConfig: () => undefined,
+    getRegisteredNativeProvider: () => undefined
+  }
+  f.ctx.modelRegistry = registry
   try {
-    await f.controller.ensure(f.ctx);
-    await f.controller.ensure(f.ctx);
-    assert.equal(f.factories.length, 1);
-    assert.equal(f.factories[0].inheritedModelRegistry, registry);
-  } finally { await f.controller.shutdown(); }
-});
+    await f.controller.ensure(f.ctx)
+    await f.controller.ensure(f.ctx)
+    assert.equal(f.factories.length, 1)
+    assert.equal(f.factories[0].inheritedModelRegistry, registry)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('default controller factory forwards extension provider registry before model selection without a custom factory', async (t) => {
-  const { mkdir, mkdtemp } = await import('node:fs/promises');
-  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
-  const root = new URL('../artifacts/controller-tests/', import.meta.url);
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const agentDir = await mkdtemp(new URL('provider-registry-', root).pathname);
-  const calls = [];
-  const providerConfig = { api: 'openai-completions', baseUrl: 'https://example.invalid/offline', models: [] };
+  const { mkdir, mkdtemp } = await import('node:fs/promises')
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+  const root = new URL('../artifacts/controller-tests/', import.meta.url)
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const agentDir = await mkdtemp(new URL('provider-registry-', root).pathname)
+  const calls = []
+  const providerConfig = {
+    api: 'openai-completions',
+    baseUrl: 'https://example.invalid/offline',
+    models: []
+  }
   const registry = {
-    getRegisteredProviderIds: () => { calls.push(['ids']); return ['extension-fixture']; },
-    getRegisteredProviderConfig: (id) => { calls.push(['config', id]); return id === 'extension-fixture' ? providerConfig : undefined; },
-    getRegisteredNativeProvider: (id) => { calls.push(['native', id]); return undefined; },
-  };
-  let runtimeCreates = 0;
+    getRegisteredProviderIds: () => {
+      calls.push(['ids'])
+      return ['extension-fixture']
+    },
+    getRegisteredProviderConfig: (id) => {
+      calls.push(['config', id])
+      return id === 'extension-fixture' ? providerConfig : undefined
+    },
+    getRegisteredNativeProvider: (id) => {
+      calls.push(['native', id])
+      return undefined
+    }
+  }
+  let runtimeCreates = 0
   t.mock.method(ModelRuntime, 'create', async (options) => {
-    runtimeCreates++;
-    assert.equal(options.authPath, agentDir + '/auth.json');
-    assert.equal(options.allowModelNetwork, false);
+    runtimeCreates++
+    assert.equal(options.authPath, agentDir + '/auth.json')
+    assert.equal(options.allowModelNetwork, false)
     return {
       registerProvider: (id, config) => calls.push(['seed', id, config]),
       registerNativeProvider: (provider) => calls.push(['seed-native', provider]),
-      getModel: (provider, id) => { calls.push(['lookup', provider, id]); return undefined; },
-    };
-  });
-  const controller = new TaskController({ ...runtimeAPI, getThinkingLevel: () => 'off', sendMessage() {}, appendEntry() {} }, {
-    agentDir,
-    configLoader: async () => ({ roles: { worker: { name: 'worker', instructions: '', tools: ['read'],
-      extensions: [], skills: [], mcp: false, timeoutMs: 0 } }, diagnostics: [] }),
-  });
-  const ctx = { cwd: agentDir, hasUI: false, isProjectTrusted: () => false,
-    model: { provider: 'extension-fixture', id: 'offline-model' }, modelRegistry: registry,
-    sessionManager: { getSessionId: () => 'extension-provider-parent', getEntries: () => [] } };
+      getModel: (provider, id) => {
+        calls.push(['lookup', provider, id])
+        return undefined
+      }
+    }
+  })
+  const controller = new TaskController(
+    { ...runtimeAPI, getThinkingLevel: () => 'off', sendMessage() {}, appendEntry() {} },
+    {
+      agentDir,
+      configLoader: async () => ({
+        roles: {
+          worker: {
+            name: 'worker',
+            instructions: '',
+            tools: ['read'],
+            extensions: [],
+            skills: [],
+            mcp: false,
+            timeoutMs: 0
+          }
+        },
+        diagnostics: []
+      })
+    }
+  )
+  const ctx = {
+    cwd: agentDir,
+    hasUI: false,
+    isProjectTrusted: () => false,
+    model: { provider: 'extension-fixture', id: 'offline-model' },
+    modelRegistry: registry,
+    sessionManager: { getSessionId: () => 'extension-provider-parent', getEntries: () => [] }
+  }
   try {
-    const result = await controller.start({ agent_name: 'worker', description: 'registry path', prompt: 'offline' }, 'registry-call', undefined, ctx);
+    const result = await controller.start(
+      { agent_name: 'worker', description: 'registry path', prompt: 'offline' },
+      'registry-call',
+      undefined,
+      ctx
+    )
     // Stop at the mock lookup boundary: no auth files, provider requests, or SDK
     // sessions are created. The real default factory must seed before lookup.
-    assert.equal(result.status, 'failed');
-    assert.match(result.error, /Unknown child model: extension-fixture\/offline-model/);
-    assert.equal(runtimeCreates, 1);
-    const seed = calls.findIndex(([kind]) => kind === 'seed');
-    const lookup = calls.findIndex(([kind]) => kind === 'lookup');
-    assert.ok(seed >= 0, 'default createPiChildFactory must receive and seed the parent registry');
-    assert.deepEqual(calls[seed], ['seed', 'extension-fixture', providerConfig]);
-    assert.ok(lookup > seed, 'extension provider must be seeded before selecting the frozen provider/id');
-    assert.deepEqual(calls[lookup], ['lookup', 'extension-fixture', 'offline-model']);
-  } finally { await controller.shutdown(); }
-});
+    assert.equal(result.status, 'failed')
+    assert.match(result.error, /Unknown child model: extension-fixture\/offline-model/)
+    assert.equal(runtimeCreates, 1)
+    const seed = calls.findIndex(([kind]) => kind === 'seed')
+    const lookup = calls.findIndex(([kind]) => kind === 'lookup')
+    assert.ok(seed >= 0, 'default createPiChildFactory must receive and seed the parent registry')
+    assert.deepEqual(calls[seed], ['seed', 'extension-fixture', providerConfig])
+    assert.ok(
+      lookup > seed,
+      'extension provider must be seeded before selecting the frozen provider/id'
+    )
+    assert.deepEqual(calls[lookup], ['lookup', 'extension-fixture', 'offline-model'])
+  } finally {
+    await controller.shutdown()
+  }
+})
 
 test('task UI omits absent or unbounded capacity instead of showing undefined or Infinity', async () => {
+  /* oxlint-disable no-await-in-loop -- Cases observe or mutate shared fixture state; retain the ordered execution contract. */
   for (const cap of [undefined, Infinity, 4]) {
-    const f = fixture();
-    const statuses = [];
-    f.ctx.hasUI = true;
-    f.ctx.ui = { setStatus: (key, text) => statuses.push(text), setWidget() {}, notify() {} };
-    f.controller.configLoader = async () => ({ ...(cap === undefined ? {} : { maxConcurrency: cap }), roles: {}, diagnostics: [] });
+    const f = fixture()
+    const statuses = []
+    f.ctx.hasUI = true
+    f.ctx.ui = { setStatus: (key, text) => statuses.push(text), setWidget() {}, notify() {} }
+    f.controller.configLoader = async () => ({
+      ...(cap === undefined ? {} : { maxConcurrency: cap }),
+      roles: {},
+      diagnostics: []
+    })
     try {
-      await f.controller.ensure(f.ctx);
-      f.engines[0].tasks.push({ task_id: 'running', status: 'running' });
-      await f.controller.updateUI();
-      assert.equal(statuses.at(-1), cap === 4 ? 'Agents 1/4' : 'Agents 1');
-    } finally { await f.controller.shutdown(); }
+      await f.controller.ensure(f.ctx)
+      f.engines[0].tasks.push({ task_id: 'running', status: 'running' })
+      await f.controller.updateUI()
+      assert.equal(statuses.at(-1), cap === 4 ? 'Agents 1/4' : 'Agents 1')
+    } finally {
+      await f.controller.shutdown()
+    }
   }
-});
+  /* oxlint-enable no-await-in-loop */
+})
 
 test('task UI separates queued work from occupied capacity and includes current activity', async () => {
-  const f = fixture(), statuses = [], widgets = [];
-  f.ctx.hasUI = true;
-  f.ctx.ui = { setStatus: (_key, value) => statuses.push(value), setWidget: (_key, value) => widgets.push(value), notify() {} };
+  const f = fixture(),
+    statuses = [],
+    widgets = []
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus: (_key, value) => statuses.push(value),
+    setWidget: (_key, value) => widgets.push(value),
+    notify() {}
+  }
   try {
-    await f.controller.ensure(f.ctx);
-    f.engines[0].tasks.push({ task_id: 'running', status: 'running', agent_name: 'worker', description: 'Build',
-      started_at: new Date(Date.now() - 5000).toISOString(), activity: 'bash: running' },
-    { task_id: 'queued', status: 'queued', agent_name: 'worker', description: 'Wait', created_at: new Date().toISOString() });
-    await f.controller.updateUI();
-    assert.equal(statuses.at(-1), 'Agents 1/4 · queued 1');
-    assert.match(widgets.at(-1).join('\n'), /bash: running/);
-    assert.ok(f.controller.uiTimer);
-    await f.controller.shutdown();
-    assert.equal(f.controller.uiTimer, undefined);
-  } finally { await f.controller.shutdown(); }
-});
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(
+      {
+        task_id: 'running',
+        status: 'running',
+        agent_name: 'worker',
+        description: 'Build',
+        started_at: new Date(Date.now() - 5000).toISOString(),
+        activity: 'bash: running'
+      },
+      {
+        task_id: 'queued',
+        status: 'queued',
+        agent_name: 'worker',
+        description: 'Wait',
+        created_at: new Date().toISOString()
+      }
+    )
+    await f.controller.updateUI()
+    assert.equal(statuses.at(-1), 'Agents 1/4 · queued 1')
+    assert.match(widgets.at(-1).join('\n'), /bash: running/)
+    assert.ok(f.controller.uiTimer)
+    await f.controller.shutdown()
+    assert.equal(f.controller.uiTimer, undefined)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('terminal cleanup holds stay visible and running tasks are not hidden behind the queue', async () => {
-  const f = fixture(), statuses = [], widgets = [];
-  f.ctx.hasUI = true;
-  f.ctx.ui = { setStatus: (_key, value) => statuses.push(value), setWidget: (_key, value) => widgets.push(value), notify() {} };
+  const f = fixture(),
+    statuses = [],
+    widgets = []
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus: (_key, value) => statuses.push(value),
+    setWidget: (_key, value) => widgets.push(value),
+    notify() {}
+  }
   try {
-    await f.controller.ensure(f.ctx);
-    f.engines[0].tasks.push({ task_id: 'cleanup', status: 'canceled', agent_name: 'worker', description: 'Owned cleanup', cleanup_pending: true },
-      ...Array.from({ length: 8 }, (_, i) => ({ task_id: `q${i}`, status: 'queued', agent_name: 'worker', description: 'Waiting' })));
-    await f.controller.updateUI();
-    assert.equal(statuses.at(-1), 'Agents 1/4 · queued 8 · cleanup pending 1');
-    assert.match(widgets.at(-1)[0], /Owned cleanup/); assert.match(widgets.at(-1)[0], /cleanup pending/);
-    assert.equal(widgets.at(-1).length, 6);
-  } finally { await f.controller.shutdown(); }
-});
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(
+      {
+        task_id: 'cleanup',
+        status: 'canceled',
+        agent_name: 'worker',
+        description: 'Owned cleanup',
+        cleanup_pending: true
+      },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        task_id: `q${i}`,
+        status: 'queued',
+        agent_name: 'worker',
+        description: 'Waiting'
+      }))
+    )
+    await f.controller.updateUI()
+    assert.equal(statuses.at(-1), 'Agents 1/4 · queued 8 · cleanup pending 1')
+    assert.match(widgets.at(-1)[0], /Owned cleanup/)
+    assert.match(widgets.at(-1)[0], /cleanup pending/)
+    assert.equal(widgets.at(-1).length, 6)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('owner factory reuse rejects trust changes until explicit reload', async () => {
-  const f = fixture();
+  const f = fixture()
   try {
-    const engine = await f.controller.ensure(f.ctx);
-    await f.controller.ensure(f.ctx);
-    assert.equal(f.factories.length, 1);
-    f.ctx.isProjectTrusted = () => true;
-    await assert.rejects(f.controller.ensure(f.ctx), /project trust changed; reload/);
-    assert.equal(f.factories.length, 1);
-    assert.equal(f.controller.engine, engine);
-    await f.controller.shutdown('reload');
-    await f.controller.ensure(f.ctx);
-    assert.equal(f.factories.length, 2);
-    assert.equal(f.factories[1].projectTrusted, true);
-    assert.equal(engine.closed, true);
-  } finally { await f.controller.shutdown(); }
-});
+    const engine = await f.controller.ensure(f.ctx)
+    await f.controller.ensure(f.ctx)
+    assert.equal(f.factories.length, 1)
+    f.ctx.isProjectTrusted = () => true
+    await assert.rejects(f.controller.ensure(f.ctx), /project trust changed; reload/)
+    assert.equal(f.factories.length, 1)
+    assert.equal(f.controller.engine, engine)
+    await f.controller.shutdown('reload')
+    await f.controller.ensure(f.ctx)
+    assert.equal(f.factories.length, 2)
+    assert.equal(f.factories[1].projectTrusted, true)
+    assert.equal(engine.closed, true)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
 
 test('delivery retries stop at three attempts and can be explicitly resumed', async () => {
-  const f = fixture();
-  await f.controller.ensure(f.ctx);
-  f.engines[0].tasks.push(complete());
-  f.ctx.isIdle = () => true;
-  f.ctx.hasPendingMessages = () => false;
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  f.ctx.isIdle = () => true
+  f.ctx.hasPendingMessages = () => false
+  /* oxlint-disable no-await-in-loop -- Cases observe or mutate shared fixture state; retain the ordered execution contract. */
   for (let attempt = 0; attempt < 10; attempt++) {
-    f.controller.inFlight.set('t1', Date.now() - 2000);
-    await f.controller.flush();
+    f.controller.inFlight.set('t1', Date.now() - 2000)
+    await f.controller.flush()
   }
-  assert.equal(f.sent.length, 3);
-  assert.equal(f.engines[0].tasks[0].notification_pending, true);
-  f.controller.resume();
-  f.controller.inFlight.set('t1', Date.now() - 2000);
-  await f.controller.flush();
-  assert.equal(f.sent.length, 4);
-  await f.controller.shutdown();
-});
+  /* oxlint-enable no-await-in-loop */
+  assert.equal(f.sent.length, 3)
+  assert.equal(f.engines[0].tasks[0].notification_pending, true)
+  f.controller.resume()
+  f.controller.inFlight.set('t1', Date.now() - 2000)
+  await f.controller.flush()
+  assert.equal(f.sent.length, 4)
+  await f.controller.shutdown()
+})

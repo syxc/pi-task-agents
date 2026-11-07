@@ -9,7 +9,7 @@
 - Copyright: `Copyright (c) 2026 MiniMax Code`
 - License: MIT. See the repository `NOTICE` and `LICENSE` for attribution.
 
-`turn-id.ts.source` is an unchanged copy of `packages/local-runtime/src/background-task/turn-id.ts` at the same commit. Its SHA-256 is `455c8e4c8f641688d59bc956b0a3b7ecb155c788e771a9021aa6e05fdca28bc3`. `src/task-turn-id.ts` must match it byte for byte.
+`turn-id.ts.source` is an unchanged copy of `packages/local-runtime/src/background-task/turn-id.ts` at the same commit. Its SHA-256 is `455c8e4c8f641688d59bc956b0a3b7ecb155c788e771a9021aa6e05fdca28bc3`. `src/vendor/mcode-adapters/task-turn-id.ts` must match it byte for byte.
 
 The engine tests check the watched hashes, compile TypeScript, and substitute only runtime dependencies with `dependencies.mjs`. They do not edit source function bodies. No cache path, network access, or optional test skip is required.
 

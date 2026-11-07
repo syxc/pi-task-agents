@@ -1,0 +1,96 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "import", "unicorn", "node"],
+  "options": {
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "deny"
+  },
+  "env": {
+    "builtin": true
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "artifacts/**",
+    ".engine-test-*/**",
+    "src/vendor/**",
+    "**/dist/**",
+    "**/dist-test/**",
+    "package-lock.json",
+    "**/*.lock.json",
+    ".codegraph/**",
+    ".zvec-grep/**"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn",
+    "style": "off",
+    "restriction": "off",
+    "pedantic": "off",
+    "nursery": "off"
+  },
+  "rules": {
+    "curly": ["error", "all"],
+    "eqeqeq": [
+      "error",
+      "always",
+      {
+        "null": "ignore"
+      }
+    ],
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+    "no-console": "off",
+    "no-debugger": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "no-throw-literal": "error",
+    "no-duplicate-imports": "error",
+    "no-self-compare": "error",
+    "no-useless-concat": "error",
+    "no-useless-escape": "error",
+    "no-useless-rename": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "import/no-duplicates": "error",
+    "import/no-self-import": "error",
+    "import/no-mutable-exports": "error",
+    "import/no-named-default": "error",
+    "unicorn/error-message": "error",
+    "unicorn/escape-case": "error",
+    "unicorn/new-for-builtins": "error",
+    "unicorn/no-abusive-eslint-disable": "error",
+    "unicorn/no-instanceof-array": "error",
+    "unicorn/no-array-sort": "off",
+    "unicorn/no-new-array": "error",
+    "unicorn/no-new-buffer": "error",
+    "unicorn/no-unnecessary-await": "error",
+    "unicorn/no-zero-fractions": "error",
+    "unicorn/prefer-array-find": "error",
+    "unicorn/prefer-date-now": "error",
+    "unicorn/prefer-math-trunc": "error",
+    "unicorn/prefer-negative-index": "error",
+    "unicorn/prefer-node-protocol": "error",
+    "unicorn/prefer-number-properties": "error",
+    "unicorn/prefer-optional-catch-binding": "error",
+    "unicorn/prefer-prototype-methods": "error",
+    "unicorn/prefer-string-slice": "error",
+    "unicorn/prefer-type-error": "error",
+    "unicorn/throw-new-error": "error"
+  },
+  "overrides": [
+    {
+      "files": ["test/**"],
+      "rules": {
+        "no-shadow": "off",
+        "unicorn/no-array-reverse": "off"
+      }
+    }
+  ]
+}

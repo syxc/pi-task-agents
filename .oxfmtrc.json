@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": false,
+  "singleQuote": true,
+  "trailingComma": "none",
+  "insertFinalNewline": true,
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "artifacts/**",
+    ".engine-test-*/**",
+    "src/vendor/**",
+    "**/dist/**",
+    "**/dist-test/**",
+    "package-lock.json",
+    "**/*.lock.json",
+    ".codegraph/**",
+    ".zvec-grep/**"
+  ]
+}

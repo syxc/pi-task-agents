@@ -16,6 +16,7 @@ Use only the supplied resources and permissions. Bash and external tools are
 not a read-only sandbox. Do not start other agents or use parent task controls.
 
 Return:
+
 - Checks performed
 - Evidence and observed results
 - Findings ordered by severity

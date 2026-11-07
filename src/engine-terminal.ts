@@ -1,19 +1,19 @@
-import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts';
-import type { TaskRecord } from './types.ts';
+import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts'
+import type { TaskRecord } from './types.ts'
 
 export interface TaskRunOutcome {
-  status: 'succeeded' | 'failed' | 'aborted';
-  finalText?: string;
-  errorMessage?: string;
+  status: 'succeeded' | 'failed' | 'aborted'
+  finalText?: string
+  errorMessage?: string
 }
 
-export type TaskTerminalOutcome = TaskRunOutcome | { failure: unknown };
+export type TaskTerminalOutcome = TaskRunOutcome | { failure: unknown }
 
 export interface TaskTerminalProjection {
-  status: 'succeeded' | 'failed' | 'canceled';
-  outputText: string;
-  summary?: string;
-  lastError?: ReturnType<typeof normalizeTaskError>;
+  status: 'succeeded' | 'failed' | 'canceled'
+  outputText: string
+  summary?: string
+  lastError?: ReturnType<typeof normalizeTaskError>
 }
 
 // Mirrors local-runtime/background-task/terminal.ts. The runner outcome, not the row status, selects the text.
@@ -22,60 +22,92 @@ export function toTerminalProjection(result: TaskTerminalOutcome): TaskTerminalP
     return {
       status: 'failed',
       outputText: `Background task failed: ${failureMessage(result.failure)}`,
-      lastError: normalizeTaskError(result.failure, 'TASK_FAILED'),
-    };
+      lastError: normalizeTaskError(result.failure, 'TASK_FAILED')
+    }
   }
-  const status = result.status === 'succeeded' ? 'succeeded' : result.status === 'aborted' ? 'canceled' : 'failed';
-  const failureText = result.status === 'succeeded'
-    ? '' : `\n\n[${result.status}] ${result.errorMessage ?? 'Local background task did not complete.'}`;
+  const status =
+    result.status === 'succeeded'
+      ? 'succeeded'
+      : result.status === 'aborted'
+        ? 'canceled'
+        : 'failed'
+  const failureText =
+    result.status === 'succeeded'
+      ? ''
+      : `\n\n[${result.status}] ${result.errorMessage ?? 'Local background task did not complete.'}`
   return {
     status,
     outputText: `${result.finalText ?? ''}${failureText}`,
     ...(result.finalText !== undefined ? { summary: result.finalText } : {}),
-    ...(result.status === 'succeeded' ? {} : { lastError: {
-      message: result.errorMessage ?? result.status,
-      code: status === 'canceled' ? 'TASK_CANCELED' : 'TASK_FAILED',
-    } }),
-  };
+    ...(result.status === 'succeeded'
+      ? {}
+      : {
+          lastError: {
+            message: result.errorMessage ?? result.status,
+            code: status === 'canceled' ? 'TASK_CANCELED' : 'TASK_FAILED'
+          }
+        })
+  }
 }
 
 function returnedStatus(value: unknown): TaskRunOutcome['status'] | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  const marker = value as { kind?: unknown; status?: unknown };
-  return marker.kind === 'returned' && (marker.status === 'succeeded' || marker.status === 'failed' || marker.status === 'aborted')
-    ? marker.status : undefined;
+  if (typeof value !== 'object' || value === null) {
+    return undefined
+  }
+  const marker = value as { kind?: unknown; status?: unknown }
+  return marker.kind === 'returned' &&
+    (marker.status === 'succeeded' || marker.status === 'failed' || marker.status === 'aborted')
+    ? marker.status
+    : undefined
 }
 
 export function runnerOutcome(value: unknown): TaskRunOutcome {
-  if (typeof value !== 'object' || value === null) throw new Error('Invalid child runner result');
-  const result = value as { outcome?: unknown; text?: unknown };
-  const status = result.outcome === undefined ? 'succeeded' : returnedStatus(result.outcome);
-  if (status === undefined || (result.text !== undefined && typeof result.text !== 'string')) {
-    throw new Error('Invalid child runner outcome');
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Invalid child runner result')
   }
-  return { status, ...(result.text === undefined ? {} : { finalText: result.text as string }) };
+  const result = value as { outcome?: unknown; text?: unknown }
+  const status = result.outcome === undefined ? 'succeeded' : returnedStatus(result.outcome)
+  if (status === undefined || (result.text !== undefined && typeof result.text !== 'string')) {
+    throw new Error('Invalid child runner outcome')
+  }
+  return { status, ...(result.text === undefined ? {} : { finalText: result.text as string }) }
 }
 
 export function exceptionOutcome(
-  background: boolean, error: unknown, partialResult?: unknown, shutdownReason?: string,
+  background: boolean,
+  error: unknown,
+  partialResult?: unknown,
+  shutdownReason?: string
 ): TaskTerminalOutcome {
   // Only explicit backend provenance can classify a rejection as a normal failed/aborted return.
   if (typeof partialResult === 'object' && partialResult !== null) {
-    const result = partialResult as { outcome?: unknown; text?: string };
-    const status = returnedStatus(result.outcome);
-    if (status !== undefined) return { status, errorMessage: failureMessage(error),
-      ...(result.text === undefined ? {} : { finalText: result.text }) };
+    const result = partialResult as { outcome?: unknown; text?: string }
+    const status = returnedStatus(result.outcome)
+    if (status !== undefined) {
+      return {
+        status,
+        errorMessage: failureMessage(error),
+        ...(result.text === undefined ? {} : { finalText: result.text })
+      }
+    }
   }
   // Background shutdown catches normalize only true exceptions; a captured normal return wins first.
-  if (shutdownReason !== undefined) return { status: 'aborted', errorMessage: shutdownReason };
+  if (shutdownReason !== undefined) {
+    return { status: 'aborted', errorMessage: shutdownReason }
+  }
   // The upstream foreground caller normalizes a true exception before calling the shared writer.
-  return background ? { failure: error } : { status: 'failed', errorMessage: failureMessage(error) };
+  return background ? { failure: error } : { status: 'failed', errorMessage: failureMessage(error) }
 }
 
-export function appendTerminalOutput(task: TaskRecord, outcome: TaskTerminalOutcome): TaskTerminalProjection {
-  const projection = toTerminalProjection(outcome);
-  task.output += projection.outputText;
-  return projection;
+export function appendTerminalOutput(
+  task: TaskRecord,
+  outcome: TaskTerminalOutcome
+): TaskTerminalProjection {
+  const projection = toTerminalProjection(outcome)
+  task.output += projection.outputText
+  return projection
 }
 
-function failureMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}

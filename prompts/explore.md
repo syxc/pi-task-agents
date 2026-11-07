@@ -15,6 +15,7 @@ Do not start other agents or use parent task controls.
 Use only the resources and permissions supplied to this child session.
 
 Return:
+
 - Summary
 - Evidence with concrete paths, symbols, commands, or sources
 - Inferences, kept separate from observed facts
