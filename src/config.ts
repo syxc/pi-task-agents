@@ -348,7 +348,7 @@ function checkEffective(role: AgentProfile, name: string): void {
 }
 
 /**
- * Strict JSON schema: { maxConcurrency?: integer 1..64, roles?: Record<string, {
+ * Strict JSON schema: { maxConcurrency?: integer 1..10, roles?: Record<string, {
  * model?: provider/id, effort?: Pi thinking level, thinking?: legacy effort alias,
  * instructions?: string, tools?: string[], extensions?: (name|localPath)[],
  * skills?: (name|localPath)[], mcp?: boolean, mcpServers?: string[],

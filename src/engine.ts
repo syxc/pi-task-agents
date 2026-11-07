@@ -51,11 +51,20 @@ import type {
 
 interface TaskRuntime {
   accepting: boolean
+  controller: AbortController
+  initializing: boolean
+  initializationCanceled?: boolean
+  initializationCleanupPending?: boolean
+  stoppingWrite?: Promise<void>
+  stopWait?: Promise<void>
+  stopReport?: Promise<void>
+  settled?: boolean
   activity?: string
   backgroundRunner?: boolean
   shutdownReason?: string
   sealed?: boolean
   started?: Promise<ChildSession>
+  rejectStarted?: (error: Error) => void
   ready?: Promise<ChildSession>
   done?: Promise<void>
   delivery?: Promise<void>
@@ -71,6 +80,10 @@ interface SessionRuntime {
 }
 
 const pending = new Set<TaskStatus>(ACTIVE_TASK_STATUSES)
+// Bound the caller's initialization-stop wait, never the lifetime of its cleanup owner.
+const initializationStopWaitMs = 1000
+// Allow the initialization-specific report to finish before the whole-owner close deadline.
+const closeReportWaitMs = initializationStopWaitMs * 2 + 100
 
 export class TaskEngine {
   readonly parentId: string
@@ -95,6 +108,8 @@ export class TaskEngine {
   private readonly outputReads: TaskOutputReads
   private closed = false
   private closing?: Promise<void>
+  private closingError: unknown
+  private disposing?: Promise<Set<string>>
   private storageError: unknown
   private readonly uncommittedTerminals = new Set<string>()
 
@@ -281,24 +296,38 @@ export class TaskEngine {
   private async foreground(result: TaskSummary, signal?: AbortSignal): Promise<TaskSummary> {
     const task = this.task(result.task_id)
     let cancellation: Promise<TaskSummary> | undefined
+    let rejectCancellation!: (error: unknown) => void
+    const cancellationFailed = new Promise<never>((_, reject) => {
+      rejectCancellation = reject
+    })
+    const waiting = new AbortController()
     const onAbort = () => {
       cancellation ??= this.cancel(task, 'Foreground request aborted')
-      cancellation.catch(() => {})
+      cancellation.catch(rejectCancellation)
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) {
       onAbort()
     }
     try {
-      await this.waitUntil(() => !pending.has(task.status))
-      await this.runtimes.get(task.task_id)?.done
-      await cancellation
-      // Keep execution facts intact, but do not acknowledge an unconfirmed terminal snapshot.
-      if (this.uncommittedTerminals.has(task.task_id)) {
-        throw this.storageError
-      }
-      return { ...this.summary(task), mode: result.mode, accepted: result.accepted }
+      const completed = (async () => {
+        await this.waitUntil(() => !pending.has(task.status), undefined, waiting.signal)
+        const runtime = this.runtimes.get(task.task_id)
+        if (runtime?.initializationCanceled && runtime.stopReport) {
+          await runtime.stopReport
+        } else if (!runtime?.initializationCleanupPending) {
+          await runtime?.done
+        }
+        await cancellation
+        // Keep execution facts intact, but do not acknowledge an unconfirmed terminal snapshot.
+        if (this.uncommittedTerminals.has(task.task_id)) {
+          throw this.storageError
+        }
+        return { ...this.summary(task), mode: result.mode, accepted: result.accepted }
+      })()
+      return await Promise.race([completed, cancellationFailed])
     } finally {
+      waiting.abort()
       signal?.removeEventListener('abort', onAbort)
     }
   }
@@ -475,6 +504,8 @@ export class TaskEngine {
       // Later background rows in the same child session use append-completion semantics.
       const runtime: TaskRuntime = {
         accepting: true,
+        controller: new AbortController(),
+        initializing: true,
         backgroundRunner:
           task.input.run_in_background === true &&
           this.getState().tasks.find((item) => item.session_id === task.session_id) === task
@@ -482,7 +513,9 @@ export class TaskEngine {
       this.runtimes.set(task.task_id, runtime)
       const execute = this.executionContexts.get(task.task_id) ?? runWithoutTaskExecutionContext
       this.executionContexts.delete(task.task_id)
-      runtime.done = execute(() => this.run(task, runtime))
+      runtime.done = execute(() => this.run(task, runtime)).finally(() => {
+        runtime.settled = true
+      })
     }
   }
 
@@ -494,6 +527,7 @@ export class TaskEngine {
       startedResolve = resolveStarted
       startedReject = reject
     })
+    runtime.rejectStarted = startedReject
     runtime.started.catch(() => {})
     let session = this.sessions.get(task.session_id)
     if (!session) {
@@ -501,85 +535,95 @@ export class TaskEngine {
       this.sessions.set(task.session_id, session)
     }
     session.active = task
-    runtime.ready = Promise.resolve().then(async () => {
-      // Initialization must not outlive a failed running-row write and its owner cleanup.
-      try {
-        await this.persist()
-      } catch (error) {
-        this.latchStorageError(error)
-        throw error
-      }
-      this.changed(task)
-      if (!session.child) {
-        session.child = await this.createChild({
-          profile: freeze(clone(task.profile)),
-          cwd: this.cwd,
-          sessionPath: task.childSessionPath,
-          onProfileResolved: async (profile: AgentProfile) => {
-            if (this.storageError) {
-              throw this.storageError
-            }
-            resolvedProfile(task, profile)
-            try {
-              await this.persist()
-            } catch (error) {
-              this.latchStorageError(error)
-              throw error
-            }
-          },
-          onOwnedCommandStarted: async () => {
-            const active = session.active,
-              owner = active && this.runtimes.get(active.task_id)
-            if (this.closed || !active || !owner?.accepting || owner.stopReason || owner.sealed) {
-              throw new Error('Command owner is not accepting work')
-            }
-            this.assertDispatch()
-            active.ownedCommandCleanupPending = true
-            try {
-              await this.persist()
-            } catch (error) {
-              this.latchStorageError(error)
-              throw error
-            }
-          },
-          onOutput: () => {
-            if (session.active) {
-              this.changed(session.active)
-            }
-          },
-          onActivity: (activity) => {
-            const active = session.active
-            const current = active && this.runtimes.get(active.task_id)
-            if (current && active) {
-              current.activity = activity
-              this.changed(active)
-            }
-          }
-        }).catch((error) => {
-          if (error?.cleanupChild?.sessionPath === task.childSessionPath) {
-            session.child = error.cleanupChild
-          }
+    runtime.ready = Promise.resolve()
+      .then(async () => {
+        // Initialization must not outlive a failed running-row write and its owner cleanup.
+        try {
+          await this.persist()
+        } catch (error) {
+          this.latchStorageError(error)
           throw error
-        })
-      }
-      return session.child
-    })
+        }
+        this.changed(task)
+        aborted(runtime.controller.signal)
+        if (!session.child) {
+          session.child = await this.createChild({
+            signal: runtime.controller.signal,
+            profile: freeze(clone(task.profile)),
+            cwd: this.cwd,
+            sessionPath: task.childSessionPath,
+            onProfileResolved: async (profile: AgentProfile) => {
+              aborted(runtime.controller.signal)
+              if (this.storageError) {
+                throw this.storageError
+              }
+              resolvedProfile(task, profile)
+              try {
+                await this.persist()
+              } catch (error) {
+                this.latchStorageError(error)
+                throw error
+              }
+              aborted(runtime.controller.signal)
+            },
+            onOwnedCommandStarted: async () => {
+              const active = session.active,
+                owner = active && this.runtimes.get(active.task_id)
+              if (this.closed || !active || !owner?.accepting || owner.stopReason || owner.sealed) {
+                throw new Error('Command owner is not accepting work')
+              }
+              this.assertDispatch()
+              active.ownedCommandCleanupPending = true
+              try {
+                await this.persist()
+              } catch (error) {
+                this.latchStorageError(error)
+                throw error
+              }
+            },
+            onOutput: () => {
+              if (session.active) {
+                this.changed(session.active)
+              }
+            },
+            onActivity: (activity) => {
+              const active = session.active
+              const current = active && this.runtimes.get(active.task_id)
+              if (current && active) {
+                current.activity = activity
+                this.changed(active)
+              }
+            }
+          }).catch((error) => {
+            if (error?.cleanupChild?.sessionPath === task.childSessionPath) {
+              session.child = error.cleanupChild
+            }
+            throw error
+          })
+        }
+        return session.child
+      })
+      .finally(() => {
+        runtime.initializing = false
+      })
     runtime.ready.catch(() => {})
+    if (task.profile.timeoutMs > 0) {
+      runtime.timer = setTimeout(() => {
+        this.cancel(task, 'Task timed out', 'failed').catch(() => {})
+      }, task.profile.timeoutMs)
+    }
     try {
       const child = await runtime.ready
       if (this.storageError) {
         throw this.storageError
       }
-      this.safety.assertDispatch()
+      if (!runtime.stopReason && !this.closed) {
+        this.safety.assertDispatch()
+      }
       if (child.sessionPath && child.sessionPath !== task.childSessionPath) {
         throw new Error('Child session path does not match assigned path')
       }
       if (!runtime.stopReason && !this.closed) {
-        if (task.profile.timeoutMs > 0) {
-          runtime.timer = setTimeout(() => {
-            this.cancel(task, 'Task timed out', 'failed').catch(() => {})
-          }, task.profile.timeoutMs)
-        }
         const prompting = child.prompt(task.input.prompt, { turnId: task.sub_turn_id })
         startedResolve(child)
         const result = await prompting
@@ -626,6 +670,10 @@ export class TaskEngine {
       if (runtime.aborting) {
         await runtime.aborting
       }
+      if (runtime.initializationCanceled) {
+        // Reporting can time out, but the original run still owns every in-flight stop write.
+        await runtime.stopWait?.catch(() => {})
+      }
       if (task.ownedCommandCleanupPending) {
         this.safety.record(task, new Error('Managed command cleanup is unconfirmed'), true)
         runtime.stopStatus ??= 'failed'
@@ -660,6 +708,113 @@ export class TaskEngine {
     }
   }
 
+  private confirmInitializationCleanup(task: TaskRecord, runtime: TaskRuntime): void {
+    this.safety.confirmDisposed(new Set([task.session_id]), this.getState().tasks)
+    runtime.initializationCleanupPending = false
+  }
+
+  private async abortChild(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+    let child: ChildSession | undefined
+    try {
+      child = await runtime.ready
+    } catch (error) {
+      if (!runtime.initializationCanceled) {
+        throw error
+      }
+      child = this.sessions.get(task.session_id)?.child
+      if (!child) {
+        // A failed factory must either confirm cleanup or explicitly retain unresolved ownership.
+        if (this.safety.record(task, error)) {
+          throw error
+        }
+        this.confirmInitializationCleanup(task, runtime)
+        return
+      }
+    }
+    await child!.abort()
+    if (runtime.initializationCanceled) {
+      await child!.dispose()
+      const session = this.sessions.get(task.session_id)
+      if (session && session.child === child) {
+        delete session.child
+      }
+      this.confirmInitializationCleanup(task, runtime)
+    }
+  }
+
+  private async waitForInitializationStop(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const stopped = await Promise.race([
+        runtime.aborting!.then(() => true),
+        new Promise<boolean>((finishWait) => {
+          timer = setTimeout(() => finishWait(false), initializationStopWaitMs)
+        })
+      ])
+      if (!stopped) {
+        runtime.initializationCleanupPending = true
+        this.safety.record(task, new Error('Child initialization cleanup is unconfirmed'), true)
+        if (pending.has(task.status)) {
+          this.domain.transition(task, runtime.stopStatus!)
+          task.finished_at = new Date().toISOString()
+          task.notification_pending =
+            runtime.stopStatus !== 'canceled' && task.notify_completion !== false
+        }
+        this.uncommittedTerminals.add(task.task_id)
+        this.changed(task)
+        const marker = this.persist()
+          .then(() => {
+            this.uncommittedTerminals.delete(task.task_id)
+          })
+          .catch((error) => {
+            this.latchStorageError(error)
+            this.changed(task)
+          })
+        await Promise.allSettled([runtime.stoppingWrite, marker])
+        this.changed(task)
+      } else {
+        await runtime.stoppingWrite?.catch(() => {})
+      }
+      if (this.storageError) {
+        throw this.storageError
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private async initializationStopReport(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        runtime.stopWait!.then(async () => {
+          if (!runtime.initializationCleanupPending) {
+            await runtime.done
+          }
+          if (this.storageError) {
+            throw this.storageError
+          }
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              this.storageError ??
+                Object.assign(
+                  new Error('Child initialization stop or persistence is unconfirmed'),
+                  { code: 'CHILD_CLEANUP_FAILED' }
+                )
+            )
+          }, initializationStopWaitMs * 2)
+        })
+      ])
+      if (this.uncommittedTerminals.has(task.task_id)) {
+        throw this.storageError ?? new Error('Task stop persistence is unconfirmed')
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   async cancel(
     task: TaskRecord,
     reason: string,
@@ -669,6 +824,13 @@ export class TaskEngine {
     const runtime = this.runtimes.get(task.task_id)
     if (runtime && shutdown) {
       runtime.shutdownReason = reason
+    }
+    if (runtime?.initializationCanceled && runtime.stopReport && !(shutdown && runtime.settled)) {
+      await runtime.stopReport.catch((error) => {
+        // A cached deadline is not allowed to hide the first real write failure arriving later.
+        throw this.storageError ?? error
+      })
+      return this.summary(task)
     }
     if (runtime?.sealed || !pending.has(task.status)) {
       if (pending.has(task.status) || runtime?.sealed) {
@@ -701,39 +863,70 @@ export class TaskEngine {
       return this.summary(task)
     }
     if (!runtime.stopReason) {
+      runtime.initializationCanceled = runtime.initializing
+      runtime.accepting = false
+      clearTimeout(runtime.timer)
       runtime.stopReason = reason || 'Task canceled'
       runtime.stopStatus = status
       this.domain.transition(task, 'stopping')
       task.cancel_reason = runtime.stopReason
+      runtime.rejectStarted?.(new Error(runtime.stopReason))
       if (status === 'failed') {
         task.error = runtime.stopReason
       }
-      runtime.aborting = runtime
-        .ready!.then((child) => child.abort())
-        .catch(async (error) => {
-          if (!this.safety.record(task, error)) {
-            task.stopError = {
-              code: 'TASK_STOP_FAILED',
-              message: normalizeTaskError(error).message
-            }
-            task.error = task.stopError.message
+      runtime.aborting = this.abortChild(task, runtime).catch(async (error) => {
+        if (runtime.initializationCanceled) {
+          runtime.initializationCleanupPending = true
+        }
+        if (!this.safety.record(task, error, runtime.initializationCanceled)) {
+          task.stopError = {
+            code: 'TASK_STOP_FAILED',
+            message: normalizeTaskError(error).message
           }
-          runtime.stopStatus = status
-          // Upstream reports a failed explicit stop as canceled + stopError; capacity remains owned independently.
-          if (pending.has(task.status)) {
-            this.domain.transition(task, status)
-            task.finished_at = new Date().toISOString()
-            task.notification_pending = status !== 'canceled' && task.notify_completion !== false
-          }
-          try {
-            await this.persist()
-          } catch (failure) {
-            this.latchStorageError(failure)
-          }
+          task.error = task.stopError.message
+        }
+        runtime.stopStatus = status
+        // Upstream reports a failed explicit stop as canceled + stopError; capacity remains owned independently.
+        if (pending.has(task.status)) {
+          this.domain.transition(task, status)
+          task.finished_at = new Date().toISOString()
+          task.notification_pending = status !== 'canceled' && task.notify_completion !== false
+        }
+        try {
+          await this.persist()
+        } catch (failure) {
+          this.latchStorageError(failure)
+        }
+        this.changed(task)
+      })
+      // Install both cleanup and bounded reporting before the first stopping-row write can fail.
+      if (runtime.initializationCanceled) {
+        runtime.stoppingWrite = this.persist().catch((error) => {
+          this.latchStorageError(error)
           this.changed(task)
+          throw this.storageError
         })
-      await this.persist()
+        runtime.stoppingWrite.catch(() => {})
+        runtime.stopWait = this.waitForInitializationStop(task, runtime)
+        runtime.stopWait.catch(() => {})
+        runtime.stopReport = this.initializationStopReport(task, runtime)
+        runtime.stopReport.catch(() => {})
+      }
+      runtime.controller.abort()
+      if (!runtime.initializationCanceled) {
+        try {
+          await this.persist()
+        } catch (error) {
+          this.latchStorageError(error)
+          this.changed(task)
+          throw this.storageError
+        }
+      }
       this.changed(task)
+    }
+    if (runtime.initializationCanceled) {
+      await runtime.stopReport
+      return this.summary(task)
     }
     await runtime.aborting
     // A failed abort is observable immediately, but the live child still owns its slot.
@@ -833,18 +1026,76 @@ export class TaskEngine {
     })
   }
 
+  private async disposeSessions(tasks: TaskRecord[]): Promise<Set<string>> {
+    // A timed-out close must retain and reuse the same in-flight cleanup attempt.
+    this.disposing ??= this.safety.dispose(this.sessions, tasks)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      let disposal = this.disposing
+      if ([...this.runtimes.values()].some((runtime) => runtime.initializationCanceled)) {
+        disposal = Promise.race([
+          disposal,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              reject(
+                Object.assign(new Error('Child initialization cleanup is unconfirmed'), {
+                  code: 'CHILD_CLEANUP_FAILED'
+                })
+              )
+            }, initializationStopWaitMs)
+          })
+        ])
+      }
+      const confirmed = await disposal
+      this.disposing = undefined
+      return confirmed
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private async reportClose(closing: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        closing,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              Object.assign(
+                new Error('Task owner close is unconfirmed', {
+                  cause: this.storageError ?? this.closingError
+                }),
+                { code: 'CHILD_CLEANUP_FAILED' }
+              )
+            )
+          }, closeReportWaitMs)
+        })
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closing) {
-      return this.closing
+      return this.reportClose(this.closing)
     }
     this.closed = true
+    this.closingError = undefined
     this.closing = (async () => {
+      // Append admission may be waiting for initial prompt dispatch. Closing must wake it first.
+      for (const runtime of this.runtimes.values()) {
+        if (runtime.initializing) {
+          runtime.rejectStarted?.(new Error('Parent closed'))
+        }
+      }
       await this.admission.settled()
       if (!this.state) {
         return
       }
       const tasks = this.getState().tasks
-      await Promise.all(
+      const cancellations = await Promise.allSettled(
         tasks
           .filter(
             (task) =>
@@ -852,10 +1103,32 @@ export class TaskEngine {
               this.runtimes.has(task.task_id) ||
               this.uncommittedTerminals.has(task.task_id)
           )
-          .map((task) => this.cancel(task, 'Parent closed', 'canceled', true))
+          .map(async (task) => {
+            try {
+              return await this.cancel(task, 'Parent closed', 'canceled', true)
+            } catch (error) {
+              // Retain the first fault, but do not abandon another cancellation's pending write.
+              this.closingError ??= error
+              throw error
+            }
+          })
       )
+      const failed = cancellations.find((result) => result.status === 'rejected')
+      if (failed?.status === 'rejected') {
+        throw this.closingError ?? failed.reason
+      }
+      if (
+        [...this.runtimes.values()].some(
+          (runtime) => runtime.initializationCanceled && !runtime.settled
+        )
+      ) {
+        // The original run still owns its pending factory/disposal; do not race a second cleanup.
+        throw Object.assign(new Error('Child initialization cleanup is unconfirmed'), {
+          code: 'CHILD_CLEANUP_FAILED'
+        })
+      }
       const hadCleanupFailure = this.safety.quarantined
-      const confirmed = await this.safety.dispose(this.sessions, tasks)
+      const confirmed = await this.disposeSessions(tasks)
       await Promise.all(
         [...this.runtimes]
           .filter(([id]) => confirmed.has(this.task(id).session_id))
@@ -890,6 +1163,7 @@ export class TaskEngine {
       this.closing = undefined
       throw error
     })
-    return this.closing
+    // Only the report is bounded. Keep closing/closed and its single owned drain until it settles.
+    return this.reportClose(this.closing)
   }
 }

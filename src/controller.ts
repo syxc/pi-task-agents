@@ -1,10 +1,14 @@
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { stripVTControlCharacters } from 'node:util'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { stripTerminalSequences } from '@earendil-works/pi-tui'
 import { TaskEngine } from './engine.ts'
-import { taskCompletionNotice, taskProgress, taskWidget } from './task-presentation.ts'
+import {
+  taskCompletionNotice,
+  taskProgress,
+  taskWidget,
+  widgetTask,
+  widgetText
+} from './task-presentation.ts'
 import { loadConfig, resolveProfile } from './config.ts'
 import { createPiChildFactory, type PiChildFactoryOptions } from './pi-backend.ts'
 import { captureParentRuntime, type ParentRuntimeAPI } from './parent-runtime.ts'
@@ -53,35 +57,8 @@ function canceled(): Error {
   return Object.assign(new Error('Parent operation canceled'), { name: 'AbortError' })
 }
 
-function widgetText(value: string): string {
-  return stripTerminalSequences(stripVTControlCharacters(value))
-    .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 function rpcTaskWidget(tasks: readonly TaskSummary[], hidden: number): string[] {
-  // Share TUI semantics without a width limit or theme; sanitize before ID shortening.
-  const lines = tasks.map((task) => {
-    const safe = { ...task }
-    for (const key of [
-      'task_id',
-      'agent_name',
-      'description',
-      'activity',
-      'error',
-      'cancel_reason'
-    ] as const) {
-      const value = task[key]
-      if (typeof value === 'string') {
-        safe[key] = widgetText(value)
-      }
-    }
-    if (task.stopError) {
-      safe.stopError = { ...task.stopError, message: widgetText(task.stopError.message) }
-    }
-    return widgetText(taskProgress(safe))
-  })
+  const lines = tasks.map((task) => widgetText(taskProgress(widgetTask(task))))
   if (hidden) {
     lines.push(`${hidden} more tasks · /tasks list`)
   }
@@ -104,6 +81,9 @@ export class TaskController {
   private delivery: Promise<void> = Promise.resolve()
   private receiptTimer?: ReturnType<typeof setTimeout>
   private uiTimer?: ReturnType<typeof setTimeout>
+  private uiRevision = 0
+  private uiActive = false
+  private uiFailureReported = false
   private closing = false
   private ctx?: ExtensionContext
   private parentId?: string
@@ -337,18 +317,60 @@ export class TaskController {
     }
   }
 
+  private scheduleUI(ctx: ExtensionContext, engine: TaskService): void {
+    if (this.uiTimer) {
+      return
+    }
+    this.uiTimer = setTimeout(() => {
+      this.uiTimer = undefined
+      this.updateUI().catch((error) => {
+        if (
+          engine === this.engine &&
+          ctx === this.ctx &&
+          !this.closing &&
+          !this.uiFailureReported
+        ) {
+          this.uiFailureReported = true
+          this.warn(error)
+        }
+      })
+    }, 1000)
+    this.uiTimer.unref()
+  }
+
   async updateUI(): Promise<void> {
-    clearTimeout(this.uiTimer)
-    this.uiTimer = undefined
+    const revision = ++this.uiRevision
     const ctx = this.ctx
     const engine = this.engine
     if (!ctx?.hasUI || !engine || this.closing) {
       return
     }
-    const tasks = await engine.query()
-    if (engine !== this.engine || ctx !== this.ctx || this.closing) {
+    let tasks
+    try {
+      tasks = await engine.query()
+    } catch (error) {
+      if (
+        revision !== this.uiRevision ||
+        engine !== this.engine ||
+        ctx !== this.ctx ||
+        this.closing
+      ) {
+        return
+      }
+      if (this.uiActive) {
+        this.scheduleUI(ctx, engine)
+      }
+      throw error
+    }
+    if (
+      revision !== this.uiRevision ||
+      engine !== this.engine ||
+      ctx !== this.ctx ||
+      this.closing
+    ) {
       return
     }
+    this.uiFailureReported = false
     const pending = tasks.filter((task) => isActiveTaskStatus(task.status) || task.cleanup_pending)
     const cleanup = pending.filter((task) => task.cleanup_pending).length
     const queued = pending.filter((task) => task.status === 'queued').length
@@ -381,16 +403,12 @@ export class TaskController {
         visible.length ? rpcTaskWidget(visible, pending.length - visible.length) : undefined
       )
     }
-    if (pending.length && !this.uiTimer) {
-      this.uiTimer = setTimeout(() => {
-        this.uiTimer = undefined
-        this.updateUI().catch((error) => {
-          if (engine === this.engine && ctx === this.ctx && !this.closing) {
-            this.warn(error)
-          }
-        })
-      }, 1000)
-      this.uiTimer.unref()
+    this.uiActive = pending.length > 0
+    if (this.uiActive) {
+      this.scheduleUI(ctx, engine)
+    } else {
+      clearTimeout(this.uiTimer)
+      this.uiTimer = undefined
     }
   }
 
@@ -656,6 +674,8 @@ export class TaskController {
     this.closing = true
     clearTimeout(this.uiTimer)
     this.uiTimer = undefined
+    this.uiActive = false
+    this.uiFailureReported = false
     const owner = this.owner
     if (owner) {
       owner.codemodeEnabled = preserve

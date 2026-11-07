@@ -1651,7 +1651,7 @@ test('SDK task widget refresh uses differential rendering and only the existing 
     assert.equal(tui.fullRedraws, redraws)
     assert.deepEqual(
       timeout.mock.calls.map((call) => call.arguments[1]),
-      [1000, 1000]
+      [1000]
     )
     assert.equal(interval.mock.calls.length, 0)
     assert.ok(f.controller.uiTimer)
@@ -1671,7 +1671,7 @@ test('SDK task widget refresh uses differential rendering and only the existing 
     assert.equal(tui.fullRedraws, redraws)
     assert.deepEqual(
       timeout.mock.calls.map((call) => call.arguments[1]),
-      [1000, 1000, 1000, 1000]
+      [1000]
     )
     assert.equal(interval.mock.calls.length, 0)
     terminal.columns = 20

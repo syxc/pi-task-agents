@@ -178,7 +178,8 @@ async function rpcFixture(t) {
   return {
     command,
     update: (tasks) => command('prompt', { message: '/widget-fixture ' + JSON.stringify(tasks) }),
-    events
+    events,
+    waitFor
   }
 }
 
@@ -333,6 +334,8 @@ test(
 
 function controllerFixture(mode = 'tui', hasUI = true) {
   const writes = [],
+    statusWrites = [],
+    notices = [],
     engines = []
   class Engine {
     tasks = []
@@ -356,8 +359,8 @@ function controllerFixture(mode = 'tui', hasUI = true) {
     sessionManager: { getSessionId: () => 'parent', getEntries: () => [] },
     ui: {
       setWidget: (key, value) => writes.push({ key, value }),
-      setStatus() {},
-      notify() {},
+      setStatus: (key, value) => statusWrites.push({ key, value }),
+      notify: (message, level) => notices.push({ message, level }),
       get theme() {
         throw new Error('No eager theme access')
       }
@@ -374,8 +377,81 @@ function controllerFixture(mode = 'tui', hasUI = true) {
       }
     }
   )
-  return { controller, ctx, writes, engines }
+  return { controller, ctx, writes, statusWrites, notices, engines }
 }
+
+const stableTask = (patch = {}) => task({ started_at: undefined, created_at: undefined, ...patch })
+
+test('TUI and real RPC widgets preserve the same task semantics through updates and clearing', async (t) => {
+  const rpc = await rpcFixture(t)
+  const tui = controllerFixture()
+  const scenarios = [
+    [stableTask()],
+    [stableTask({ activity: 'read: done', description: 'Review the result' })],
+    [
+      stableTask({
+        agent_name: '\x1B[31mworker\x1B[0m',
+        task_id: '\x1B[32mtask0001\x1B[0m',
+        description: 'Inspect\nwidget',
+        activity: '\x1B[32mCompleted\x1B[0m'
+      })
+    ],
+    [
+      ...Array.from({ length: 7 }, (_, index) =>
+        stableTask({ task_id: `running${index}`, status: index === 0 ? 'queued' : 'running' })
+      ),
+      stableTask({
+        task_id: 'cleanup0',
+        status: 'failed',
+        cleanup_pending: true,
+        error: 'cleanup refused'
+      })
+    ],
+    []
+  ]
+  try {
+    await tui.controller.ensure(tui.ctx)
+    for (const tasks of scenarios) {
+      tui.engines[0].tasks = tasks
+      // oxlint-disable-next-line no-await-in-loop -- Compare each transition before applying the next one.
+      await tui.controller.updateUI()
+      // oxlint-disable-next-line no-await-in-loop -- The RPC process must observe the same ordered transitions.
+      const events = await rpc.update(tasks)
+      const factory = tui.writes.at(-1).value
+      const rpcWidget = widgets(events).at(-1)
+      assert.equal(statuses(events).at(-1).statusText, tui.statusWrites.at(-1).value)
+      if (tasks.length === 0) {
+        assert.equal(factory, undefined)
+        assert.equal(rpcWidget.widgetLines, undefined)
+      } else {
+        const rows = factory({}, { fg: (_color, text) => text })
+          .render(1000)
+          .map(stripTerminalSequences)
+        assert.deepEqual(rpcWidget.widgetLines, rows)
+      }
+    }
+  } finally {
+    await tui.controller.shutdown()
+  }
+})
+
+test(
+  'real RPC refreshes elapsed time without a task-state change',
+  { timeout: 30000 },
+  async (t) => {
+    const rpc = await rpcFixture(t)
+    const initial = lines(await rpc.update([task()]))
+    const start = rpc.events.length
+    await rpc.waitFor(() =>
+      widgets(rpc.events.slice(start)).some(
+        (event) => Array.isArray(event.widgetLines) && event.widgetLines[0] !== initial[0]
+      )
+    )
+    const refreshed = lines(rpc.events.slice(start))
+    assert.match(refreshed[0], /worker.*task0001.*bash: running/)
+    assert.notEqual(refreshed[0], initial[0])
+  }
+)
 
 test('TUI retains a lazy themed, width-aware widget factory', async () => {
   const f = controllerFixture()
@@ -437,6 +513,124 @@ test('TUI retains a lazy themed, width-aware widget factory', async () => {
     f.engines[0].tasks = []
     await f.controller.updateUI()
     assert.equal(f.writes.at(-1).value, undefined)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test(
+  'a failed widget query does not stop refresh of active tasks',
+  { timeout: 20000 },
+  async () => {
+    for (const mode of ['tui', 'rpc']) {
+      const f = controllerFixture(mode)
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- Each fixture owns its controller and timer.
+        await f.controller.ensure(f.ctx)
+        f.engines[0].tasks = [task()]
+        // oxlint-disable-next-line no-await-in-loop -- Establish an active widget before injecting failure.
+        await f.controller.updateUI()
+        f.engines[0].query = async () => {
+          throw new Error('temporary query failure')
+        }
+        // oxlint-disable-next-line no-await-in-loop -- Verify the error is not hidden.
+        await assert.rejects(f.controller.updateUI(), /temporary query failure/)
+        let refreshed
+        const retry = new Promise((resolve) => {
+          refreshed = resolve
+        })
+        let attempts = 0
+        f.engines[0].query = async () => {
+          if (++attempts <= 2) {
+            throw new Error('temporary query failure')
+          }
+          refreshed()
+          return [task({ description: 'Recovered state' })]
+        }
+        let deadline
+        try {
+          // The production refresh timer is unref'ed; the test must keep Node 22 alive.
+          // oxlint-disable-next-line no-await-in-loop -- Wait for the scheduled retry in this mode.
+          await Promise.race([
+            retry,
+            new Promise((_resolve, reject) => {
+              deadline = setTimeout(() => reject(new Error('Widget refresh timed out')), 10000)
+            })
+          ])
+        } finally {
+          clearTimeout(deadline)
+        }
+        // oxlint-disable-next-line no-await-in-loop -- Allow the successful query continuation to render.
+        await new Promise((resolve) => setImmediate(resolve))
+        const widget = f.writes.at(-1).value
+        const rows =
+          mode === 'rpc' ? widget : widget({}, { fg: (_color, text) => text }).render(1000)
+        assert.match(rows.join('\n'), /Recovered state/)
+        assert.equal(f.notices.length, 1, 'repeated failures emit only one warning before recovery')
+      } finally {
+        // oxlint-disable-next-line no-await-in-loop -- Stop this fixture's timer before the next mode.
+        await f.controller.shutdown()
+      }
+    }
+  }
+)
+
+test('an older task query cannot overwrite a newer widget update', async () => {
+  for (const mode of ['tui', 'rpc']) {
+    const f = controllerFixture(mode)
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- Each mode uses an independent controller.
+      await f.controller.ensure(f.ctx)
+      let release, entered
+      const querying = new Promise((resolve) => {
+        entered = resolve
+      })
+      f.engines[0].query = () => {
+        entered()
+        return new Promise((resolve) => {
+          release = resolve
+        })
+      }
+      const oldUpdate = f.controller.updateUI()
+      // oxlint-disable-next-line no-await-in-loop -- Ensure the first query is pending before the next update.
+      await querying
+      f.engines[0].query = async () => [task({ description: 'Latest state' })]
+      // oxlint-disable-next-line no-await-in-loop -- The newer update must commit first.
+      await f.controller.updateUI()
+      const current = f.writes.at(-1).value
+      release([task({ description: 'Stale state' })])
+      // oxlint-disable-next-line no-await-in-loop -- Verify the completed old query cannot replace it.
+      await oldUpdate
+      assert.equal(f.writes.at(-1).value, current)
+    } finally {
+      // oxlint-disable-next-line no-await-in-loop -- Release each fixture before the next mode.
+      await f.controller.shutdown()
+    }
+  }
+})
+
+test('a stale query rejection cannot warn after a newer widget was cleared', async () => {
+  const f = controllerFixture('rpc')
+  try {
+    await f.controller.ensure(f.ctx)
+    let reject, entered
+    const querying = new Promise((resolve) => {
+      entered = resolve
+    })
+    f.engines[0].query = () => {
+      entered()
+      return new Promise((_resolve, rejectQuery) => {
+        reject = rejectQuery
+      })
+    }
+    const oldUpdate = f.controller.updateUI()
+    await querying
+    f.engines[0].query = async () => []
+    await f.controller.updateUI()
+    reject(new Error('stale query failure'))
+    await oldUpdate
+    assert.equal(f.writes.at(-1).value, undefined)
+    assert.deepEqual(f.notices, [])
   } finally {
     await f.controller.shutdown()
   }

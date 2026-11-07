@@ -438,6 +438,53 @@ test('foreground abort waits for child stop; background tool signal does not can
   await engine.stop(background.task_id)
 })
 
+test('foreground stopping-write failure rejects even when abort failure publishes a terminal status first', async (t) => {
+  const { engine, children } = await setup(t)
+  const controller = new AbortController()
+  const starting = engine.start({ ...input(), run_in_background: false }, profile, {
+    signal: controller.signal
+  })
+  await waitFor(() => children[0]?.calls.length)
+  const task = engine.state!.tasks[0],
+    runtime = engine.runtimes.get(task.task_id)!
+  const save = engine.store.save.bind(engine.store)
+  const failure = new Error('first running stop write failed')
+  const writing = deferred()
+  const abort = children[0].abort
+  children[0].abort = async () => {
+    throw new Error('native abort failed')
+  }
+  engine.store.save = async (state) => {
+    if (state.tasks.some((item) => item.status === 'stopping')) {
+      await writing.promise
+    }
+    await save(state)
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    controller.abort()
+    await waitFor(() => task.status === 'canceled' && engine.waiters.size === 0)
+    writing.reject(failure)
+    await assert.rejects(
+      Promise.race([
+        starting,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('foreground remained pending')), 1500)
+        })
+      ]),
+      (error) => error === failure
+    )
+    assert.equal(engine.runtimes.get(task.task_id), runtime)
+  } finally {
+    clearTimeout(timer)
+    writing.resolve()
+    engine.store.save = save
+    children[0].abort = abort
+    children[0].calls[0].resolve({ text: 'owned cleanup' })
+    await runtime.done
+  }
+})
+
 test('foreground success never queues a parent wakeup', async (t) => {
   const notifications: TaskSummary[] = []
   const { engine, children } = await setup(t, { notify: (task) => notifications.push(task) })
@@ -1254,7 +1301,10 @@ test('timeout fails without notifying cancellation; close cancels queued and run
   assert.match((await engine.query({ task_id: timed.task_id })).error, /timed out/)
   const running = await engine.start(input(), profile)
   const queued = await engine.start(input(), profile)
-  await waitFor(() => children[1]?.calls.length)
+  // The first task may now time out before its factory is called.
+  await waitFor(() =>
+    children.some((child) => child.sessionPath === running.childSessionPath && child.calls.length)
+  )
   await engine.close()
   const tasks = JSON.parse(await readFile(engine.store.file, 'utf8')).tasks
   for (const id of [running.task_id, queued.task_id]) {
@@ -2398,13 +2448,83 @@ test('default concurrency runs four tasks per owner and queues the fifth until c
   assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
 })
 
-test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe values', async (t) => {
+test('maximum concurrency runs ten tasks, queues the eleventh, cancels queued work and fills a freed slot', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 10 })
+  const tasks = await Promise.all(
+    Array.from({ length: 12 }, (_, index) => engine.start(input(`maximum ${index}`), profile))
+  )
+  await waitFor(() => children.length === 10 && children.every((child) => child.calls.length === 1))
+  assert.equal(engine.maxConcurrency, 10)
+  assert.equal(engine.runtimes.size, 10)
+  assert.deepEqual(
+    (await engine.query()).map((task) => task.status),
+    [...Array.from({ length: 10 }, () => 'running'), 'queued', 'queued']
+  )
+  const queued = tasks[10]
+  const canceled = tasks[11]
+  assert.equal(queued.status, 'queued')
+  assert.equal((await engine.stop(canceled.task_id)).status, 'canceled')
+  assert.equal(children.length, 10)
+  assert.equal(engine.runtimes.size, 10)
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'queued')
+
+  await finish(engine, children[0])
+  await waitFor(() => children[10]?.calls.length === 1)
+  assert.equal(children.length, 11)
+  assert.equal(engine.runtimes.size, 10)
+  assert.equal(children[10].sessionPath, queued.childSessionPath)
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
+  assert.equal((await engine.query({ task_id: canceled.task_id })).status, 'canceled')
+  assert.equal(
+    children.some((child) => child.sessionPath === canceled.childSessionPath),
+    false
+  )
+})
+
+test('maximum concurrency retains a stopping task slot until cleanup settles', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 10 })
+  const tasks = await Promise.all(
+    Array.from({ length: 11 }, (_, index) => engine.start(input(`cleanup ${index}`), profile))
+  )
+  await waitFor(() => children.length === 10 && children.every((child) => child.calls.length === 1))
+  const first = tasks[0]
+  const queued = tasks[10]
+  const runtime = engine.runtimes.get(first.task_id)
+  const releaseAbort = deferred()
+  children[0].abort = () => releaseAbort.promise
+  const stopping = engine.stop(first.task_id)
+  try {
+    await waitFor(
+      async () => (await engine.query({ task_id: first.task_id })).status === 'stopping'
+    )
+    settleResult(children[0].calls[0], 'aborted', '', 'Interrupted')
+    await tick()
+    engine.pump()
+    assert.equal(engine.runtimes.get(first.task_id), runtime)
+    assert.equal(engine.runtimes.size, 10)
+    assert.equal(children.length, 10)
+    assert.equal((await engine.query({ task_id: queued.task_id })).status, 'queued')
+  } finally {
+    releaseAbort.resolve()
+    await stopping
+  }
+  await waitFor(() => children[10]?.calls.length === 1)
+  assert.equal((await engine.query({ task_id: first.task_id })).status, 'canceled')
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
+  assert.equal(children[10].sessionPath, queued.childSessionPath)
+  assert.equal(engine.runtimes.has(first.task_id), false)
+  assert.equal(engine.runtimes.size, 10)
+})
+
+test('direct engine concurrency accepts 1 and 10 and rejects invalid or unsafe values', async (t) => {
   const { engine, rootDir, createChild } = await setup(t, { maxConcurrency: 1 })
   assert.equal(engine.maxConcurrency, 1)
   for (const value of [
     0,
     -1,
     1.5,
+    11,
+    64,
     65,
     Number.MAX_SAFE_INTEGER,
     Number.MAX_SAFE_INTEGER + 1,
@@ -2424,7 +2544,7 @@ test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe v
           createChild,
           maxConcurrency: value as number
         }),
-      /Invalid maxConcurrency: expected an integer from 1 to 64/
+      /Invalid maxConcurrency: expected an integer from 1 to 10/
     )
   }
   const explicit = new TaskEngine({
@@ -2432,9 +2552,9 @@ test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe v
     parentId: 'host-policy',
     cwd: rootDir,
     createChild,
-    maxConcurrency: 64
+    maxConcurrency: 10
   })
-  assert.equal(explicit.maxConcurrency, 64)
+  assert.equal(explicit.maxConcurrency, 10)
   await explicit.close()
 })
 
@@ -3999,6 +4119,165 @@ test('regression: failed terminal writes retain close ownership and retry only t
   }
   /* oxlint-enable no-await-in-loop */
 })
+
+for (const stage of [
+  'terminal-retry',
+  'queued-cancel',
+  'cleanup-confirmation',
+  'store-close',
+  'mixed-cancel'
+]) {
+  test(`close retains one pending ${stage} operation across bounded reporting and retries`, async (t) => {
+    const { engine, children, rootDir, createChild } = await setup(t, { maxConcurrency: 1 })
+    const blocked = deferred(),
+      firstFailure = new Error('first stopping write failed')
+    let task: TaskSummary
+    let disposes = 0
+    if (stage === 'terminal-retry') {
+      const entered = deferred(),
+        factory = deferred(),
+        controller = new AbortController()
+      engine.createChild = async (args) => {
+        entered.resolve()
+        await factory.promise
+        return createChild(args)
+      }
+      const starting = engine.start({ ...input(), run_in_background: false }, profile, {
+        signal: controller.signal
+      })
+      await entered.promise
+      task = engine.summary(engine.state!.tasks[0])
+      const runtime = engine.runtimes.get(task.task_id)!,
+        save = engine.store.save.bind(engine.store)
+      engine.store.save = async (state) => {
+        if (state.tasks.some((item) => item.status === 'stopping')) {
+          throw firstFailure
+        }
+        if (runtime.sealed) {
+          throw new Error('terminal write also failed')
+        }
+        await save(state)
+      }
+      try {
+        controller.abort()
+        await assert.rejects(starting, (error) => error === firstFailure)
+      } finally {
+        factory.resolve()
+        await runtime.done
+        engine.store.save = save
+      }
+      assert.equal(engine.runtimes.size, 0, 'the failed terminal producer has already exited')
+    } else if (stage === 'queued-cancel' || stage === 'mixed-cancel') {
+      const pump = engine.pump
+      engine.pump = () => {}
+      task = await engine.start(input(), profile)
+      if (stage === 'mixed-cancel') {
+        await engine.start(input('second queued task'), profile)
+      }
+      engine.pump = pump
+      assert.equal(task.status, 'queued')
+    } else if (stage === 'store-close') {
+      task = await engine.start(input(), profile)
+      await waitFor(() => children[0]?.calls.length)
+      await finish(engine, children[0])
+    } else {
+      task = await engine.start(input(), profile)
+      await waitFor(() => children[0]?.calls.length)
+      const runtime = engine.runtimes.get(task.task_id)!
+      children[0].calls[0].reject(
+        Object.assign(new Error('cleanup not yet confirmed'), { code: 'CHILD_CLEANUP_FAILED' })
+      )
+      await runtime.done
+      const dispose = children[0].dispose.bind(children[0])
+      children[0].dispose = async () => {
+        disposes++
+        await dispose()
+      }
+    }
+    const before = await readFile(engine.store.file, 'utf8'),
+      save = engine.store.save.bind(engine.store)
+    let writes = 0
+    const close = engine.store.close.bind(engine.store)
+    if (stage === 'store-close') {
+      engine.store.close = async () => {
+        writes++
+        await blocked.promise
+        await close()
+      }
+    } else {
+      engine.store.save = async (state) => {
+        writes++
+        if (stage === 'mixed-cancel' && writes === 1) {
+          throw firstFailure
+        }
+        await blocked.promise
+        await save(state)
+      }
+    }
+    const boundedClose = async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          engine.close(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('close stayed pending')), 2300)
+          })
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // oxlint-disable-next-line no-await-in-loop -- Both reports must join the same unfinished close write.
+        await assert.rejects(boundedClose(), (error: Error & { code?: string }) => {
+          assert.equal(error.code, 'CHILD_CLEANUP_FAILED')
+          if (stage === 'terminal-retry' || stage === 'mixed-cancel') {
+            assert.equal(error.cause, firstFailure)
+          }
+          return true
+        })
+        assert.equal(
+          writes,
+          stage === 'mixed-cancel' ? 2 : 1,
+          'a timed-out close must not enqueue a duplicate write'
+        )
+      }
+      assert.equal(await readFile(engine.store.file, 'utf8'), before)
+      const other = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+      await assert.rejects(other.init(), /active task owner/)
+      if (stage === 'cleanup-confirmation') {
+        assert.equal(disposes, 1)
+      }
+    } finally {
+      engine.store.save = save
+      engine.store.close = close
+      if (stage === 'mixed-cancel') {
+        const drained = engine.close().catch((error) => {
+          assert.equal(error, firstFailure)
+        })
+        blocked.resolve()
+        await drained
+      } else {
+        blocked.resolve()
+      }
+      await engine.close()
+    }
+    assert.equal(writes, stage === 'mixed-cancel' ? 2 : 1)
+    const persisted = JSON.parse(await readFile(engine.store.file, 'utf8'))
+    assert.equal(
+      persisted.tasks.find((item: TaskRecord) => item.task_id === task.task_id).output,
+      engine.task(task.task_id).output
+    )
+    const restored = await new TaskEngine({
+      rootDir,
+      parentId: 'parent',
+      cwd: rootDir,
+      createChild
+    }).init()
+    await restored.close()
+  })
+}
 
 test('regression: running and terminal write failures cannot close a queued disk row as completed cleanup', async (t) => {
   const { engine, children, rootDir, createChild } = await setup(t)

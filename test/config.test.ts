@@ -122,15 +122,36 @@ test('concurrency layers inherit defaults and global values without trusting pro
   assert.equal((await loadConfig({ ...paths, projectTrusted: true })).maxConcurrency, 2)
 
   await save(paths.global, {})
-  await save(paths.project, { maxConcurrency: 65 })
+  await save(paths.project, { maxConcurrency: 11 })
   const untrusted = await loadConfig(paths)
   assert.equal(untrusted.maxConcurrency, 4)
   assert.deepEqual(untrusted.sources, [paths.global])
   assert.match(untrusted.diagnostics[0], /Untrusted project configuration ignored/)
   await assert.rejects(
     loadConfig({ ...paths, projectTrusted: true }),
-    /maxConcurrency: expected an integer from 1 to 64/
+    /maxConcurrency: expected an integer from 1 to 10/
   )
+})
+
+test('legacy concurrency values fail their configuration layer instead of falling back', async (t) => {
+  const paths = await setup(t)
+  await save(paths.global, { maxConcurrency: 4 })
+  await save(paths.project, { maxConcurrency: 10 })
+  const trusted = { ...paths, projectTrusted: true }
+  assert.equal((await loadConfig(trusted)).maxConcurrency, 10)
+
+  /* oxlint-disable no-await-in-loop -- Check each layer before replacing the same configuration file. */
+  for (const file of [paths.project, paths.global]) {
+    for (const maxConcurrency of [11, 32, 64]) {
+      await save(file, { maxConcurrency, roles: { worker: { tools: ['read'] } } })
+      await assert.rejects(loadConfig(trusted), {
+        message: file + '.maxConcurrency: expected an integer from 1 to 10'
+      })
+    }
+    await save(file, { maxConcurrency: 10 })
+    assert.equal((await loadConfig(trusted)).maxConcurrency, 10)
+  }
+  /* oxlint-enable no-await-in-loop */
 })
 
 test('untrusted project config is not parsed or executed and gets a clear diagnostic', async (t) => {
@@ -295,7 +316,7 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
     [[], /expected an object/],
     [{ maxConcurency: 2 }, /unknown key/],
     [{ auth: {} }, /unknown key/],
-    ...[0, 65, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4', null].map((maxConcurrency) => [
+    ...[0, 11, 64, 65, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4', null].map((maxConcurrency) => [
       { maxConcurrency },
       /expected an integer/
     ]),
@@ -328,7 +349,7 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
   /* oxlint-disable no-await-in-loop -- Cases overwrite the same config file; save, load and assert in order. */
   for (const [maxConcurrency, timeoutMs] of [
     [1, 0],
-    [64, 2147483647]
+    [10, 2147483647]
   ]) {
     await save(paths.global, {
       maxConcurrency,
@@ -565,8 +586,8 @@ test('effort config normalizes the thinking alias and rejects conflicting select
   await save(paths.global, {})
   config = await loadConfig(paths)
   assert.equal(config.maxConcurrency, 4)
-  await save(paths.global, { maxConcurrency: 64 })
-  assert.equal((await loadConfig(paths)).maxConcurrency, 64)
+  await save(paths.global, { maxConcurrency: 10 })
+  assert.equal((await loadConfig(paths)).maxConcurrency, 10)
 })
 
 test('selector comparison is exact after trim/NFKC/en-US case normalization, never wildcard expansion', async (t) => {
