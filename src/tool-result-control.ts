@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { TaskOutput, TaskSummary } from './types.ts'
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts'
 import { projectedResult, type TaskToolResult } from './tool-result-common.ts'
@@ -121,7 +122,8 @@ export class OutputProjector {
     read: OutputFacts,
     wait: OutputWait,
     parentId: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    knownVerificationFingerprint?: string
   ): TaskToolResult {
     const truncated = read.truncated ?? read.has_more
     const cursor = [
@@ -135,7 +137,18 @@ export class OutputProjector {
         ? ''
         : '<task_output_hint>Your requested wait_ms exceeded 30000 ms and was capped at 30000 ms (30 seconds). This output read reached its wait limit; the background task was not stopped. Use wait_ms=30000 or less for future reads.</task_output_hint>\n'
     const hint = signal?.aborted ? '' : this.pollingHint(read, parentId)
-    const verification = read.verification ? `${verificationText(read.verification)}\n` : ''
+    // Report values are strings or string arrays; sorted keys make identity independent of insertion order.
+    const fingerprint = read.verification
+      ? `sha256:${createHash('sha256')
+          .update(JSON.stringify(read.verification, Object.keys(read.verification).sort()))
+          .digest('hex')}`
+      : undefined
+    const verification = read.verification
+      ? `<task_verification fingerprint="${fingerprint}" />\n` +
+        (knownVerificationFingerprint === fingerprint
+          ? '<task_output_hint>Verification text omitted: known_verification_fingerprint matches the current report. Omit that argument to read the full report at any valid offset. details.verification is unchanged.</task_output_hint>\n'
+          : `${verificationText(read.verification)}\n`)
+      : ''
     const text = `<task_output status="${read.status}">\n${receipt}${waitHint}${hint}${verification}${read.output || '(no output yet)'}\n</task_output>`
     return projectedResult('task_output', text, {
       task_id: read.task_id,

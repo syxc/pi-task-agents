@@ -411,6 +411,101 @@ test('output accepts overlong waits, reports the cap and passes cancellation to 
   }
 })
 
+test('output verification schema and guidance preserve explicit opt-out and full rereads', async () => {
+  const f = fixture()
+  try {
+    const declaration = f.tools.get('task_output')
+    const schema = declaration.parameters
+    assert.equal(schema.properties.known_verification_fingerprint.type, 'string')
+    assert.equal(schema.required.includes('known_verification_fingerprint'), false)
+    assert.match(
+      declaration.description,
+      /missing or mismatched fingerprints return the full current report/
+    )
+    const guidance = await f.handlers.get('before_agent_start')(
+      { messageType: 'user', systemPrompt: 'base' },
+      f.ctx
+    )
+    assert.match(
+      guidance.systemPrompt,
+      /Missing or mismatched fingerprints return the current full report/
+    )
+    assert.match(guidance.systemPrompt, /including retries and session recovery/)
+    await f.controller.ensure(f.ctx)
+    const verification = {
+      modelVerdict: 'pass',
+      fileChange: 'uncertain',
+      observationNotes: ['REQUIRED_VERIFICATION_DETAIL']
+    }
+    f.engines[0].result = {
+      task_id: 't1',
+      status: 'failed',
+      output: 'REQUIRED_ERROR: failed child output🙂',
+      offset: 7,
+      next_offset: 44,
+      truncated: true,
+      verification
+    }
+    const full = await f.execute('task_output', { task_id: 't1', offset: 7 })
+    const fingerprint = /fingerprint="([^"]+)"/.exec(full.text)?.[1]
+    assert.ok(fingerprint)
+    const omitted = await f.execute('task_output', {
+      task_id: 't1',
+      offset: 7,
+      known_verification_fingerprint: fingerprint
+    })
+    assert.doesNotMatch(omitted.text, /REQUIRED_VERIFICATION_DETAIL/)
+    assert.match(omitted.text, /known_verification_fingerprint matches/)
+    assert.match(omitted.text, /Omit that argument/)
+    assert.match(omitted.text, /REQUIRED_ERROR: failed child output🙂/)
+    assert.match(omitted.text, /status="failed"/)
+    assert.match(omitted.text, /next_offset="44" truncated="true"/)
+    assert.equal(omitted.details.verification, verification)
+    assert.equal(f.engines[0].read.options.offset, 7)
+    assert.equal(Object.hasOwn(f.engines[0].read.options, 'known_verification_fingerprint'), false)
+    const [retry, withoutIdentity, mismatch] = await Promise.all([
+      f.execute('task_output', {
+        task_id: 't1',
+        offset: 7,
+        known_verification_fingerprint: fingerprint
+      }),
+      f.execute('task_output', { task_id: 't1', offset: 7 }),
+      f.execute('task_output', {
+        task_id: 't1',
+        offset: 7,
+        known_verification_fingerprint: 'stale'
+      })
+    ])
+    assert.equal(retry.text, omitted.text)
+    assert.equal(withoutIdentity.text, full.text)
+    assert.equal(mismatch.text, full.text)
+    assert.match(full.text, /REQUIRED_VERIFICATION_DETAIL/)
+    assert.deepEqual(omitted.details, full.details)
+    const replay = await f.execute('task_output', { task_id: 't1', offset: 0 })
+    assert.equal(replay.text, full.text)
+    f.engines[0].result = {
+      ...f.engines[0].result,
+      verification: { ...verification, modelVerdict: 'fail' }
+    }
+    const changed = await f.execute('task_output', {
+      task_id: 't1',
+      offset: 7,
+      known_verification_fingerprint: fingerprint
+    })
+    assert.match(changed.text, /model_verdict: fail/)
+    assert.doesNotMatch(changed.text, /Verification text omitted/)
+    assert.notEqual(changed.text, omitted.text)
+    const missing = await f.execute('task_output', {
+      task_id: 'missing',
+      known_verification_fingerprint: fingerprint
+    })
+    assert.equal(missing.isError, true)
+    assert.equal(missing.text, '<task_error>Local background task not found: missing</task_error>')
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('public control misses and append boundary failures use the upstream envelopes', async () => {
   const f = fixture()
   try {

@@ -258,6 +258,91 @@ test('output golden projects real wait/cursor/truncation facts and never labels 
   )
 })
 
+test('verification omission is explicit, reversible and never changes output or structured facts', () => {
+  const output = new OutputProjector()
+  const verification = {
+    modelVerdict: 'partial' as const,
+    fileChange: 'change_observed' as const,
+    changedFiles: ['owned.ts'],
+    observationNotes: ['REQUIRED_OBSERVATION: external validation is missing.']
+  }
+  const read = {
+    ...base,
+    status: 'failed',
+    output: 'REQUIRED_ERROR: execution failed.\n完整输出🙂\nmodel_verdict: actual output',
+    offset: 41,
+    next_offset: 125,
+    truncated: true,
+    timed_out: false,
+    verification
+  }
+  const full = output.result(read, outputWait(), 'parent')
+  const fingerprint = /fingerprint="(sha256:[a-f0-9]{64})"/.exec(full.text)?.[1]
+  assert.ok(fingerprint)
+  const omitted = output.result(read, outputWait(), 'parent', undefined, fingerprint)
+  assert.match(full.text, /model_verdict: partial\nfile_change: change_observed/)
+  assert.match(full.text, /REQUIRED_OBSERVATION/)
+  assert.doesNotMatch(omitted.text, /REQUIRED_OBSERVATION|changed_files:|observation_notes:/)
+  assert.match(omitted.text, /known_verification_fingerprint matches the current report/)
+  assert.match(omitted.text, /Omit that argument.*any valid offset/)
+  assert.ok(omitted.text.includes(fingerprint))
+  assert.match(omitted.text, /^<task_output status="failed">/)
+  assert.match(omitted.text, /next_offset="125" truncated="true" timed_out="false"/)
+  assert.ok(omitted.text.includes(read.output))
+  assert.deepEqual(omitted.content, [{ type: 'text', text: omitted.text }])
+  assert.deepEqual(omitted.details, full.details)
+  assert.equal(omitted.details.verification, verification)
+  assert.equal(omitted.isError, full.isError)
+  assert.equal(
+    new OutputProjector().result(read, outputWait(), 'parent', undefined, fingerprint).text,
+    omitted.text
+  )
+  assert.equal(output.result(read, outputWait(), 'parent').text, full.text)
+  assert.equal(output.result(read, outputWait(), 'parent', undefined, '').text, full.text)
+  assert.equal(output.result(read, outputWait(), 'parent', undefined, 'stale').text, full.text)
+  output.reset()
+  assert.equal(output.result(read, outputWait(), 'restored-parent').text, full.text)
+  assert.equal(new OutputProjector().result(read, outputWait(), 'parent').text, full.text)
+  for (const report of [
+    { ...verification, modelVerdict: 'fail' as const },
+    { ...verification, fileChange: 'recording_failed' as const },
+    { ...verification, changedFiles: ['other.ts'] },
+    { ...verification, observationNotes: ['new risk'] }
+  ]) {
+    const changed = output.result(
+      { ...read, verification: report },
+      outputWait(),
+      'parent',
+      undefined,
+      fingerprint
+    )
+    assert.doesNotMatch(changed.text, /Verification text omitted/)
+    assert.notEqual(/fingerprint="([^"]+)"/.exec(changed.text)?.[1], fingerprint)
+    assert.deepEqual(changed.details.verification, report)
+  }
+  const reordered = {
+    observationNotes: verification.observationNotes,
+    changedFiles: verification.changedFiles,
+    fileChange: verification.fileChange,
+    modelVerdict: verification.modelVerdict
+  }
+  assert.equal(
+    output.result(
+      { ...read, verification: reordered },
+      outputWait(),
+      'parent',
+      undefined,
+      fingerprint
+    ).text,
+    omitted.text
+  )
+  const absent = { ...read, verification: undefined }
+  assert.equal(
+    output.result(absent, outputWait(), 'parent', undefined, fingerprint).text,
+    output.result(absent, outputWait(), 'parent').text
+  )
+})
+
 test('output timeout cap golden uses the upstream wait hint only with a real timed_out=true fact', () => {
   const output = new OutputProjector()
   const read = {
