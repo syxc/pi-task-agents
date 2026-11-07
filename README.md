@@ -27,7 +27,7 @@ pi install git:github.com/syxc/pi-task-agents
 | task_send | 仅在子会话闲置时同步续接；接受本 owner 的任务 ID 或子 session_id |
 | task_query | 查询当前父会话的任务与状态 |
 | task_output | 读取持久输出，支持 UTF-8 字节偏移、增量游标和最长 30 秒等待 |
-| task_stop | 取消任务，等待子会话清理后释放并发名额 |
+| task_stop | 取消任务；清理未确认时报告状态并保留并发名额 |
 | task_agents | 查看角色和资源范围 |
 
 ### 结果与通知
@@ -46,6 +46,8 @@ pi install git:github.com/syxc/pi-task-agents
 - 查看：`/tasks list`、`/tasks roles`、`/tasks show <id>`。状态栏显示运行数和排队数；任务区域优先显示状态和任务身份，空间允许时显示目标、耗时及活动。
 - 停止：`/tasks stop <id>`、`/tasks stop-all`。
 - 恢复通知：`/tasks resume`，不重启任务。
+
+任务超时包含子会话初始化。初始化清理或停止状态未能及时确认时，停止会报告 `cleanup_pending` 或错误；关闭未能确认清理时会报错。清理未确认时保留原 owner 和占位，确认清理也不代表相关持久化已成功或 owner 已关闭。插件不能强制终止不配合的 SDK 初始化。
 
 TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任务行。图形客户端可选择不显示这些信息；此时可通过客户端支持的 `/tasks list` 或 `task_query` 查询。
 
@@ -136,13 +138,13 @@ PTC 类调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。父 Pi 
 
 官方 SDK 未公开实时调度模式，因此该限制也会拒绝原本可排队的 parallel 嵌套前台调用，不声称两者等价。收到 BUSY 后，等待任务完成或停止清理确认再重试；独立任务可改用 `run_in_background:true`，异步续接可用 `task_append`。不要把该错误当作已执行或已准入，也不要据此重投已有回执的任务。
 
-兼容变化：旧版省略 `maxConcurrency` 时不设插件并发配额；现在默认仍为 4，超过 4 个任务会排队，可显式设置 5 至 10。原有 1 至 10 的配置保持原值；旧配置中的 11 至 64 现在会使全局或已信任项目配置加载失败，报错含配置路径及合法范围，不会静默忽略、回退或截断。升级前须将其改为 1 至 10；未信任项目配置仍不解析，仅保留忽略诊断。直接构造 `TaskEngine` 也拒绝大于 10 的值。
+兼容变化：旧版省略 `maxConcurrency` 时不设插件并发配额；现在默认是 4，超过 4 个任务会排队，可显式设置 5 至 10。原有 1 至 10 的配置保持原值；旧配置中的 11 至 64 现在会使全局或已信任项目配置加载失败，报错含配置路径及合法范围，不会静默忽略、回退或截断。升级前须将其改为 1 至 10；未信任项目配置仍不解析，仅保留忽略诊断。直接构造 `TaskEngine` 也拒绝大于 10 的值。
 
 ### 高级覆盖
 
 工具、资源、超时和并发均非入门必填项。加载顺序为默认值 → `<agentDir>/task-agents.json` → 已信任项目的 `.pi/task-agents.json`；未信任项目配置不生效。指令逐层追加，其他字段替换，示例见 [examples/task-agents.json](examples/task-agents.json)。
 
-- 并发与超时：`maxConcurrency` 默认为 4，范围 1 至 10；`timeoutMs: 0` 表示不限时。
+- 超时：`timeoutMs: 0` 表示不限时。
 - 角色名称：裸名配置可覆盖内置角色；自定义 `researcher` 可用 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。
 - 兼容性：旧配置的显式模型、工具和空资源列表仍有优先权，不自动迁移；MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。
 

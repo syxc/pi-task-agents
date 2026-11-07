@@ -4,8 +4,82 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { answer, deferred, fixture } from './pi-backend-test-helpers.ts'
+import { answer, deferred, fixture, profile } from './pi-backend-test-helpers.ts'
 import type { ChildFailure, ChildSession } from '../src/types.ts'
+
+test('an already canceled factory performs no session initialization', async (t) => {
+  const f = await fixture(t)
+  await assert.rejects(
+    f.create({
+      profile,
+      cwd: f.cwd,
+      sessionPath: join(f.root, 'never-created.jsonl'),
+      signal: AbortSignal.abort()
+    }),
+    { name: 'AbortError' }
+  )
+  assert.equal(f.session(), undefined)
+})
+
+for (const stage of ['factory', 'session_start', 'profile']) {
+  test(`cooperative cancellation after ${stage} drains native shutdown without model calls`, async (t) => {
+    const f = await fixture(t),
+      entered = deferred(),
+      release = deferred()
+    const key = `initialization-cancellation-${randomUUID()}`
+    const state = { entered, release, starts: 0, shutdowns: 0, profiles: 0, models: 0 }
+    ;(globalThis as unknown as Record<string, unknown>)[key] = state
+    const path = join(f.root, 'sessions', 'canceled.jsonl')
+    const extension = join(f.root, 'cancellation.mjs')
+    await writeFile(
+      extension,
+      `export default async pi => {
+      const state = globalThis[${JSON.stringify(key)}];
+      pi.on('session_start', async () => {
+        state.starts++;
+        if (${JSON.stringify(stage)} === 'session_start') { state.entered.resolve(); await state.release.promise; }
+      });
+      pi.on('session_shutdown', () => { state.shutdowns++; });
+      if (${JSON.stringify(stage)} === 'factory') { state.entered.resolve(); await state.release.promise; }
+    };`
+    )
+    f.script(() => {
+      state.models++
+      return answer()
+    })
+    const controller = new AbortController()
+    const creating = f.create({
+      profile: { ...profile, extensions: [extension] },
+      cwd: f.cwd,
+      sessionPath: path,
+      signal: controller.signal,
+      onProfileResolved: async () => {
+        state.profiles++
+        if (stage === 'profile') {
+          entered.resolve()
+          await release.promise
+        }
+      }
+    })
+    const rejected = assert.rejects(creating, { name: 'AbortError' })
+    try {
+      await entered.promise
+      controller.abort()
+      await assert.rejects(f.child({}, path), /leased/)
+      release.resolve()
+      await rejected
+      assert.equal(state.models, 0)
+      assert.equal(state.starts, stage === 'factory' ? 0 : 1)
+      assert.equal(state.profiles, stage === 'profile' ? 1 : 0)
+      assert.equal(state.shutdowns, 1)
+      await (await f.child({}, path)).dispose()
+    } finally {
+      release.resolve()
+      await rejected
+      delete (globalThis as unknown as Record<string, unknown>)[key]
+    }
+  })
+}
 
 function timerDestroyed(timer: ReturnType<typeof setInterval> | undefined): boolean {
   const native = timer as ReturnType<typeof setInterval> & { _destroyed: boolean }

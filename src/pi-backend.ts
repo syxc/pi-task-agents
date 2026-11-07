@@ -180,6 +180,7 @@ export function createPiChildFactory({
   let runtimePromise: Promise<ModelRuntime> | undefined
   const seededProviders = new Set<string>()
   return async function createChild({
+    signal,
     profile,
     cwd,
     sessionPath,
@@ -187,9 +188,17 @@ export function createPiChildFactory({
     onProfileResolved,
     onOwnedCommandStarted
   }: CreateChildOptions): Promise<ChildSession> {
+    // SDK startup awaits are not hard-cancelable. Check only at owned stage boundaries.
+    const checkCanceled = () => {
+      if (signal?.aborted) {
+        throw abortError()
+      }
+    }
+    checkCanceled()
     const api = await (sdkPromise ??= Promise.resolve(
       (sdk as PiSdk | undefined) ?? import('@earendil-works/pi-coding-agent')
     ))
+    checkCanceled()
     const parentRuntime = getParentRuntime?.()
     const shared =
       parentRuntime?.tools && selectParentTools(parentRuntime.tools, profile, resolve(cwd))
@@ -278,6 +287,7 @@ export function createPiChildFactory({
       resourceHost,
       api
     )
+    checkCanceled()
     if (
       profile.model !== undefined &&
       (typeof profile.model !== 'string' ||
@@ -302,6 +312,7 @@ export function createPiChildFactory({
           })
         : (modelRuntime as unknown as ModelRuntime)
     ))
+    checkCanceled()
     const slash = profile.model?.indexOf('/') ?? -1
     const provider = profile.model?.slice(0, slash) ?? inheritedModel?.provider
     if (provider) {
@@ -334,6 +345,7 @@ export function createPiChildFactory({
     let child: ChildSession | undefined
     let loader: InstanceType<PiSdk['DefaultResourceLoader']> | undefined
     try {
+      checkCanceled()
       const settings = api.SettingsManager.inMemory(
         {
           ...parentRuntime?.settings,
@@ -510,6 +522,7 @@ export function createPiChildFactory({
         }
       })
       await loader.reload()
+      checkCanceled()
       const plugins = [
         ...pluginToolNames(loader, resources.extensionSources),
         ...configuredTools.map((tool) => tool.name)
@@ -864,6 +877,7 @@ export function createPiChildFactory({
         }
       }
       try {
+        checkCanceled()
         if (thinkingLevel !== undefined && session.thinkingLevel !== thinkingLevel) {
           throw new Error(
             `Requested child thinking level ${thinkingLevel} is unsupported for ${profile.model ?? model.id}; Pi selected ${session.thinkingLevel}`
@@ -892,6 +906,7 @@ export function createPiChildFactory({
             }
           }
         })
+        checkCanceled()
         // Factories already ran during reload. Reject diagnostics only once native shutdown is owned and observable.
         if (
           loader.getExtensions().errors.length ||
@@ -903,6 +918,7 @@ export function createPiChildFactory({
           throw extensionError
         }
         await commands?.ready()
+        checkCanceled()
         for (const name of pluginToolNames(loader, resources.extensionSources)) {
           extraTools.add(name)
         }
@@ -938,6 +954,7 @@ export function createPiChildFactory({
           )
         ) as unknown as AgentProfile
         await onProfileResolved?.(frozen)
+        checkCanceled()
         if (extensionError) {
           throw extensionError
         }

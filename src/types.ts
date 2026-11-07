@@ -105,6 +105,8 @@ export interface ChildSession {
 }
 
 export interface CreateChildOptions {
+  /** Cooperative initialization cancellation only; the factory still owns cleanup until it settles. */
+  signal?: AbortSignal
   profile: AgentProfile
   cwd: string
   sessionPath: string
@@ -116,6 +118,7 @@ export interface CreateChildOptions {
   onProfileResolved?: (profile: AgentProfile) => Promise<void>
 }
 
+/** Rejection confirms cleanup, unless CHILD_CLEANUP_FAILED retains a retryable cleanupChild or an unresolved owner. */
 export type CreateChild = (options: CreateChildOptions) => Promise<ChildSession>
 
 export interface TaskRecord {
