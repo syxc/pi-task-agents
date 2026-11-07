@@ -25,6 +25,7 @@ import type {
 } from './types.ts'
 
 export const RESULT_TYPE = 'pi-task-agents:result'
+const FAILURE_NOTICE_TYPE = 'pi-task-agents:failure-notice'
 
 type ParentAPI = Pick<ExtensionAPI, 'sendMessage' | 'appendEntry' | 'getThinkingLevel'> &
   Partial<Pick<ExtensionAPI, 'getActiveTools'>> &
@@ -475,6 +476,7 @@ export class TaskController {
       if (this.inFlight.has(task.task_id) || (this.attempts.get(task.task_id) ?? 0) >= 3) {
         continue
       }
+      this.notifyFailure(task)
       this.inFlight.set(task.task_id, Date.now())
       this.attempts.set(task.task_id, (this.attempts.get(task.task_id) ?? 0) + 1)
       try {
@@ -493,6 +495,41 @@ export class TaskController {
       }
       // sendMessage returns void; a later disk/idle check also catches asynchronous failures.
       this.scheduleCheck(1000)
+    }
+  }
+
+  private notifyFailure(task: TaskSummary): void {
+    const ctx = this.ctx
+    if (!ctx?.hasUI || (task.status !== 'failed' && task.status !== 'lost')) {
+      return
+    }
+    try {
+      const seen = ctx.sessionManager
+        .getEntries()
+        .some(
+          (entry) =>
+            entry.type === 'custom' &&
+            entry.customType === FAILURE_NOTICE_TYPE &&
+            isRecord(entry.data) &&
+            entry.data.parent_id === this.parentId &&
+            entry.data.task_id === task.task_id
+        )
+      if (seen) {
+        return
+      }
+      // A custom entry adds no model context. Record first for at-most-once UI
+      // feedback across reload/retry; native result delivery keeps its own receipt.
+      this.pi.appendEntry(FAILURE_NOTICE_TYPE, {
+        parent_id: this.parentId,
+        task_id: task.task_id
+      })
+      const id = task.task_id.replace(/[^a-zA-Z0-9_-]/g, '?').slice(0, 80)
+      ctx.ui.notify(
+        `Task agents: ${task.status} task ${id}. Use /tasks list to inspect.`,
+        'warning'
+      )
+    } catch {
+      // Best-effort UI must not block or retry the owner's native followUp.
     }
   }
 

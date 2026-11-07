@@ -314,6 +314,7 @@ export function createToolFileObservation(options: {
         [...scope.before]
           .filter(([file, value]) => scope.after.has(file) && scope.after.get(file) !== value)
           .map(([file]) => file)
+          .sort()
       )
       const notes: string[] = [scopeNote]
       if (scope.workspace) {
@@ -328,7 +329,8 @@ export function createToolFileObservation(options: {
           scope.errors.add('workspace_recording_failed')
         }
       }
-      const paths = [...changed].sort()
+      // Reserve capacity for confirmed tool targets before supplemental workspace changes.
+      const paths = [...changed]
       const report: VerificationReport = {
         fileChange: scope.errors.size
           ? 'recording_failed'
@@ -337,7 +339,7 @@ export function createToolFileObservation(options: {
             : paths.length
               ? 'change_observed'
               : 'no_observed_change',
-        ...(!scope.errors.size || paths.length ? { changedFiles: paths.slice(0, 200) } : {}),
+        ...(!scope.errors.size || paths.length ? { changedFiles: paths.slice(0, 200).sort() } : {}),
         observationNotes: [
           ...notes,
           ...scope.errors,
