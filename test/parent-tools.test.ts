@@ -78,7 +78,9 @@ async function setup(t, factories = [], roles = {}, trailingFactories = []) {
   return {
     ...f,
     session,
-    controller,
+    get controller() {
+      return controller
+    },
     api,
     child,
     taskResult() {
@@ -837,6 +839,137 @@ for (const denial of ['inline', 'mcp-off', 'server-scope']) {
     assert.equal(events.filter((event) => event.event === 'started').length, 1)
     assert.equal(events.filter((event) => event.method === 'tools/call').length, 1)
   })
+}
+
+for (const [provenance, selector] of [
+  ['registration', undefined],
+  ['registration', 'owned'],
+  ['registration', 'group'],
+  ['file', 'owned']
+] as const) {
+  test(
+    'legacy default parent bridge restores MCP fail-closed by source: ' +
+      provenance +
+      '/' +
+      (selector ?? 'inherit'),
+    async (t) => {
+      const logs = await mkdtemp(join(tmpdir(), 'owned-legacy-mcp-'))
+      t.after(() => rm(logs, { recursive: true, force: true }))
+      const audit = join(logs, 'audit.jsonl')
+      let phase = 'original'
+      const config = () => ({
+        command: process.execPath,
+        args: [server, audit, phase],
+        exposure: 'direct' as const
+      })
+      const f = await setup(
+        t,
+        [
+          {
+            name: 'mcp',
+            builtin: true,
+            factory: sdk.createMcpExtension({
+              startupWaitMs: 5000,
+              logPath: join(logs, 'mcp.log'),
+              loadConfig: () => ({
+                servers:
+                  provenance === 'file'
+                    ? [{ name: 'owned', scope: 'global', source: 'owned-file', config: config() }]
+                    : [],
+                errors: []
+              })
+            })
+          },
+          ...['original', 'replacement'].map((owner) => ({
+            name: owner + '/group/owned.ts',
+            factory: (pi) => {
+              if (provenance === 'registration' && phase === owner) {
+                pi.registerMcpServer('owned', config())
+              }
+            }
+          }))
+        ],
+        { worker: { tools: ['mcp__owned__echo'], mcpServers: ['owned'] } }
+      )
+      let requests = 0
+      const run = async (name, args) => {
+        let parentCalls = 0,
+          childCalls = 0
+        const action = tool(name, args)
+        action.content[0].id += '-' + ++requests
+        f.script((_step, context) =>
+          !f.child(context)
+            ? ++parentCalls === 1
+              ? action
+              : answer('PARENT_DONE')
+            : ++childCalls === 1
+              ? tool('mcp__owned__echo', { value: phase })
+              : answer('CHILD_DONE')
+        )
+        await f.session.prompt('Use only the owned offline MCP fixture.')
+        const result = f.session.messages.findLast(
+          (message) => message.role === 'toolResult' && message.toolName === name
+        )
+        assert.ok(result && result.role === 'toolResult')
+        assert.equal(result.details.status, 'succeeded', JSON.stringify(result.details))
+        return result.details
+      }
+      const countCalls = async () =>
+        (await readFile(audit, 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+          .filter((event) => event.method === 'tools/call').length
+      const first = await run('task', input())
+      assert.equal(await countCalls(), 1, 'new tasks must retain registered MCP access')
+      const engine = f.controller.engine,
+        original = engine.task(first.task_id)
+      assert.ok(original.profile.toolInventory.includes('mcp__owned__echo'))
+      assert.deepEqual(
+        original.profile.extensionSnapshot,
+        provenance === 'registration' ? ['<inline:original/group/owned.ts>'] : []
+      )
+      original.profile = {
+        ...original.profile,
+        ...(selector ? { extensions: [selector] } : {})
+      }
+      delete original.profile.extensionSnapshot
+      await engine.persist()
+      phase = 'replacement'
+      await f.session.reload()
+      assert.notEqual(f.controller.engine, engine, 'reload must reopen the durable task store')
+      assert.equal(f.controller.engine.task(first.task_id).profile.extensionSnapshot, undefined)
+      const continued = await run('task_send', {
+        task_id: first.task_id,
+        content: 'Restore old history.'
+      })
+      assert.equal(continued.session_id, first.sub_session_id)
+      assert.equal(
+        await countCalls(),
+        provenance === 'registration' ? 1 : 2,
+        'legacy names cannot authorize a replacement registration; file MCP remains allowed'
+      )
+      assert.equal(
+        f.controller.engine
+          .task(continued.task_id)
+          .profile.toolInventory.includes('mcp__owned__echo'),
+        provenance === 'file'
+      )
+      const fresh = await run('task', input())
+      assert.ok(
+        f.controller.engine.task(fresh.task_id).profile.toolInventory.includes('mcp__owned__echo')
+      )
+      assert.deepEqual(
+        f.controller.engine.task(fresh.task_id).profile.extensionSnapshot,
+        provenance === 'registration' ? ['<inline:replacement/group/owned.ts>'] : []
+      )
+      assert.equal(
+        await countCalls(),
+        provenance === 'registration' ? 2 : 3,
+        'denying legacy provenance must not disable fresh tasks or the parent connector'
+      )
+    }
+  )
 }
 
 for (const mode of ['foreground', 'background', 'cancel']) {

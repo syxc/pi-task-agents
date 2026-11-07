@@ -514,6 +514,165 @@ test('append waits for prompt dispatch and cancellation during child creation sk
   assert.equal((await engine.query({ task_id: second.task_id })).status, 'canceled')
 })
 
+test('regression: close awaiting append admission prevents the first prompt after child initialization', async (t) => {
+  const releaseFactory = deferred()
+  const factoryEntered = deferred()
+  const { engine, children, createChild } = await setup(t)
+  engine.createChild = async (args) => {
+    factoryEntered.resolve()
+    await releaseFactory.promise
+    const child = await createChild(args)
+    const prompt = child.prompt.bind(child)
+    child.prompt = (text, options) => {
+      const result = prompt(text, options)
+      child.calls.at(-1)!.resolve({ text: 'unexpected first prompt' })
+      return result
+    }
+    return child
+  }
+  const task = await engine.start(input(), profile, { requestId: 'close-before-prompt' })
+  await factoryEntered.promise
+  const appending = engine.append(task.task_id, 'never delivered', { requestId: 'held-append' })
+  const rejectedAppend = assert.rejects(appending)
+  await waitFor(() => Boolean(engine.runtimes.get(task.task_id)?.delivery))
+  const closing = engine.close()
+  releaseFactory.resolve()
+  await Promise.all([closing, rejectedAppend])
+  assert.equal(children.length, 1)
+  assert.equal(children[0].calls.length, 0, 'close request must fence the first prompt')
+  assert.deepEqual(children[0].steers, [])
+  assert.equal(children[0].disposed, true)
+  const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+  assert.equal(saved.tasks[0].status, 'canceled')
+  assert.equal(saved.requests['start:close-before-prompt'], task.task_id)
+  assert.equal(saved.requests[`append:${task.task_id}:held-append`], undefined)
+})
+
+test('regression: running persistence failure cannot leave child initialization behind close', async (t) => {
+  const { engine, children, createChild } = await setup(t)
+  const runningWrite = deferred()
+  const writeEntered = deferred()
+  const releaseFactory = deferred()
+  const save = engine.store.save.bind(engine.store)
+  const fault = new Error('running row write failed')
+  let failRunning = true
+  let factoryCalls = 0
+  engine.store.save = async (state) => {
+    if (failRunning && state.tasks.some((task) => task.status === 'running')) {
+      failRunning = false
+      writeEntered.resolve()
+      await runningWrite.promise
+      throw fault
+    }
+    return save(state)
+  }
+  engine.createChild = async (args) => {
+    factoryCalls++
+    await releaseFactory.promise
+    return createChild(args)
+  }
+  const task = await engine.start(input(), profile, { requestId: 'running-write-failure' })
+  await writeEntered.promise
+  const done = engine.runtimes.get(task.task_id)!.done
+  runningWrite.resolve()
+  await done
+  try {
+    await engine.close()
+  } finally {
+    releaseFactory.resolve()
+  }
+  await tick()
+  assert.equal(factoryCalls, 0, 'child creation must wait for the durable running row')
+  assert.equal(children.length, 0, 'no child may appear after close releases ownership')
+  const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+  assert.equal(saved.requests['start:running-write-failure'], task.task_id)
+  assert.equal(saved.tasks[0].status, 'failed')
+  assert.equal(saved.tasks[0].error, fault.message)
+})
+
+test('regression: queued cancel retries a failed terminal write without repeating its output', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 1 })
+  await engine.start(input('blocker'), profile)
+  const queued = await engine.start(input('never dispatched'), profile, {
+    requestId: 'queued-stop'
+  })
+  await waitFor(() => children[0]?.calls.length)
+  const save = engine.store.save.bind(engine.store)
+  const fault = new Error('queued cancel write failed')
+  let attempts = 0
+  engine.store.save = async (state) => {
+    if (state.tasks.find((task) => task.task_id === queued.task_id)?.status === 'canceled') {
+      attempts++
+      if (attempts === 1) {
+        throw fault
+      }
+    }
+    return save(state)
+  }
+  await assert.rejects(engine.stop(queued.task_id, 'first stop reason'), fault)
+  const beforeRetry = JSON.parse(await readFile(engine.store.file, 'utf8'))
+  assert.equal(beforeRetry.tasks[1].status, 'queued')
+  const stopped = await engine.stop(queued.task_id, 'must not replace the first reason')
+  assert.equal(stopped.status, 'canceled')
+  assert.equal(attempts, 2, 'terminal in-memory status is not a durable cancellation receipt')
+  const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+  assert.equal(saved.tasks[1].status, 'canceled')
+  assert.equal(saved.tasks[1].cancel_reason, 'first stop reason')
+  assert.equal(saved.tasks[1].output, '\n\n[aborted] first stop reason')
+  assert.equal(saved.requests['start:queued-stop'], queued.task_id)
+  assert.equal(children.length, 1)
+})
+
+test('regression: close retries uncertain queued cancellations and retains ownership on another write failure', async (t) => {
+  /* oxlint-disable no-await-in-loop -- Each case owns a separate store and completes its close retries before cleanup. */
+  for (const committed of [false, true]) {
+    await t.test(committed ? 'post-commit rejection' : 'pre-commit rejection', async (t) => {
+      const { engine, children } = await setup(t)
+      engine.pump = () => {}
+      const queued = await engine.start(input(), profile, { requestId: 'close-retry-stop' })
+      const save = engine.store.save.bind(engine.store)
+      const fault = new Error('uncertain queued cancellation')
+      let fail = true
+      let attempts = 0
+      engine.store.save = async (state) => {
+        attempts++
+        if (fail) {
+          if (committed) {
+            await save(state)
+          }
+          throw fault
+        }
+        return save(state)
+      }
+      await assert.rejects(engine.stop(queued.task_id, 'original cancellation'), fault)
+      assert.equal(
+        JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].status,
+        committed ? 'canceled' : 'queued'
+      )
+      await assert.rejects(engine.close(), fault)
+      assert.equal(attempts, 2, 'close must retry even an in-memory terminal cancellation')
+      assert.equal((await engine.query({ task_id: queued.task_id })).status, 'canceled')
+      const other = new TaskEngine({
+        rootDir: engine.store.rootDir,
+        parentId: engine.parentId,
+        cwd: engine.cwd,
+        createChild: engine.createChild
+      })
+      await assert.rejects(other.init(), /locked|owner/i)
+      fail = false
+      await engine.close()
+      assert.equal(attempts, 3)
+      const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+      assert.equal(saved.tasks[0].status, 'canceled')
+      assert.equal(saved.tasks[0].cancel_reason, 'original cancellation')
+      assert.equal(saved.tasks[0].output, '\n\n[aborted] original cancellation')
+      assert.equal(saved.requests['start:close-retry-stop'], queued.task_id)
+      assert.equal(children.length, 0)
+    })
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
 test('regression: microtask stop after prompt completion retains the slot until abort settles', async (t) => {
   const { engine, children } = await setup(t, { maxConcurrency: 1 })
   const a = await engine.start(input('A'), profile)
@@ -1403,6 +1562,12 @@ test(
     assert.equal(children.length, 0)
     assert.equal(engine.waiters.size, 0)
     await assert.rejects(engine.start(input(), profile), fault)
+    try {
+      await assert.rejects(engine.close(), fault)
+    } finally {
+      engine.store.save = save
+    }
+    await engine.close()
   }
 )
 
@@ -3296,6 +3461,183 @@ test('regression: stop-winning row keeps its terminal status while a late normal
   assert.equal(result.output, source.output())
   assert.equal(result.output, 'late committed text\n\n[failed] late actual failure')
   assert.deepEqual(result.stopError, stopped.stopError)
+})
+
+test('regression: failed terminal writes retain close ownership and retry only the saved outcome', async (t) => {
+  /* oxlint-disable no-await-in-loop -- Each outcome owns its store and completes recovery before the next case. */
+  for (const status of ['canceled', 'succeeded', 'failed'] as const) {
+    await t.test(status, async (t) => {
+      const { engine, children, rootDir, createChild } = await setup(t)
+      const task = await engine.start(input(), profile, { requestId: 'terminal-recovery' })
+      await waitFor(() => children[0]?.calls.length)
+      const save = engine.store.save.bind(engine.store)
+      const terminalFault = new Error('terminal write failed')
+      const closeFault = new Error('close retry write failed')
+      let failure: Error | undefined = terminalFault
+      let attempts = 0
+      engine.store.save = async (state) => {
+        if (state.tasks[0].status === status) {
+          attempts++
+          // A thrown acknowledgement is also uncertain even when the bytes reached disk.
+          if (status === 'failed') {
+            await save(state)
+          }
+          if (failure) {
+            throw failure
+          }
+        }
+        return save(state)
+      }
+      try {
+        const done = engine.runtimes.get(task.task_id)!.done
+        if (status === 'canceled') {
+          assert.equal((await engine.stop(task.task_id, 'explicit stop')).status, status)
+        } else {
+          children[0].calls[0].resolve(terminalResult(status, 'one terminal body'))
+        }
+        await done
+        assert.equal(engine.runtimes.has(task.task_id), false)
+        assert.equal(engine.task(task.task_id).status, status)
+        const expectedOutput = engine.task(task.task_id).output
+        const expectedFinished = engine.task(task.task_id).finished_at
+        assert.equal(attempts, 1)
+        assert.equal(
+          JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].status,
+          status === 'failed' ? 'failed' : status === 'canceled' ? 'stopping' : 'running'
+        )
+        await assert.rejects(engine.query(), terminalFault)
+        failure = closeFault
+        await assert.rejects(engine.close(), closeFault)
+        assert.equal(attempts, 2)
+        await assert.rejects(
+          engine.query(),
+          terminalFault,
+          'cleanup must not replace the latched storage fault'
+        )
+        const other = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+        await assert.rejects(other.init(), /active task owner/)
+        failure = undefined
+        await engine.close()
+        assert.equal(attempts, 3)
+        const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+        assert.equal(saved.tasks[0].status, status)
+        assert.equal(saved.tasks[0].output, expectedOutput)
+        assert.equal(saved.tasks[0].finished_at, expectedFinished)
+        assert.equal(saved.requests['start:terminal-recovery'], task.task_id)
+        const restored = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+        await restored.init()
+        try {
+          const replay = await restored.start(input(), profile, { requestId: 'terminal-recovery' })
+          assert.equal(replay.task_id, task.task_id)
+          assert.equal(replay.status, status)
+          assert.equal(restored.task(task.task_id).output, expectedOutput)
+          assert.equal(children.length, 1)
+          assert.equal(children[0].calls.length, 1)
+        } finally {
+          await restored.close()
+        }
+      } finally {
+        engine.store.save = save
+      }
+    })
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
+test('regression: running and terminal write failures cannot close a queued disk row as completed cleanup', async (t) => {
+  const { engine, children, rootDir, createChild } = await setup(t)
+  const save = engine.store.save.bind(engine.store)
+  const runningFault = new Error('running write failed first')
+  const terminalFault = new Error('terminal repair still failed')
+  let fail = true
+  let terminalAttempts = 0
+  engine.store.save = async (state) => {
+    if (state.tasks[0]?.status === 'running') {
+      throw runningFault
+    }
+    if (state.tasks[0]?.status === 'failed') {
+      terminalAttempts++
+      if (fail) {
+        throw terminalFault
+      }
+    }
+    return save(state)
+  }
+  try {
+    const task = await engine.start(input(), profile, { requestId: 'both-writes-fail' })
+    await waitFor(() => !engine.runtimes.has(task.task_id))
+    assert.equal(children.length, 0)
+    assert.equal(engine.task(task.task_id).status, 'failed')
+    assert.equal(JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].status, 'queued')
+    await assert.rejects(engine.close(), terminalFault)
+    assert.equal(terminalAttempts, 2)
+    await assert.rejects(
+      engine.query(),
+      runningFault,
+      'the first storage error must remain latched'
+    )
+    const other = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+    await assert.rejects(other.init(), /active task owner/)
+    fail = false
+    const expectedOutput = engine.task(task.task_id).output
+    await engine.close()
+    const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+    assert.equal(saved.tasks[0].status, 'failed')
+    assert.equal(saved.tasks[0].error, runningFault.message)
+    assert.equal(saved.tasks[0].output, expectedOutput)
+    assert.equal(saved.requests['start:both-writes-fail'], task.task_id)
+    const restored = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+    await restored.init()
+    try {
+      const replay = await restored.start(input(), profile, { requestId: 'both-writes-fail' })
+      assert.equal(replay.status, 'failed')
+      assert.equal(replay.task_id, task.task_id)
+      assert.equal(restored.task(task.task_id).output, expectedOutput)
+      assert.equal(children.length, 0)
+    } finally {
+      await restored.close()
+    }
+  } finally {
+    engine.store.save = save
+  }
+})
+
+test('regression: close propagates a terminal save failure produced while canceling its live child', async (t) => {
+  const { engine, children, rootDir, createChild } = await setup(t)
+  const task = await engine.start(input(), profile)
+  await waitFor(() => children[0]?.calls.length)
+  const save = engine.store.save.bind(engine.store)
+  const fault = new Error('shutdown terminal write failed')
+  let fail = true
+  let attempts = 0
+  engine.store.save = async (state) => {
+    if (state.tasks[0].status === 'canceled') {
+      attempts++
+      if (fail) {
+        throw fault
+      }
+    }
+    return save(state)
+  }
+  try {
+    await assert.rejects(engine.close(), fault)
+    assert.equal(engine.task(task.task_id).status, 'canceled')
+    assert.equal(JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].status, 'stopping')
+    assert.equal(attempts, 2, 'close must flush failures created after its initial task scan')
+    await assert.rejects(engine.query(), fault)
+    const other = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+    await assert.rejects(other.init(), /active task owner/)
+    const expectedOutput = engine.task(task.task_id).output
+    fail = false
+    await engine.close()
+    const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
+    assert.equal(saved.tasks[0].status, 'canceled')
+    assert.equal(saved.tasks[0].output, expectedOutput)
+    assert.equal(children[0].disposed, true)
+    assert.equal(children[0].calls.length, 1)
+  } finally {
+    engine.store.save = save
+  }
 })
 
 test('regression: terminal commit rejection is one write attempt and durable replay never duplicates or reclassifies final output', async (t) => {

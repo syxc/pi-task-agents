@@ -23,10 +23,13 @@ export function selectParentTools(
     sources = new Set<string>(),
     owners = new Map<string, string>()
   const ceiling = normalizeSelector(profile.toolInventory),
-    extensions = normalizeSelector(profile.extensionSnapshot)
+    extensions = profile.extensionSnapshot && new Set(profile.extensionSnapshot)
   const servers = normalizeSelector(profile.mcpServers)
+  // Names alone cannot reauthorize extension code or registrations on a historical profile.
+  const legacyInheritance = profile.toolInventory !== undefined && extensions === undefined
   const sourceAllowed = (source: string) =>
-    (!extensions || extensions.has(normalizedSelectorName(source))) &&
+    !legacyInheritance &&
+    (!extensions || extensions.has(source)) &&
     (!profile.extensions ||
       profile.extensions.some((selector) =>
         isResourceName(selector)
