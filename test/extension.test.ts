@@ -73,7 +73,9 @@ function fixture() {
     }
     async stop(id, reason) {
       this.stopped = { id, reason }
-      return this.result
+      return (
+        this.result ?? { ...this.tasks.find((task) => task.task_id === id), status: 'canceled' }
+      )
     }
   }
   const pi = {
@@ -726,6 +728,135 @@ test('real engine adapter waits by default, continues the same child and enforce
     assert.equal(sent.length, 0)
   } finally {
     await controller.shutdown()
+  }
+})
+
+for (const hasUI of [false, true]) {
+  test(`stop-all reports every incomplete outcome in readable text (hasUI=${hasUI})`, async () => {
+    const f = fixture()
+    try {
+      f.ctx.hasUI = hasUI
+      f.ctx.ui = { setStatus() {}, setWidget() {} }
+      const engine = await f.controller.ensure(f.ctx)
+      const results = [
+        { task_id: 'queued-id', status: 'queued' },
+        { task_id: 'running-id', status: 'running' },
+        { task_id: 'stopping-id', status: 'stopping' },
+        { task_id: 'cleanup-id', status: 'canceled', cleanup_pending: true },
+        {
+          task_id: 'failure-id',
+          status: 'canceled',
+          stopError: { code: 'TASK_STOP_FAILED', message: 'abort failed' }
+        },
+        { task_id: 'success-id', status: 'canceled' }
+      ]
+      engine.tasks = results.map((task) => ({ task_id: task.task_id, status: 'running' }))
+      engine.stop = async (id) => results.find((task) => task.task_id === id)
+      await f.commands.get('tasks').handler('stop-all', f.ctx)
+      const message = f.sent.at(-1)[0]
+      assert.equal(message.display, true)
+      assert.equal(message.customType, 'pi-task-agents:status')
+      assert.deepEqual(message.content, [
+        {
+          type: 'text',
+          text: [
+            'Stop-all incomplete.',
+            '- queued-id [queued]: still active',
+            '- running-id [running]: still active',
+            '- stopping-id [stopping]: still active',
+            '- cleanup-id [canceled]: cleanup unconfirmed',
+            '- failure-id [canceled]: stop failed (TASK_STOP_FAILED): abort failed',
+            '- success-id [canceled]'
+          ].join('\n')
+        }
+      ])
+      assert.equal(f.entries.at(-1).data.paused, true)
+    } finally {
+      await f.controller.shutdown()
+    }
+  })
+
+  test(`stop-all confirms success without hiding task IDs (hasUI=${hasUI})`, async () => {
+    const f = fixture()
+    try {
+      f.ctx.hasUI = hasUI
+      f.ctx.ui = { setStatus() {}, setWidget() {} }
+      const engine = await f.controller.ensure(f.ctx)
+      engine.tasks = [
+        { task_id: 'first-id', status: 'queued' },
+        { task_id: 'second-id', status: 'running' }
+      ]
+      await f.commands.get('tasks').handler('stop-all', f.ctx)
+      assert.equal(
+        f.sent.at(-1)[0].content[0].text,
+        'Stop-all complete.\n- first-id [canceled]\n- second-id [canceled]'
+      )
+    } finally {
+      await f.controller.shutdown()
+    }
+  })
+}
+
+test('stop-all reports unresolved terminal tasks even when nothing is active', async () => {
+  const f = fixture()
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = [
+      { task_id: 'held-id', status: 'failed', cleanup_pending: true },
+      {
+        task_id: 'failed-id',
+        status: 'canceled',
+        stopError: { code: 'TASK_STOP_FAILED', message: 'previous abort failed' }
+      }
+    ]
+    await f.commands.get('tasks').handler('stop-all', f.ctx)
+    const text = f.sent.at(-1)[0].content[0].text
+    assert.match(text, /^Stop-all incomplete\./)
+    assert.match(text, /held-id \[failed\]: cleanup unconfirmed/)
+    assert.doesNotMatch(text, /failed-id/)
+    assert.equal(engine.stopped, undefined)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('stop-all explains the empty case', async () => {
+  const f = fixture()
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = [
+      {
+        task_id: 'recovered',
+        status: 'canceled',
+        stopError: { code: 'TASK_STOP_FAILED', message: 'previous abort failed' }
+      }
+    ]
+    await f.commands.get('tasks').handler('stop-all', f.ctx)
+    assert.equal(
+      f.sent.at(-1)[0].content[0].text,
+      'Stop-all complete.\nNo active tasks or unresolved cleanup.'
+    )
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('stop-all command propagates stop errors without sending a success message', async () => {
+  const f = fixture()
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    engine.tasks = [{ task_id: 'broken-id', status: 'running' }]
+    const failure = new Error('stop rejected')
+    engine.stop = async () => {
+      throw failure
+    }
+    await assert.rejects(
+      f.commands.get('tasks').handler('stop-all', f.ctx),
+      (error) => error === failure
+    )
+    assert.equal(f.sent.length, 0)
+  } finally {
+    await f.controller.shutdown()
   }
 })
 

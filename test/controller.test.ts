@@ -35,7 +35,9 @@ function fixture(entries = [], roles = {}) {
       return { ...this.tasks.find((task) => task.task_id === id), output: 'child report' }
     }
     async stop(id) {
-      this.tasks.find((task) => task.task_id === id).status = 'canceled'
+      const task = this.tasks.find((task) => task.task_id === id)
+      task.status = 'canceled'
+      return { ...task }
     }
   }
   const pi = {
@@ -314,6 +316,81 @@ test('recovery reconciles a durable custom message before attempting redelivery'
   assert.equal(f.sent.length, 0)
   await f.controller.shutdown()
 })
+
+test('stop-all without an engine returns an empty report and still pauses notifications', async () => {
+  const f = fixture()
+  assert.deepEqual(await f.controller.stopAll(), [])
+  assert.equal(f.entries.at(-1).data.paused, true)
+})
+
+test('stop-all preserves each stop summary and already unresolved terminal task', async () => {
+  const f = fixture()
+  try {
+    const engine = await f.controller.ensure(f.ctx)
+    const held = { task_id: 'held', status: 'canceled', cleanup_pending: true }
+    const failed = {
+      task_id: 'failed-before',
+      status: 'failed',
+      stopError: { code: 'CHILD_CLEANUP_FAILED', message: 'dispose failed' }
+    }
+    engine.tasks = [
+      { task_id: 'queued', status: 'queued' },
+      { task_id: 'running', status: 'running' },
+      { task_id: 'stopping', status: 'stopping' },
+      held,
+      failed,
+      complete()
+    ]
+    const results = [
+      { task_id: 'queued', status: 'canceled' },
+      {
+        task_id: 'running',
+        status: 'canceled',
+        cleanup_pending: true,
+        stopError: { code: 'TASK_STOP_FAILED', message: 'abort failed' }
+      },
+      { task_id: 'stopping', status: 'stopping' }
+    ]
+    const calls = []
+    engine.stop = async (id, reason) => {
+      calls.push({ id, reason })
+      return results.find((task) => task.task_id === id)
+    }
+    let refreshed = false
+    f.controller.updateUI = async () => {
+      refreshed = true
+    }
+    assert.deepEqual(await f.controller.stopAll('explicit reason'), [...results, held])
+    assert.deepEqual(calls, [
+      { id: 'queued', reason: 'explicit reason' },
+      { id: 'running', reason: 'explicit reason' },
+      { id: 'stopping', reason: 'explicit reason' }
+    ])
+    assert.equal(refreshed, true)
+    assert.equal(f.entries.at(-1).data.paused, true)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+for (const stage of ['query', 'stop', 'updateUI']) {
+  test(`stop-all preserves thrown ${stage} errors`, async () => {
+    const f = fixture()
+    try {
+      const engine = await f.controller.ensure(f.ctx)
+      engine.tasks = [{ task_id: 'running', status: 'running' }]
+      const failure = new Error(`${stage} failed`)
+      const target = stage === 'updateUI' ? f.controller : engine
+      target[stage] = async () => {
+        throw failure
+      }
+      await assert.rejects(f.controller.stopAll(), (error) => error === failure)
+      assert.equal(f.entries.at(-1).data.paused, true)
+    } finally {
+      await f.controller.shutdown()
+    }
+  })
+}
 
 test('cancel pauses delivery across reload and stops running children', async () => {
   const f = fixture()
@@ -843,7 +920,8 @@ test('terminal cleanup holds stay visible and running tasks are not hidden behin
     assert.equal(statuses.at(-1), 'Agents 1/4 · queued 8 · cleanup pending 1')
     assert.match(widgets.at(-1)[0], /Owned cleanup/)
     assert.match(widgets.at(-1)[0], /cleanup pending/)
-    assert.equal(widgets.at(-1).length, 6)
+    assert.equal(widgets.at(-1).length, 7)
+    assert.equal(widgets.at(-1)[6], '3 more tasks · /tasks list')
   } finally {
     await f.controller.shutdown()
   }

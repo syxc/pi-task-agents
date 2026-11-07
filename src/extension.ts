@@ -9,12 +9,14 @@ import { createParentTools } from './parent-tools.ts'
 import { thinkingLevels } from './config.ts'
 import {
   ACTIVE_TASK_STATUSES,
-  TERMINAL_TASK_STATUSES
+  TERMINAL_TASK_STATUSES,
+  isActiveTaskStatus
 } from './vendor/mcode-background-task/status.ts'
 import { isRecord, notFound, projectedResult, type TaskToolResult } from './tool-result-common.ts'
 import { appendFailure, appendResult, knownAppendFailure, taskResult } from './tool-result-task.ts'
 import { OutputProjector, outputWait, queryResult, stopResult } from './tool-result-control.ts'
 import { renderRoles, roleOverview } from './task-presentation.ts'
+import type { TaskSummary } from './types.ts'
 export type { TaskToolResult } from './tool-result-common.ts'
 
 const nonempty = () => Type.String({ minLength: 1 })
@@ -54,6 +56,24 @@ export function toolResult(value: unknown, isError = false): TaskToolResult {
     isRecord(value) ? value : { result: value },
     isError
   )
+}
+
+function renderStopAll(tasks: TaskSummary[]): string {
+  const incomplete = tasks.some(
+    (task) => isActiveTaskStatus(task.status) || task.cleanup_pending || task.stopError
+  )
+  const lines = tasks.map((task) => {
+    const issues = [
+      ...(isActiveTaskStatus(task.status) ? ['still active'] : []),
+      ...(task.cleanup_pending ? ['cleanup unconfirmed'] : []),
+      ...(task.stopError ? [`stop failed (${task.stopError.code}): ${task.stopError.message}`] : [])
+    ]
+    return `- ${task.task_id} [${task.status}]${issues.length ? `: ${issues.join('; ')}` : ''}`
+  })
+  return [
+    `Stop-all ${incomplete ? 'incomplete' : 'complete'}.`,
+    ...(lines.length ? lines : ['No active tasks or unresolved cleanup.'])
+  ].join('\n')
 }
 
 export function registerTaskAgents(
@@ -374,8 +394,13 @@ export function registerTaskAgents(
       const [command = 'list', id] = args.trim().split(/\s+/).filter(Boolean)
       let result
       if (command === 'stop-all') {
-        await controller.stopAll('User requested stop-all')
-        result = { status: 'stopped' }
+        const tasks = await controller.stopAll('User requested stop-all')
+        pi.sendMessage({
+          customType: 'pi-task-agents:status',
+          display: true,
+          content: [{ type: 'text', text: renderStopAll(tasks) }]
+        })
+        return
       } else if (command === 'stop' && id) {
         result = await engine.stop(id, 'User requested cancellation')
       } else if (command === 'show' && id) {
