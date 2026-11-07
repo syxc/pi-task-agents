@@ -13,4 +13,11 @@ The tests check the hash and compile the unchanged TypeScript module. Only its l
 
 The tests call the source terminal writer with scripted normal outcomes and failures. They compare plain appended content, final summaries, and late-result backfill when a stop already won the row status. Separate engine tests check publication timing and durable replay. This fixture does not test the production filesystem store or establish complete runtime equivalence.
 
-Caller classification matters: the background runner and append completion use a failure wrapper for a rejected completion. The foreground runner catches and converts a true exception to a normal failed result before it invokes the same writer. The background runner converts a true exception caught during its explicit host shutdown to an aborted result; the append completion handler has no such conversion. A Pi transport rejection can still carry an explicitly captured normal result in `partialResult.outcome`. The engine uses this provenance, not the promise rejection alone, Error.name, partial text, or the public task row status. This internal provenance is not added to the durable task record.
+## Caller classification
+
+- The background runner and append completion use a failure wrapper for a rejected completion.
+- The foreground runner converts a true exception to a normal failed result before invoking the writer.
+- During explicit host shutdown, the background runner converts a caught true exception to an aborted result. Append completion does not.
+- A Pi transport rejection can carry a captured normal result in `partialResult.outcome`.
+
+The engine uses this provenance, not promise rejection alone, `Error.name`, partial text, or the public task status. It does not add the provenance to the durable task record.
