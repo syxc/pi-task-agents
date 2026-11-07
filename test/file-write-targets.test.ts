@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { extractToolWritePaths } from '../src/file-write-targets.ts';
+import { extractToolWritePaths } from '../src/vendor/mcode-adapters/file-write-targets.ts';
 
 const sourcePath = 'packages/local-runtime/src/turns/file-changes.ts';
 const fixture = new URL('./fixtures/file-observation/upstream-file-changes.ts.txt', import.meta.url);
@@ -20,7 +20,7 @@ test('target extraction retains pinned upstream helpers with narrow Pi path port
   const expected = section('const STRUCTURED_WRITE_TOOLS', 'export interface BeginLocalTurnFileChangeResult')
     + section('type ExtractToolPathsResult', 'function safeCapturedPath').replace('function extractToolWritePaths(', 'export function extractToolWritePaths(')
     + section('function hasDynamicShellPathToken');
-  const implementation = await readFile(new URL('../src/file-write-targets.ts', import.meta.url), 'utf8');
+  const implementation = await readFile(new URL('../src/vendor/mcode-adapters/file-write-targets.ts', import.meta.url), 'utf8');
   assert.equal(implementation.slice(implementation.indexOf('const STRUCTURED_WRITE_TOOLS')), expected.replace('let trimmed = filePath.trim();', 'let trimmed = filePath;')
     .replace("token.startsWith('~')", "token.startsWith('~') || token.replaceAll(path.win32.sep, '/').split('/').includes('..')"));
   assert.match(implementation, /const BRAND = \{ APP_DIR: '\.pi' \}/);

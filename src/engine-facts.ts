@@ -1,4 +1,4 @@
-import { taskIdFromTurnId, taskTurnId } from './task-turn-id.ts';
+import { taskIdFromTurnId, taskTurnId } from './vendor/mcode-adapters/task-turn-id.ts';
 import { clone, freeze } from './engine-helpers.ts';
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts';
 import { isVerificationReport } from './task-verification.ts';

@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { TaskEngine } from '../src/engine.ts';
 import { TaskDomain } from '../src/task-domain.ts';
-import { taskIdFromTurnId, taskTurnId } from '../src/task-turn-id.ts';
+import { taskIdFromTurnId, taskTurnId } from '../src/vendor/mcode-adapters/task-turn-id.ts';
 import { toTerminalProjection, type TaskTerminalOutcome, type TaskRunOutcome } from '../src/engine-terminal.ts';
 import { isTerminalTaskStatus } from '../src/vendor/mcode-background-task/status.ts';
 import { normalizeTaskError } from '../src/vendor/mcode-background-task/errors.ts';
@@ -2162,7 +2162,7 @@ test('source comparison: task turn encoding is an unchanged reversible index and
   assert.ok(watched?.sha256, `Missing upstream turn-id watch: ${sourcePath}`);
   const source = await readFile(new URL('./fixtures/mcode-task-steering/turn-id.ts.source', import.meta.url), 'utf8');
   assert.equal(createHash('sha256').update(source).digest('hex'), watched.sha256);
-  assert.equal(await readFile(new URL('../src/task-turn-id.ts', import.meta.url), 'utf8'), source);
+  assert.equal(await readFile(new URL('../src/vendor/mcode-adapters/task-turn-id.ts', import.meta.url), 'utf8'), source);
   const ts = await import('typescript');
   const compiled = ts.transpileModule(source, { compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS,

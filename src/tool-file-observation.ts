@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type { VerificationReport } from './types.ts';
-import { extractToolWritePaths } from './file-write-targets.ts';
+import { extractToolWritePaths } from './vendor/mcode-adapters/file-write-targets.ts';
 import { within } from './resource-selection.ts';
 import { buildVerification } from './task-verification.ts';
 import { captureWorkspace, type WorkspaceSnapshot } from './workspace-observation.ts';
