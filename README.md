@@ -114,6 +114,12 @@ npm test
 npm run pack
 ```
 
-`check` 检查 strict 类型、包清单和 vendor 哈希；`test` 直接对未修改的官方 SDK 运行回归，并包含隔离 bundled CLI 的默认派工和权限拒绝测试，不应用 SDK 补丁；`pack` 生成 `artifacts/pi-task-agents-0.1.0.tgz`，不含依赖、任务历史或认证。`scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 会使用本机模型认证并消耗额度，须另行授权运行。
+开发工具锁定为 TypeScript 5.9.3、Oxlint 1.92.0、oxlint-tsgolint 7.0.2006、Oxfmt 0.77.0、markdownlint-cli2 0.24.0；开发 SDK 为 Pi 1.5.0，typebox 1.3.27，Node 类型为 22.20.5。`markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
 
-`src/vendor/mcode-background-task/` 保留八个 MIT 任务领域模块；`src/vendor/mcode-child-bash/` 另复用两个生命周期/等待模块，由子会话命令适配器接入 Pi 原生执行与结果回收。十个复用文件的哈希及可逆导入适配由同步脚本核验。`upstream.lock.json` 另监测 43 个核心参考文件，包括生成 Task 行及 owner/Turn/执行模式事实的 `subagent-task-row.ts`，覆盖任务协议及生产链、角色模板、模型装配、task-child 工具边界和 PTC 公共契约。每周或手动检查只报告变化，不自动移植功能；契约变化须人工适配。不以哈希或离线测试宣称整个 MCode 宿主等价。逐项对应实现、测试和 Pi 适配边界见 [核心功能对照](docs/mcode-parity.md)，许可见 [NOTICE](NOTICE)。
+- `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `npm run lint`、`npm run lint:type-aware`、`npm run lint:markdown`、`npm run format:check`；`npm run format` 仅格式化自有代码与配置，不改上游锁定源码。
+- `test`：直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试，不应用 SDK 补丁。
+- `pack`：生成 `artifacts/pi-task-agents-0.1.0.tgz`，不含依赖、任务历史或认证。
+
+`scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度，须另行授权。离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收；真实模型和第三方业务验收须另行授权。
+
+`src/vendor/mcode-background-task/` 保留八个 MIT 任务领域模块；`src/vendor/mcode-child-bash/` 另复用两个生命周期/等待模块，由子会话命令适配器接入 Pi 原生执行与结果回收。十个复用文件的哈希及可逆导入适配由同步脚本核验。`src/vendor/mcode-adapters/task-turn-id.ts` 保留上游逐字原文，`src/vendor/mcode-adapters/file-write-targets.ts` 保留上游 helper 及窄路径适配；两者由固定上游快照和源码一致性测试核验，不属于上述同步脚本管理的两个目录。原始快照留在 `test/fixtures/` 作为测试资产；混合自有逻辑的 `src/task-verification.ts` 不在 vendor 目录。`upstream.lock.json` 另监测 43 个核心参考文件，包括生成 Task 行及 owner/Turn/执行模式事实的 `subagent-task-row.ts`，覆盖任务协议及生产链、角色模板、模型装配、task-child 工具边界和 PTC 公共契约。每周或手动检查只报告变化，不自动移植功能；契约变化须人工适配。不以哈希或离线测试宣称整个 MCode 宿主等价。逐项对应实现、测试和 Pi 适配边界见 [核心功能对照](docs/mcode-parity.md)，许可见 [NOTICE](NOTICE)。

@@ -1,40 +1,73 @@
-import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, open, stat } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import type { SessionManager } from '@earendil-works/pi-coding-agent';
+import { constants } from 'node:fs'
+import { chmod, lstat, mkdir, open, stat } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
+import type { SessionManager } from '@earendil-works/pi-coding-agent'
 
-const leases = new Set<string>();
+const leases = new Set<string>()
 
 /** One live SDK writer per real session file, including hard-link aliases. */
 export async function acquireSessionLease(path: string): Promise<() => void> {
-  const file = await stat(path, { bigint: true });
-  const key = `${file.dev}:${file.ino}`;
-  if (leases.has(key)) throw new Error('Child session is already leased');
-  leases.add(key);
-  return () => { leases.delete(key); };
+  const file = await stat(path, { bigint: true })
+  const key = `${file.dev}:${file.ino}`
+  if (leases.has(key)) {
+    throw new Error('Child session is already leased')
+  }
+  leases.add(key)
+  return () => {
+    leases.delete(key)
+  }
 }
 
-export async function prepareSession(path: string, cwd: string, managerType: Pick<typeof SessionManager, 'open'>): Promise<SessionManager> {
-  const dir = dirname(path);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  if (!(await lstat(dir)).isDirectory()) throw new Error('Session directory must not be a symlink');
-  await chmod(dir, 0o700);
-  const handle = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+export async function prepareSession(
+  path: string,
+  cwd: string,
+  managerType: Pick<typeof SessionManager, 'open'>
+): Promise<SessionManager> {
+  const dir = dirname(path)
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  if (!(await lstat(dir)).isDirectory()) {
+    throw new Error('Session directory must not be a symlink')
+  }
+  await chmod(dir, 0o700)
+  const handle = await open(
+    path,
+    constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
+    0o600
+  )
   try {
-    if (!(await handle.stat()).isFile()) throw new Error('Session path must be a regular file');
-    await handle.chmod(0o600);
-    const text = await handle.readFile('utf8');
-    if (text.trim()) {
-      const entries: unknown[] = text.trim().split('\n').map((line): unknown => JSON.parse(line));
-      const header = entries[0];
-      if (!header || typeof header !== 'object' || !('type' in header) || header.type !== 'session' ||
-        !('id' in header) || typeof header.id !== 'string') throw new Error('Session file requires a Pi session header');
-      if (!('cwd' in header) || typeof header.cwd !== 'string' || resolve(header.cwd) !== cwd) throw new Error('Session working directory does not match');
+    if (!(await handle.stat()).isFile()) {
+      throw new Error('Session path must be a regular file')
     }
-  } finally { await handle.close(); }
+    await handle.chmod(0o600)
+    const text = await handle.readFile('utf8')
+    if (text.trim()) {
+      const entries: unknown[] = text
+        .trim()
+        .split('\n')
+        .map((line): unknown => JSON.parse(line))
+      const header = entries[0]
+      if (
+        !header ||
+        typeof header !== 'object' ||
+        !('type' in header) ||
+        header.type !== 'session' ||
+        !('id' in header) ||
+        typeof header.id !== 'string'
+      ) {
+        throw new Error('Session file requires a Pi session header')
+      }
+      if (!('cwd' in header) || typeof header.cwd !== 'string' || resolve(header.cwd) !== cwd) {
+        throw new Error('Session working directory does not match')
+      }
+    }
+  } finally {
+    await handle.close()
+  }
   // Opening an existing empty file makes Pi flush its header at this exact path.
-  const manager = managerType.open(path, dir, cwd);
-  if (manager.getSessionFile() !== path) throw new Error('Pi changed the assigned session path');
-  await chmod(path, 0o600);
-  return manager;
+  const manager = managerType.open(path, dir, cwd)
+  if (manager.getSessionFile() !== path) {
+    throw new Error('Pi changed the assigned session path')
+  }
+  await chmod(path, 0o600)
+  return manager
 }

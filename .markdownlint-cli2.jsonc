@@ -1,0 +1,40 @@
+{
+  "config": {
+    "default": true,
+    "MD013": false,
+    "MD024": {
+      "siblings_only": true
+    },
+    "MD060": false
+  },
+  "globs": [
+    "*.md",
+    ".github/**/*.md",
+    "docs/**/*.md",
+    "examples/**/*.md",
+    "prompts/**/*.md",
+    "scripts/**/*.md",
+    "src/**/*.md",
+    "test/**/*.md"
+  ],
+  "ignores": [
+    "**/node_modules/**",
+    "artifacts/**",
+    "src/vendor/**",
+    "**/dist/**",
+    "**/dist-test/**",
+    "package-lock.json",
+    "**/*.lock.json",
+    ".codegraph/**",
+    ".zvec-grep/**"
+  ],
+  "gitignore": true,
+  "noInlineConfig": true,
+  "overrides": [
+    {
+      "filter": ["prompts/*.md"],
+      "config": { "MD041": false },
+      "combine": "merge"
+    }
+  ]
+}
