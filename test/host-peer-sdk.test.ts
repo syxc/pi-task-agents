@@ -11,6 +11,17 @@ import { answer } from './pi-backend-test-helpers.ts';
 const project = fileURLToPath(new URL('../', import.meta.url));
 const server = fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url));
 
+test('declares host-provided peers and pins direct development dependencies', async () => {
+  const manifest = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'));
+  for (const [name, version] of Object.entries({
+    '@earendil-works/pi-coding-agent': '1.5.0', '@earendil-works/pi-ai': '1.5.0', typebox: '1.3.27',
+  })) {
+    assert.equal(manifest.peerDependencies[name], '*', name);
+    assert.equal(manifest.devDependencies[name], version, name);
+    assert.equal(manifest.dependencies?.[name], undefined, name);
+  }
+});
+
 test('MCP adapter uses the supplied host SDK without resolving a peer beside the plugin', async t => {
   const root = await mkdtemp(join(tmpdir(), 'pi-host-mcp-'));
   t.after(() => rm(root, { recursive: true, force: true }));

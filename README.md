@@ -2,7 +2,7 @@
 
 小型 Pi 子 Agent 插件：父会话派工，子会话保留独立历史，支持续接、查询、输出、取消和完成通知。任务编排沿用 MCode 的 background-task 机制；子会话、工具执行与资源加载复用 Pi SDK，不复刻 MCode 宿主平台。
 
-要求 Node >=22.19.0，运行时使用宿主提供的 SDK 和 typebox。当前开发工作树依赖配套的 SDK 资源快照接口；原版 Pi SDK 1.5.0 不提供该接口，缺少时任务准入返回 `PARENT_RESOURCE_SNAPSHOT_REQUIRED`，不会用重扫磁盘代替继承。接口补丁、隔离验证与尚未完成的宿主接入见 [SDK 资源快照](docs/pi-sdk-resource-snapshot.md)。
+要求 Node >=22.19.0，支持未修改的官方 Pi 1.5.0，运行时使用宿主提供的 SDK 和 typebox。不需要 SDK 补丁。子会话通过插件内桥接调用父 Pi 的原生工具管线，沿用实际权限 hooks 和 MCP 连接；实现及边界见 [Pi 运行态适配](docs/pi-runtime-adapter.md)。
 
 ## 使用
 
@@ -18,7 +18,7 @@ pi install git:github.com/syxc/pi-task-agents
 pi -e /path/to/pi-task-agents/src/extension.ts
 ```
 
-宿主满足上述接口要求后，安装或更新插件并执行 `/reload`，新建子任务即可使用，无需创建配置文件。已有子任务保留其配置快照。默认使用当前对话的模型和思考级别，并继承父会话实际接受的 Skills、扩展和 MCP，包括运行态贡献；父关闭的资源不会因磁盘仍有配置而复活。主会话本身须已有可用模型与认证。运行 `/tasks roles` 查看简洁概况。此开发副本不会自动替换已安装版本。
+安装或更新插件并执行 `/reload`，新建子任务即可使用，无需创建配置文件。已有子任务保留其配置快照。默认使用当前对话的模型和思考级别，继承父会话最终提供的 Skills，并使用父会话已获准的原生、扩展和 MCP 工具，包括运行态贡献；父关闭的资源不会因磁盘仍有配置而复活。扩展工厂不在子会话重新执行，权限 hooks 由父会话的真实工具管线处理。主会话本身须已有可用模型与认证。运行 `/tasks roles` 查看简洁概况。此开发副本不会自动替换已安装版本。
 
 | 工具 | 行为 |
 | --- | --- |
@@ -61,7 +61,7 @@ pi -e /path/to/pi-task-agents/src/extension.ts
 
 默认仍使用 Pi 原生前台 `bash`。允许 Bash 且权限快照包含该能力时，Worker、Verifier 和 Mavis 还可使用子会话专属的 `bash_task`：`action=start` 启动命令并返回 `command_id`，`list` 查询，`output` 增量读取，`stop` 单独停止命令。Explore 不开放该控制工具，旧权限快照也不会自动新增能力。
 
-受管命令通过原生 `executeTool('bash', …)` 执行，保留当前 Bash 的 shell、前缀、环境、超时及权限 hooks。默认创建链只按白名单继承父会话的 `shellPath` 和 `shellCommandPrefix`，前台 Bash、受管命令及 codemode 共用这些原生执行设置，不复制整份父设置。子 Agent 可以继续独立工作，但逻辑任务结束前须等待所属命令，并在同一任务内接收未读结果提示；不另建跟进任务，也不依赖模型轮询。句柄不能控制父 Agent 任务、其他子会话或其他 Turn 尚未结束的命令；所属子会话的已结束命令可按历史句柄读取。
+受管命令通过子会话的原生 `executeTool('bash', …)` 和父工具桥执行，保留实际父 Bash 的 shell、前缀、环境、超时及权限 hooks。前台 Bash、受管命令及 codemode 使用同一父执行管线；观察器只按白名单读取 `shellPath` 和 `shellCommandPrefix`，不复制整份父设置。子 Agent 可以继续独立工作，但逻辑任务结束前须等待所属命令，并在同一任务内接收未读结果提示；不另建跟进任务，也不依赖模型轮询。句柄不能控制父 Agent 任务、其他子会话或其他 Turn 尚未结束的命令；所属子会话的已结束命令可按历史句柄读取。
 
 输出采用私有 `0600` 文件和有界 UTF-8 分段读取。省略 `offset` 使用已提交游标，显式 `offset:0` 可重读；`wait_ms` 最多 30 秒。`truncated` 表示当前仍有未读字节，不表示命令已结束；输出不完整和清理未确认分别由 `output_incomplete`、`cleanup_pending` 标明。清理未确认时保留容量与租约，崩溃后不重放命令，也不将未知状态当作已清理。父会话的 `task_stop` 会取消该子任务的所属执行；这与后台运行整个子任务是两种不同能力。手工脱离原生工具生命周期的进程不属于这些句柄，详细验收和适配边界见[核心功能对照](docs/mcode-parity.md)。
 
@@ -85,27 +85,27 @@ pi -e /path/to/pi-task-agents/src/extension.ts
 按顺序加载默认值、`<agentDir>/task-agents.json` 和已信任项目的 `.pi/task-agents.json`。未信任项目配置不生效。指令逐层追加，其他字段替换。极简示例见 [examples/task-agents.json](examples/task-agents.json)。高级字段只在确有覆盖需求时填写。
 `maxConcurrency` 可选，范围 1 至 64；省略时不施加插件自己的并发配额。`timeoutMs: 0` 表示不限时。
 
-`tools`、`disallowedTools`、`mcpServers` 按 trim/NFKC/大小写归一化后的精确名称匹配，不展开通配符。`extensions`、`skills` 支持已发现的资源名称或现有本地路径；扩展路径须指向 JS/TS 入口。四个角色均默认继承可用资源。资源省略表示继承可用范围，空列表表示不加载；`mcp:false` 或 `mcpServers:[]` 禁用 MCP。资源选择须与父会话已接受的范围、项目 trust 和保存的权限上界相交，本地路径也不能复活父关闭的资源。MCP 通过 Pi SDK 接入，不包含独立 MCP 客户端或 MCode 恢复协议。默认控制器读取原生 connector 的有效快照，不重扫文件配置；仅直接 SDK 嵌入且未提供父快照时，仍保留宿主 `extensions/mcp/config.js` 的兼容接缝。升级 Pi 后须重跑相关回归。
+`tools`、`disallowedTools`、`mcpServers` 按 trim/NFKC/大小写归一化后的精确名称匹配，不展开通配符。`extensions`、`skills` 可按父会话已接受的资源名称或本地路径缩小选择，不会因此执行新的扩展文件。四个角色均默认继承可用范围，空列表表示关闭对应资源；`mcp:false` 或 `mcpServers:[]` 禁用 MCP。资源选择与父会话的实际工具权限和保存的历史上界相交，本地路径不能复活父关闭的资源。MCP 调用复用父连接，不复制服务器凭据或重新连接；按服务器限制资源列表时，调用须显式指定允许的 `server`。直接使用底层 SDK backend 的嵌入程序仍可显式提供独立资源加载器。升级 Pi 后须重跑相关回归。
 
-裸名可覆盖内置角色；自定义 `researcher` 可通过 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。旧配置中的显式模型、工具和空资源列表仍有优先权；本次清理不自动迁移用户配置。旧的 MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。新任务保存扩展身份上界，不保存工厂函数或 MCP 认证配置。冷恢复需要自动继承扩展而旧记录缺少身份事实时，返回 `LEGACY_RESOURCE_SNAPSHOT_REQUIRED`。旧输出仍可读取；需要额外资源时应以明确简报重新派发新任务，不能自动扩大历史权限。
+裸名可覆盖内置角色；自定义 `researcher` 可通过 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。旧配置中的显式模型、工具和空资源列表仍有优先权；本次清理不自动迁移用户配置。旧的 MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。新任务保存工具、Skill 和扩展来源上界，不保存执行闭包、工厂函数或 MCP 认证配置。恢复后的续接重新绑定当前父会话，并与旧上界相交；新增工具不会自动进入旧子会话。旧输出仍可读取；需要额外资源时应以明确简报重新派发新任务，不能自动扩大历史权限。
 
 ## 生命周期与边界
 
 - 父 turn abort 会取消前台等待并暂停自动通知，不自动停止已准入的后台任务。停止任务须使用 `task_stop` 或明确的 `/tasks stop-all`。
-- 同一 Pi 进程内切换会话时，旧任务归原 owner 所有，不向新会话投递。退出或重载扩展会关闭引擎；异常退出后不自动重放可能已有副作用的执行。
-- 任务状态和独立子历史保存在本地。清理失败保留资源占用并允许重试；已保存的输出仍可读取。插件不是跨进程任务守护服务。模型和思考设置在任务准入时捕获，已有子历史不会因父会话之后切换模型而自动改变。扩展工厂自身抛错前的副作用须由扩展自行回滚；插件只能接管 SDK 已交付的生命周期资源。
+- 切换、新建、fork、重载或退出父会话时，先取消并排空该 owner 的在途执行，再关闭工具桥，避免使用失效权限。后台任务不跨父 runtime 替换继续运行，也不转交新会话；已保存的历史和输出保留，回到原会话后可续接。异常退出后不自动重放可能已有副作用的执行。
+- 任务状态和独立子历史保存在本地。清理失败保留资源占用并允许重试；已保存的输出仍可读取。插件不是跨进程任务守护服务。模型和思考设置在任务准入时捕获，已有子历史不会因父会话之后切换模型而自动改变。父扩展仍由 Pi 管理；插件不复制其生命周期或接管扩展自行启动的外部进程。
 - PTC 类程序化工具调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。总开关只由父 Pi 控制：父默认关闭时子也关闭，角色 tools 或 MCP 不能自行开启；父开启后可组合获准工具，关闭 MCP 不影响原生/扩展组合。权限 hooks、deny 和旧快照上界仍生效，不自动给旧任务扩权。返回格式、超时和预算沿用 Pi，不承诺 MCode 脚本原样兼容。
 - 不提供自建 Bash/web_fetch、部署、SQLite 文件观测或 MCode TUI。若需要外部工具，通过 Pi 的可信资源配置接入。
 
 ## 开发
 
 ```sh
-npm ci --ignore-scripts --legacy-peer-deps
+npm ci --ignore-scripts
 npm run check
 npm test
 npm run pack
 ```
 
-`check` 检查 strict 类型、包清单和 vendor 哈希；`test` 按固定源码哈希在临时目录应用配套 SDK 补丁，再运行离线回归，不下载依赖或修改已安装 SDK；`pack` 生成 `artifacts/pi-task-agents-0.1.0.tgz`，不含依赖、任务历史或认证。`scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 会使用本机模型认证并消耗额度，须另行授权运行。
+`check` 检查 strict 类型、包清单和 vendor 哈希；`test` 直接对未修改的官方 SDK 运行回归，并包含隔离 bundled CLI 的默认派工和权限拒绝测试，不应用 SDK 补丁；`pack` 生成 `artifacts/pi-task-agents-0.1.0.tgz`，不含依赖、任务历史或认证。`scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 会使用本机模型认证并消耗额度，须另行授权运行。
 
 `src/vendor/mcode-background-task/` 保留八个 MIT 任务领域模块；`src/vendor/mcode-child-bash/` 另复用两个生命周期/等待模块，由子会话命令适配器接入 Pi 原生执行与结果回收。十个复用文件的哈希及可逆导入适配由同步脚本核验。`upstream.lock.json` 另监测 43 个核心参考文件，包括生成 Task 行及 owner/Turn/执行模式事实的 `subagent-task-row.ts`，覆盖任务协议及生产链、角色模板、模型装配、task-child 工具边界和 PTC 公共契约。每周或手动检查只报告变化，不自动移植功能；契约变化须人工适配。不以哈希或离线测试宣称整个 MCode 宿主等价。逐项对应实现、测试和 Pi 适配边界见 [核心功能对照](docs/mcode-parity.md)，许可见 [NOTICE](NOTICE)。

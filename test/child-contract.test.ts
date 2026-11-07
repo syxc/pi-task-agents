@@ -10,12 +10,12 @@ const parentControls = ['todo', 'todowrite', 'ask_user', 'ask_user_question', 'c
 test('all leaf roles reject parent planning, interactive questions and independent scheduling', () => {
   for (const role of ['explore', 'worker', 'verifier', 'mavis', 'agent:custom']) {
     for (const name of parentControls) {
-      assert.equal(roleAllowsTool(role, name, 'builtin'), false, role + ':' + name);
-      assert.equal(roleAllowsTool(role, ' ' + name.toUpperCase() + ' ', 'configured'), false, name);
+      assert.equal(roleAllowsTool(role, name), false, role + ':' + name);
+      assert.equal(roleAllowsTool(role, ' ' + name.toUpperCase() + ' '), false, name);
     }
-    assert.equal(roleAllowsTool(role, 'memory_search', 'configured'), true);
-    assert.equal(roleAllowsTool(role, 'plugin_owned', 'configured'), true);
-    assert.equal(roleAllowsTool(role, 'mcp__owned__get_goal', 'configured'), true, 'Not an arbitrary substring ban');
+    assert.equal(roleAllowsTool(role, 'memory_search'), true);
+    assert.equal(roleAllowsTool(role, 'plugin_owned'), true);
+    assert.equal(roleAllowsTool(role, 'mcp__owned__get_goal'), true, 'Not an arbitrary substring ban');
   }
 });
 

@@ -8,8 +8,11 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 assert.equal(manifest.type, 'module');
 assert.deepEqual(manifest.pi.extensions, ['./src/extension.ts']);
-assert.equal(manifest.peerDependencies['@earendil-works/pi-coding-agent'], '*');
-assert.equal(manifest.dependencies?.['@earendil-works/pi-coding-agent'], undefined);
+for (const name of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai', 'typebox']) {
+  assert.equal(manifest.peerDependencies[name], '*');
+  assert.ok(manifest.devDependencies[name]);
+  assert.equal(manifest.dependencies?.[name], undefined);
+}
 for (const entry of manifest.files) assert.ok(await stat(resolve(root, entry)));
 for (const dir of ['src', 'scripts', 'test']) {
   for (const name of await readdir(join(root, dir))) {

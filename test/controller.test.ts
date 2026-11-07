@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { TaskController, RESULT_TYPE } from '../src/controller.ts';
 
 const runtimeAPI = { getAllTools: () => [], getSettings: () => ({}),
-  getResources: async () => ({ extensions: [], skills: [], mcp: null }) };
+  captureResources: async () => ({ extensions: [], skills: [], mcp: null }) };
 
 function fixture(entries = [], roles = {}) {
   const sent = [];
@@ -62,7 +62,7 @@ test('a canceled snapshot cannot overwrite a reattached owners current approval'
     extensions: [], skills: [], mcp: false, timeoutMs: 0 } });
   let release, entered, replacement;
   const reading = new Promise(resolve => { entered = resolve; });
-  f.pi.getResources = () => { entered(); return new Promise(resolve => { release = resolve; }); };
+  f.pi.captureResources = () => { entered(); return new Promise(resolve => { release = resolve; }); };
   try {
     await f.controller.ensure(f.ctx);
     const read = f.factories[0].getParentRuntime;

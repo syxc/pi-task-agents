@@ -3,6 +3,8 @@ import type { Static, TProperties, TSchema } from 'typebox';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { TaskController } from './controller.ts';
+import { createParentTools } from './parent-tools.ts';
+import { thinkingLevels } from './config.ts';
 import type { TaskControllerOptions } from './controller.ts';
 import { ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES } from './vendor/mcode-background-task/status.ts';
 import { isRecord, notFound, projectedResult } from './tool-result-common.ts';
@@ -46,7 +48,8 @@ export function registerTaskAgents(
   options: Partial<TaskControllerOptions> = {},
 ): TaskController {
   const { agentDir = getAgentDir(), ...dependencies } = options;
-  const controller = new TaskController(pi, { agentDir, ...dependencies });
+  const parentTools = createParentTools(pi);
+  const controller = new TaskController(pi, { agentDir, captureRuntime: parentTools.capture, ...dependencies });
   const outputProjector = new OutputProjector();
   const register = <T extends TSchema>(
     name: string,
@@ -55,12 +58,18 @@ export function registerTaskAgents(
     execute: (params: Static<T>, id: string, signal: AbortSignal | undefined, ctx: ExtensionContext) => Promise<TaskToolResult>,
   ): void => pi.registerTool({
     name, label: name, description, parameters,
+    ...(['task', 'task_append', 'task_send'].includes(name) ? { reachesTools: () => 'all' as const } : {}),
     ...(['task', 'task_append', 'task_stop'].includes(name) ? { executionMode: 'sequential' as const } :
       ['task_query', 'task_output'].includes(name) ? { executionMode: 'parallel' as const } : {}),
     // Pi validates the prepared unknown value against parameters next. This is
     // only the SDK hook's static boundary, not a transport-effort conversion.
     ...(name === 'task' ? { prepareArguments: (args: unknown) => prepareTaskArguments(args) as Static<T> } : {}),
-    execute: (id, params, signal, onUpdate, ctx) => execute(params, id, signal, ctx),
+    execute: (id, params, signal, onUpdate, ctx) => {
+      const delegated = parentTools.dispatch(id, ctx);
+      if (delegated) return delegated;
+      parentTools.bind(name, ctx);
+      return execute(params, id, signal, ctx);
+    },
   });
 
   register('task', 'Launch one bounded child agent. Default is foreground: wait for its terminal result. Set run_in_background:true only for independent work; completion then notifies the owner automatically. The child has separate history; provide scope, file ownership and acceptance criteria. Description must contain 1-50 Unicode code points after whitespace normalization. Omit model/effort to use the configured or inherited defaults; set overrides only when explicitly requested. An explicit model resets inherited effort; unavailable settings fail without fallback.', object({
@@ -68,7 +77,7 @@ export function registerTaskAgents(
     description: Type.String({ minLength: 1, description: 'Short title in the user language; 1-50 Unicode code points after whitespace normalization (validated by the engine).' }),
     prompt: Type.String({ description: 'Self-contained objective, context, ownership, constraints and acceptance criteria. An empty prompt is allowed by this input schema.' }),
     model: Type.Optional(nonempty()), effort: Type.Optional(Type.String({ minLength: 1,
-      description: 'Pi thinking level: off, minimal, low, medium, high or xhigh. The resolved model must support the requested level.' })),
+      description: `Pi thinking levels: ${thinkingLevels.join(', ')}. The resolved model must support the requested level.` })),
     run_in_background: Type.Optional(Type.Boolean({ description: 'Defaults to false; true returns a background admission receipt.' })),
   }), async (params, id, signal, ctx) => {
     const input = { ...params };
@@ -162,7 +171,11 @@ export function registerTaskAgents(
     outputProjector.reset();
     try { await controller.ensure(ctx); await controller.flush(); } catch (error) { controller.warn(error); }
   });
-  pi.on('session_shutdown', (event) => controller.shutdown(event.reason));
+  pi.on('session_shutdown', async (event) => {
+    // Drain delegated tools while the owner's native hooks and MCP connections still exist.
+    await controller.shutdown(event.reason);
+    parentTools.invalidate();
+  });
   pi.on('before_agent_start', async (event, ctx) => {
     const epoch = controller.cancelEpoch;
     await controller.ensure(ctx);

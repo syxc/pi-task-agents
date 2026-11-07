@@ -108,7 +108,7 @@ test('default controller gives every role the main session Skills, extensions an
     assert.ok(parent.getActiveToolNames().includes('codemode'));
     for (const name of ['explore', 'worker', 'verifier', 'mavis']) {
       role = name; step = 0;
-      const result = await controller.start({ agent_name: name, description: `Inherited resources ${name}`, prompt: 'Use the available owned resources' }, name, undefined, ctx);
+      const result = await controller.start({ agent_name: name, description: `Inherited resources ${name}`, prompt: 'Use the available owned resources' }, name, undefined, parent.extensionRunner.createToolContext(name, undefined));
       assert.equal(result.status, 'succeeded', `${name}: ${result.error}`);
       assert.equal(result.final_text, `RESOURCES_USED:${name}`);
       assert.ok(controller.engine.task(result.task_id).profile.nativeToolSnapshot.includes('codemode'), name);
@@ -116,7 +116,7 @@ test('default controller gives every role the main session Skills, extensions an
     parent.setActiveToolsByName(parent.getActiveToolNames().filter(name => name !== 'codemode'));
     assert.deepEqual(completed, ['main', 'explore', 'worker', 'verifier', 'mavis']);
     role = 'agent:disabled'; step = 0;
-    const disabled = await controller.start({ agent_name: role, description: 'Explicit resource denial', prompt: 'Check the available tools' }, role, undefined, ctx);
+    const disabled = await controller.start({ agent_name: role, description: 'Explicit resource denial', prompt: 'Check the available tools' }, role, undefined, parent.extensionRunner.createToolContext(role, undefined));
     assert.equal(disabled.status, 'succeeded', disabled.error);
     assert.equal(disabled.final_text, 'RESOURCES_DISABLED');
     assert.equal(completed.at(-1), role);

@@ -1,8 +1,10 @@
 import type { ExtensionAPI, LoadedMcpConfig, Skill } from '@earendil-works/pi-coding-agent';
 import type { HostExtensionResource, HostResources } from './resource-loader.ts';
 import { recursiveTools } from './resource-selection.ts';
+import type { ParentTool } from './parent-tools.ts';
 
 export interface ParentRuntimeSnapshot {
+  tools?: readonly ParentTool[];
   resources: HostResources;
   mcp: LoadedMcpConfig | null;
   settings: Pick<ReturnType<ExtensionAPI['getSettings']>, 'shellPath' | 'shellCommandPrefix'>;
@@ -12,15 +14,16 @@ interface ResourceSnapshot {
   skills: Skill[];
   mcp: LoadedMcpConfig | null;
 }
-export type ParentRuntimeAPI = Pick<ExtensionAPI, 'getAllTools' | 'getSettings'> & { getResources?: () => Promise<ResourceSnapshot> };
-const missing = () => Object.assign(new Error('Pi SDK resource snapshots are unavailable. Use the compatible SDK resource-snapshot interface; disk discovery is not parent runtime inheritance.'),
+/** Optional explicit resource injection for SDK embeddings; this is not a Pi ExtensionAPI method. */
+export type ParentRuntimeAPI = Pick<ExtensionAPI, 'getAllTools' | 'getSettings'> & { captureResources?: () => Promise<ResourceSnapshot> };
+const missing = () => Object.assign(new Error('An SDK embedding must provide captureRuntime or an explicit resource inventory; disk discovery is not parent authorization.'),
   { code: 'PARENT_RESOURCE_SNAPSHOT_REQUIRED' });
 const aborted = () => Object.assign(new Error('Parent resource snapshot canceled'), { name: 'AbortError' });
 
 /** Capture approved runtime data only; factories and MCP config must never enter task persistence. */
 export async function captureParentRuntime(pi: ParentRuntimeAPI, signal?: AbortSignal): Promise<ParentRuntimeSnapshot> {
   const api = pi;
-  if (typeof api.getResources !== 'function') throw missing();
+  if (typeof api.captureResources !== 'function') throw missing();
   if (signal?.aborted) throw aborted();
   let remove = () => {};
   const cancellation = new Promise<never>((_resolve, reject) => {
@@ -29,7 +32,7 @@ export async function captureParentRuntime(pi: ParentRuntimeAPI, signal?: AbortS
     remove = () => signal?.removeEventListener('abort', abort);
   });
   let snapshot: ResourceSnapshot;
-  try { snapshot = await Promise.race([api.getResources(), cancellation]); }
+  try { snapshot = await Promise.race([api.captureResources(), cancellation]); }
   finally { remove(); }
   if (signal?.aborted) throw aborted();
   if (!snapshot || !Array.isArray(snapshot.extensions) || !Array.isArray(snapshot.skills)

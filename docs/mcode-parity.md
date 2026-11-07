@@ -6,7 +6,7 @@
 
 ## 架构取舍
 
-- 优先复用 MCode 的源码与设计，将宿主差异限制在薄适配层。核心行为与能力必须保留，实现结构不必一致；有更简洁的 Pi 原生实现时优先采用。
+- 学习 MCode 的子 Agent 调度思路，按 Pi 官方接口实现。可直接复用的纯领域模块继续复用，不要求代码、资源容器或宿主内部机制逐项相同。核心是角色分工、统一任务状态机、独立历史、续接、取消、持久结果和 owner 通知。
 - 定期同步上游更新，分开维护复用源码、适配逻辑和同步记录。控制本地分叉规模，使版本变更可追溯至受影响的接口及验证项，降低升级成本。
 - 以可靠性、轻量化、简洁性和执行效率为优化目标，通过增量输出、通知去重和按需工具暴露控制 token 开销，不降低安全性、权限约束或核心能力。必要信息优先通过 Pi 内置通道传递；未证实替代方案更优时遵循 MCode 契约，不以长度判断信息是否必要。优于上游的设计应提供具体收益和验证依据。
 
@@ -61,8 +61,8 @@
 | 信息不足向父会话报告 blocker，Memory 写入遵守所有权 | `V2/assets/agents/_default/prompt-session-branch.md.hbs` | 所有角色共用的 SDK 附加指令 | Pi 适配；`child-contract.test.ts` 检查真实模型请求中的共享指令；没有 child-owned Memory 时将持久结论交父会话处理，不另建 Memory 宿主 |
 | Task 显式模型/思考优先，其次角色配置、父有效选择 | `V2/src/application/session/task-agent-binding-capture.ts` | `config.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；使用 Pi 的 provider/id、thinking 和原生 registry，不复刻 MCode 模型组管理器；见配置和 SDK 选模回归 |
 | 换模型不继承不兼容旧参数，既有子会话不随父切换漂移 | `V2/src/service/model-system/catalog/agent-model-selection.ts` | `resolveProfile`、冻结 profile 与 onProfileResolved | 对应设计；`config.test.ts`、`pi-backend.test.ts`、`engine.test.ts` |
-| Skills、扩展、MCP 按允许范围加载并保留权限上界 | binding capture、最终工具 surface | `parent-runtime.ts`、`controller.ts`、`resource-*.ts`、`pi-backend.ts` | 配套 SDK 接口下对应实现；`runtime-inheritance.test.ts` 经过默认控制器验证父关闭、运行态 Skill/MCP、纯 hook、新 API、角色限制、无父历史及 reload 恢复；`parent-runtime.test.ts` 验证身份上界、trust 和取消。既有四角色资源回归保留；原版 SDK 1.5.0 没有该接口，宿主接入状态见下文 |
-| 子执行保留必要父原生 Shell 设置 | Pi 宿主执行上下文 | `parent-runtime.ts`、`pi-backend.ts` | 只继承 `shellPath`/`shellCommandPrefix`；`runtime-inheritance.test.ts` 比较实际父执行、子前台 Bash、受管命令和 native codemode，不以手工注入 child SettingsManager 代替默认链验证 |
+| Skills、扩展、MCP 按允许范围使用并保留权限上界 | binding capture、最终工具 surface | `parent-tools.ts`、`child-parent-tools.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；最终 Skills 来自官方事件，工具通过父原生管线执行，不复制扩展工厂或 MCP 凭据。`parent-tools.test.ts` 验证四角色真实 Task、单实例纯权限 hook、后台与结果过滤、首次 MCP 准备及父停用工具；`runtime-inheritance.test.ts`、`resource-inheritance.test.ts` 保留动态/禁用资源、角色限制、独立历史和恢复回归 |
+| 子执行保留必要父原生 Shell 设置 | Pi 宿主执行上下文 | `parent-tools.ts`、`pi-backend.ts` | 默认插件路径复用父 Bash 执行管线；仅为观察复制 `shellPath`/`shellCommandPrefix`。`runtime-inheritance.test.ts` 比较实际父执行、子前台 Bash、受管命令和 native codemode |
 | 原生工具 ceiling 与 Plugin/MCP 来源权限分开 | `V2/.../local-turn-tool-catalog.ts` | `resource-selection.ts`、`resource-tool-inventory.ts` | 对应设计；角色 ceiling、MCP deny、发现与 codemode 回归；外部工具不构成只读沙箱 |
 | codemode 总开关由父 Pi 控制，不由角色或 MCP 另行开启 | Pi 原生 active 工具状态 | `controller.ts`、`controller-owners.ts`、`pi-backend.ts` | 对应实现；`codemode-switch.test.ts`、`controller.test.ts` 和真实父 SDK 四角色资源继承回归；无父状态默认关闭，无新增用户配置开关 |
 | PTC 类程序化工具调用、并行组合及结果整理 | `packages/agent-core/src/tools/ptc.ts`、`V2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs` | Pi 原生 `codemode` | Pi 适配，不是能力排除；`pi-backend-codemode.test.ts` 覆盖四角色原生/扩展组合、显式关闭 MCP、权限 hooks 和已保存上界；受控 MCP 调用另见 `resource-inheritance.test.ts` |
@@ -70,7 +70,7 @@
 
 ## 适配限制与验收要求
 
-- C2 的默认运行态继承依赖配套的 SDK 资源快照接口，原版 SDK 1.5.0 不提供。源码补丁和隔离原生创建链已有受控验证，缺少接口时明确拒绝准入；这不是当前已安装 CLI 已完成接入的证明。SDK bundle 的隔离验证、用户安装及真实服务证据分开记录，见 [SDK 资源快照](pi-sdk-resource-snapshot.md)。
+- 默认插件路径支持未修改的官方 Pi 1.5.0，不再依赖自定义 SDK 资源快照。工具及权限 hook 在父实例执行，子会话不复制父扩展的全部生命周期。父 runtime 被替换时取消并排空旧后台，而不是继续持有失效上下文。机制、权限和生命周期边界见 [Pi 运行态适配](pi-runtime-adapter.md)；离线 SDK、bundled CLI、安装与真实服务验收分别记录。
 - C5/C6 的命令运行时已接入，受控验证覆盖范围、关闭和资源故障路径；接缝探针不能代替生产链验收。Engine 在原生命令启动前持久化清理所有权；只有当前 owner 的清理证明或成功处置才能解除占用。崩溃后的未确认所有权进入隔离，不重放执行。
 - C7 的目标观察已接入各适用角色，并验证受管命令的已知目标和停止后的部分写入。仍须参加最终冻结验收；元数据变化不等于内容差异，报告不归因并发写入。
 - C8 当前配置为定期变更检查，更新仍需契约审查、适配和回归。`LR/turns/file-changes.ts` 和生成 queued 行及 owner/Turn/执行模式事实的 `LR/background-task/subagent-task-row.ts` 已纳入监测，抽取的目标函数由固定原文哈希及函数体一致性测试保护，函数体仅适配字面路径空格及未解析的 Shell 父目录遍历；检查通过仍不代表所有核心行为都已同步。
@@ -101,7 +101,7 @@ MCode PTC 和 Pi codemode 都让模型用程序组合多个工具调用、并行
 | 超时与结果记录 | 使用 Pi 的脚本 `timeout_ms`、取消和输出协议；不复刻 MCode 默认 120 秒、共享 batch 预算或 `details.ptc` 侧信道。脚本失败不会撤销之前已执行的工具副作用 |
 | 模型服务 | 子会话 codemode 使用 `models:false`，不开放额外 classifier/image 模型调用；程序化工具组合不因此被关闭 |
 
-同一父会话的开关变化实时约束后续调用；切换父会话时，后台任务保留原 owner 最近批准状态，不去读取新会话或失效 API。重新回到原 owner 时读取当前父 Pi 状态；关闭引擎时不再批准新的 codemode 调用。
+同一父会话的开关变化实时约束后续调用。普通插件在父 runtime 替换前取消并排空旧后台，不读取新会话或失效 API；回到原 owner 后可续接已保存历史，并按当前父状态和历史上界重新绑定。关闭引擎时不再批准新的 codemode 调用。
 
 上述受控测试证明列出的工具调用与权限路径，不证明两个宿主的全部超时、预算、媒体和恢复协议完全等价。
 

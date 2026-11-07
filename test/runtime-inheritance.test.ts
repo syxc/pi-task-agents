@@ -80,7 +80,9 @@ async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill =
   return { root, cwd, agentDir, loader, parent, marker, shellMarker, settings, get api() { return api; }, get controller() { return controller; }, get ctx() { return ctx; },
     script(fn, nextMode = 'main') { mode = nextMode; step = 0; script = fn; },
     async child(overrides = {}) { return controller.start({ agent_name: 'worker', description: 'Runtime inheritance probe',
-      prompt: 'Use only the assigned fixture.', ...overrides }, 'owned-' + ++childIndex, undefined, ctx); } };
+      prompt: 'Use only the assigned fixture.', ...overrides }, 'owned-' + ++childIndex, undefined,
+        parent.extensionRunner.createToolContext('owned-admission-' + childIndex, undefined)); },
+    toolContext(id = 'owned-control') { return parent.extensionRunner.createToolContext(id, undefined); } };
 }
 
 test('default controller respects parent-session noSkills/noExtensions instead of rediscovering disabled resources', { timeout: 15000 }, async t => {
@@ -154,8 +156,8 @@ for (const selection of ['inherit', 'input', 'role']) test('native max thinking 
 test('MCP-off event observers preserve a null snapshot and default child admission', { timeout: 15000 }, async t => {
   const f = await setup(t, { withoutMcp: true, extraFactories: [{ name: 'owned-mcp-observer',
     factory: pi => pi.on('mcp_servers_change', () => {}) }] });
-  const snapshot = await f.api.getResources(); assert.equal(snapshot.mcp, null);
-  assert.equal(snapshot.extensions.find(entry => entry.path === '<inline:owned-mcp-observer>').mcpConnector, false);
+  assert.equal(typeof f.api.getResources, 'undefined');
+  assert.equal(f.parent.getAllTools().some(tool => tool.name.startsWith('mcp__')), false);
   f.script(() => answer('owned observer reply'), 'child');
   const result = await f.child(); assert.equal(result.status, 'succeeded', result.error);
 });
@@ -170,7 +172,7 @@ test('role paths cannot resurrect files and Skills disabled in the parent', asyn
   await assert.rejects(readFile(f.marker), { code: 'ENOENT' });
 });
 
-test('inherited hook-only factories receive a fresh child API and never inherit parent history', async t => {
+test('parent hook-only factories are not re-executed and child history stays independent', async t => {
   const apis = [], sessions = [];
   const f = await setup(t, { extraFactories: [{ name: 'hook-only', factory: pi => {
     apis.push(pi); pi.on('session_start', (_event, ctx) => { sessions.push(ctx.sessionManager.getSessionId()); });
@@ -179,8 +181,8 @@ test('inherited hook-only factories receive a fresh child API and never inherit 
   let childContext;
   f.script((_step, context) => { childContext = JSON.stringify(context); return answer('done'); }, 'child');
   const result = await f.child(); assert.equal(result.status, 'succeeded', result.error);
-  assert.equal(apis.length, 2); assert.notEqual(apis[0], apis[1]);
-  assert.equal(sessions.length, 2); assert.notEqual(sessions[0], sessions[1]);
+  assert.equal(apis.length, 1);
+  assert.deepEqual(sessions, [f.parent.sessionId]);
   assert.equal(childContext.includes('Parent-only-briefing-7a8d'), false);
   assert.equal(childContext.includes('parent-only-marker'), false);
 });
@@ -215,10 +217,10 @@ test('real SDK reload restores child identity ceilings without executing a newly
 export default pi => { appendFileSync(${JSON.stringify(marker)}, 'initialized\\n'); pi.on('before_agent_start', () => {}); };`);
   await f.parent.reload();
   assert.equal(await readFile(marker, 'utf8'), 'initialized\n');
-  await assert.rejects(oldApi.getResources(), /active|reload|invalid|dispos/i);
+  assert.throws(() => oldApi.getSettings(), /active|reload|invalid|dispos/i);
   f.script(() => answer('continued'), 'child');
   const restored = await f.controller.send({ task_id: first.task_id, content: 'Continue only the owned fixture.' },
-    'restore-after-reload', undefined, f.ctx);
+    'restore-after-reload', undefined, f.toolContext());
   assert.equal(restored.status, 'succeeded', restored.error);
   assert.equal(restored.session_id, first.session_id);
   assert.equal(await readFile(marker, 'utf8'), 'initialized\n');
