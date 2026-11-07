@@ -97,6 +97,7 @@ interface ChildRun {
   id: string
   controller: AbortController
   eventCount: number
+  activeTools: Map<string, { toolName: string; name: string }[]>
   usage: NonNullable<ChildResult['usage']>
   resolve: () => void
   last?: AssistantMessage
@@ -604,10 +605,31 @@ export function createPiChildFactory({
           case 'tool_execution_start':
           case 'tool_execution_end': {
             const name = /^[A-Za-z0-9_.-]+$/.test(event.toolName) ? event.toolName : 'tool'
-            notify(
-              onActivity,
-              `${name}: ${event.type === 'tool_execution_end' ? (event.isError ? 'failed' : 'done') : 'running'}`
-            )
+            // Pi permits duplicate IDs. Keep each start; identical ID/name calls are only countable.
+            if (event.type === 'tool_execution_start') {
+              if (!run.aborted && !run.controller.signal.aborted && !run.settled) {
+                const calls = run.activeTools.get(event.toolCallId) ?? []
+                calls.push({ toolName: event.toolName, name })
+                run.activeTools.set(event.toolCallId, calls)
+                notify(onActivity, `${name}: running`)
+              }
+            } else {
+              const calls = run.activeTools.get(event.toolCallId)
+              const index = calls?.findLastIndex((call) => call.toolName === event.toolName) ?? -1
+              if (calls && index >= 0) {
+                calls.splice(index, 1)
+                if (!calls.length) {
+                  run.activeTools.delete(event.toolCallId)
+                }
+              }
+              const active = [...run.activeTools.values()].at(-1)?.at(-1)?.name
+              notify(
+                onActivity,
+                active && !run.aborted && !run.controller.signal.aborted && !run.settled
+                  ? `${active}: running`
+                  : `${name}: ${event.isError ? 'failed' : 'done'}`
+              )
+            }
             break
           }
           case 'auto_retry_start':
@@ -664,6 +686,7 @@ export function createPiChildFactory({
             controller: new AbortController(),
             resolve: () => {},
             eventCount: 0,
+            activeTools: new Map(),
             usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }
           }
           const settled = new Promise<void>((settle) => {
