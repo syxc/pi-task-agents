@@ -547,8 +547,19 @@ test(
           refreshed()
           return [task({ description: 'Recovered state' })]
         }
-        // oxlint-disable-next-line no-await-in-loop -- Wait for the scheduled retry in this mode.
-        await retry
+        let deadline
+        try {
+          // The production refresh timer is unref'ed; the test must keep Node 22 alive.
+          // oxlint-disable-next-line no-await-in-loop -- Wait for the scheduled retry in this mode.
+          await Promise.race([
+            retry,
+            new Promise((_resolve, reject) => {
+              deadline = setTimeout(() => reject(new Error('Widget refresh timed out')), 10000)
+            })
+          ])
+        } finally {
+          clearTimeout(deadline)
+        }
         // oxlint-disable-next-line no-await-in-loop -- Allow the successful query continuation to render.
         await new Promise((resolve) => setImmediate(resolve))
         const widget = f.writes.at(-1).value
