@@ -12,9 +12,9 @@
 pi install git:github.com/syxc/pi-task-agents
 ```
 
-安装或更新后执行 `/reload`，再新建子任务，无需配置文件；已有子任务保留配置快照。默认继承当前对话的模型、思考级别和父会话最终提供的 Skills。运行 `/tasks roles` 查看概况，工具范围见[工具转发限制](#工具转发限制)。
+安装或更新后执行 `/reload`，再新建子任务，无需配置文件；已有子任务保留配置快照。默认继承当前对话的模型、思考级别和父会话最终提供的 Skills，每个 owner 最多并发 4 个任务，其余排队。运行 `/tasks roles` 查看概况，工具范围见[工具转发限制](#工具转发限制)。
 
-正常使用无需运行 `npm ci`；格式化和 lint 工具仅用于[开发检查](#开发)，不在插件运行时执行。
+正常使用无需运行 `pnpm install`；格式化和 lint 工具仅用于[开发检查](#开发)，不在插件运行时执行。
 
 ## 工具与任务流程
 
@@ -46,6 +46,8 @@ pi install git:github.com/syxc/pi-task-agents
 - 查看：`/tasks list`、`/tasks roles`、`/tasks show <id>`。状态栏显示运行数和排队数；任务区域优先显示状态和任务身份，空间允许时显示目标、耗时及活动。
 - 停止：`/tasks stop <id>`、`/tasks stop-all`。
 - 恢复通知：`/tasks resume`，不重启任务。
+
+TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任务行。图形客户端可选择不显示这些信息；此时可通过客户端支持的 `/tasks list` 或 `task_query` 查询。
 
 ### 长时间运行的命令
 
@@ -114,15 +116,50 @@ PTC 类调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。父 Pi 
 
 `provider/model` 须替换为 Pi 中已可用的模型。任务参数 `model`、`effort` 优先于角色配置；没有任务或角色覆盖时，在准入时继承父会话。解析后的 profile 随任务保存。显式选模型不会静默替换为其他模型，也不沿用旧模型的思考档；未指定思考级别时使用 Pi 对新模型的默认设置。`effort` 可用 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，`thinking` 是配置兼容别名；Pi SDK 对不支持的模型或档位报错。
 
+### 并发
+
+无需配置文件即可使用默认并发 4。需要调整时，在全局或已信任项目的 `task-agents.json` 中设置：
+
+```json
+{
+  "maxConcurrency": 4
+}
+```
+
+`maxConcurrency` 必须是 1 至 64 的安全整数；64 是防止误配置大量并发的保护上限，不代表模型或机器可承受的推荐值。配置加载与直接构造 `TaskEngine` 使用相同默认值和校验。全局值被已信任项目的显式值覆盖；项目省略时继承全局值，两层都省略时为 4。
+
+名额按当前父会话 owner（对应一个 `TaskEngine`）计数，所有角色共用，不是每个角色 4 个，也不是跨父会话或跨进程的总限额。超过上限的任务保留原有排队行为，运行或停止清理占位释放后才继续；清理失败仍占位，不因默认值变化提前放行。界面显示有效并发上限与排队数。
+
+前台调用有一项保守限制：SDK 确认调用来自另一工具的 `ctx.executeTool()`，或无法确认调用来源（缺失 hook 事件、hook 与执行参数对象不匹配），且当前 owner 的名额已被运行、清理占位或在先排队任务占用时，新的前台 `task` / `task_send` 在创建任务之前返回 `TASK_FOREGROUND_BUSY`（409、可重试、`admitted:false`），不会创建失败任务、返回新任务句柄或执行简报。去重命中的已准入请求仍按原回执处理。有真实匹配 direct hook 的直接调用仍可排队；后台调用、容量充足的调用和已准入请求的去重重放不受此限制。
+
+这是为避免前台等待名额、占槽后台任务又等待同一 SDK nested tool queue 的等待环。分类使用已核验官方 Pi 1.5.0 的逐调用校验参数对象，不按 `toolCallId` 猜测或关联；相同 ID 的并发调用互不覆盖。`agent_end` 不等于权限 hook 已排空，不会清除在途分类；被阻止或取消的调用不因分类而被强引用保留。若调用在 hook 等待期间遇到 session 关闭或替换，则在准入前返回 `TASK_CALL_EXPIRED`，须从当前 session 重试，不能转投新 owner。这不假定运行时 SDK 与开发依赖同版；peer 版本不受固定开发依赖约束。其他 SDK 若缺失事件、复制执行参数或并发复用同一参数对象，将保守标为 unknown，满槽前台不能排队，即使实际上是直接调用。恢复完整 direct 排队能力前须重新核验并适配该 SDK 的关联契约；不能靠猜 ID 或固定开发依赖绕过保护。
+
+官方 SDK 未公开实时调度模式，因此该限制也会拒绝原本可排队的 parallel 嵌套前台调用，不声称两者等价。收到 BUSY 后，等待任务完成或停止清理确认再重试；独立任务可改用 `run_in_background:true`，异步续接可用 `task_append`。不要把该错误当作已执行或已准入，也不要据此重投已有回执的任务。
+
+兼容变化：旧版省略 `maxConcurrency` 时不设插件并发配额；现在超过 4 个任务会排队。需要更多并发时可显式设置 5 至 64；原有 1 至 64 的配置保持原值，不再支持直接构造 engine 时传入大于 64 的值。
+
 ### 高级覆盖
 
 工具、资源、超时和并发均非入门必填项。加载顺序为默认值 → `<agentDir>/task-agents.json` → 已信任项目的 `.pi/task-agents.json`；未信任项目配置不生效。指令逐层追加，其他字段替换，示例见 [examples/task-agents.json](examples/task-agents.json)。
 
-- 并发与超时：`maxConcurrency` 范围 1 至 64，省略时不施加插件并发配额；`timeoutMs: 0` 表示不限时。
+- 并发与超时：`maxConcurrency` 默认为 4，范围 1 至 64；`timeoutMs: 0` 表示不限时。
 - 角色名称：裸名配置可覆盖内置角色；自定义 `researcher` 可用 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。
 - 兼容性：旧配置的显式模型、工具和空资源列表仍有优先权，不自动迁移；MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。
 
 ### 资源选择与权限快照
+
+已有角色字段可按需缩小 Skills 和 MCP 范围，无需增加加载机制。例如，仅为 worker 选择父会话已接受的 Skill `code-review` 和 MCP 服务器 `docs`，并为 verifier 关闭两者：
+
+```json
+{
+  "roles": {
+    "worker": { "skills": ["code-review"], "mcpServers": ["docs"] },
+    "verifier": { "skills": [], "mcp": false }
+  }
+}
+```
+
+名称须替换为父会话实际可用且已信任的资源；这些字段只能缩小选择，不能绕过父权限、信任检查或恢复任务的历史上界。
 
 - 匹配：`tools`、`disallowedTools`、`mcpServers` 按 trim/NFKC/大小写归一化后的精确名称匹配，不展开通配符。`extensions`、`skills` 按父会话已接受的资源名称或本地路径缩小选择，不执行新的扩展文件。
 - 继承与关闭：四个角色默认继承父可用资源；不要为继承填写空列表，空列表会关闭对应资源。`mcp:false` 或 `mcpServers:[]` 禁用 MCP。选择须与父实际工具权限及历史上界相交，本地路径不能复活父已关闭的资源。
@@ -161,17 +198,17 @@ pi -e /path/to/pi-task-agents/src/extension.ts
 ### 检查与打包
 
 ```sh
-npm ci --ignore-scripts
-npm run check
-npm test
-npm run pack
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run check
+pnpm test
+pnpm run pack
 ```
 
-开发依赖的 Pi SDK 与 `pi-ai` 同版锁定为 1.5.0，工具链及 typebox、Node 类型的固定版本见 [package.json](package.json) 和 [package-lock.json](package-lock.json)。`markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
+开发使用 Node >=22.19.0、pnpm 11.15.1 和 TypeScript 7.0.2；`packageManager` 固定 pnpm 版本。开发依赖的 Pi SDK 与 `pi-ai` 同版锁定为 1.5.0，工具链及 typebox、Node 类型的固定版本见 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml)。[pnpm-workspace.yaml](pnpm-workspace.yaml) 将 `markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
 
-- `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `npm run lint`、`npm run lint:type-aware`、`npm run lint:markdown`、`npm run format:check`；`npm run format` 仅格式化自有代码与配置，不改上游锁定源码。
-- `test`：直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试，不应用 SDK 补丁。
-- `pack`：在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试和开发脚本，不含依赖、任务历史或认证。
+- `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `pnpm run lint`、`pnpm run lint:type-aware`、`pnpm run lint:markdown`、`pnpm run format:check`；`pnpm run format` 仅格式化自有代码与配置，不改上游锁定源码。
+- `test`：直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试，不应用 SDK 补丁。开发依赖 alias `typescript-fixture` 固定为 `npm:typescript@5.9.3`，仅用旧 Compiler API 动态编译上游原文 fixture，保留装饰器、CommonJS 和 ESM 转换及全部对照断言；项目 `tsc` 和类型检查仍使用 7.0.2。此兼容依赖须单独维护，迁移 fixture 编译方式后再移除。
+- `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证。内部保留 Node 随附的 `npm pack --ignore-scripts`，避免 pnpm 打包时移除清单末尾换行而导致提取包格式检查失败；npm 不用于依赖安装。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
 
 离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收。真实模型和第三方业务验收须另行授权；其中 `scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度。
 

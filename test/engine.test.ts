@@ -673,6 +673,421 @@ test('regression: close retries uncertain queued cancellations and retains owner
   /* oxlint-enable no-await-in-loop */
 })
 
+test('regression: foreground terminal write failures reject without rewriting execution facts', async (t) => {
+  /* oxlint-disable no-await-in-loop -- Each case checks one owner's disk state and close retries before releasing its store. */
+  for (const operation of ['start', 'send'] as const) {
+    for (const committed of [false, true]) {
+      await t.test(`${operation}: ${committed ? 'post' : 'pre'}-commit rejection`, async (t) => {
+        const { engine, children, rootDir, createChild } = await setup(t)
+        let previous: TaskSummary | undefined
+        if (operation === 'send') {
+          previous = await engine.start(input('previous turn'), profile)
+          await waitFor(() => children[0]?.calls.length)
+          await finish(engine, children[0], 'previous result')
+        }
+        const requestId = 'foreground-terminal-failure'
+        const foreground = previous
+          ? engine.send(previous.session_id, 'new turn', { requestId })
+          : engine.start({ ...input('new turn'), run_in_background: false }, profile, {
+              requestId
+            })
+        const receipt = foreground.then(
+          (result) => ({ result, error: undefined }),
+          (error: unknown) => ({ result: undefined, error })
+        )
+        await waitFor(() => children[0]?.calls.length === (previous ? 2 : 1))
+        const task = engine.state!.tasks.at(-1)!
+        const done = engine.runtimes.get(task.task_id)!.done
+        const save = engine.store.save.bind(engine.store)
+        const fault = Object.assign(new Error('terminal snapshot was not acknowledged'), {
+          code: 'EIO'
+        })
+        let fail = true
+        let attempts = 0
+        engine.store.save = async (state) => {
+          if (state.tasks.find((row) => row.task_id === task.task_id)?.status === 'succeeded') {
+            attempts++
+            if (fail) {
+              if (committed) {
+                await save(state)
+              }
+              throw fault
+            }
+          }
+          return save(state)
+        }
+        t.after(() => {
+          engine.store.save = save
+        })
+        children[0].calls.at(-1)!.resolve(terminalResult('succeeded', 'side effect completed'))
+        await done
+        const response = await receipt
+        assert.equal(task.status, 'succeeded')
+        assert.equal(task.final_text, 'side effect completed')
+        assert.equal(task.output, 'side effect completed')
+        assert.equal(task.error, undefined)
+        assert.equal(task.notification_pending, false)
+        assert.equal(engine.waiters.size, 0)
+        assert.equal(engine.runtimes.size, 0)
+        const requestKey = previous
+          ? `send:${previous.session_id}:${requestId}`
+          : `start:${requestId}`
+        const disk = JSON.parse(await readFile(engine.store.file, 'utf8'))
+        assert.equal(disk.requests[requestKey], task.task_id)
+        assert.equal(disk.tasks.at(-1).status, committed ? 'succeeded' : 'running')
+        assert.equal(disk.tasks.at(-1).output, committed ? task.output : '')
+        await assert.rejects(engine.query({ task_id: task.task_id }), (error) => error === fault)
+        await assert.rejects(engine.close(), (error) => error === fault)
+        assert.equal(attempts, 2)
+        assert.equal(children[0].disposed, false, 'failed close must retain the child owner')
+        const restored = new TaskEngine({
+          rootDir,
+          parentId: engine.parentId,
+          cwd: rootDir,
+          createChild
+        })
+        await assert.rejects(restored.init(), /locked|owner/i)
+        fail = false
+        await engine.close()
+        assert.equal(attempts, 3)
+        assert.equal(children[0].disposed, true)
+        await restored.init()
+        try {
+          const recovered = await restored.query({ task_id: task.task_id })
+          assert.equal(recovered.status, 'succeeded')
+          assert.equal(recovered.final_text, 'side effect completed')
+          assert.equal((await restored.output(task.task_id)).output, task.output)
+          const duplicate = previous
+            ? await restored.send(previous.session_id, 'do not repeat', { requestId })
+            : await restored.start({ ...input(), run_in_background: false }, profile, {
+                requestId
+              })
+          assert.equal(duplicate.task_id, task.task_id)
+          assert.equal(duplicate.status, 'succeeded')
+          assert.equal(children.length, 1)
+          assert.equal(children[0].calls.length, previous ? 2 : 1)
+        } finally {
+          await restored.close()
+        }
+        assert.equal(response.result, undefined, 'unconfirmed persistence is not a success receipt')
+        assert.equal(response.error, fault, 'preserve the original storage error and its code')
+      })
+    }
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
+test('regression: falsy terminal persistence rejections poison the owner with a usable error', async (t) => {
+  /* oxlint-disable no-await-in-loop -- Each rejection value owns a separate store and close retry. */
+  for (const value of [undefined, null, false, 0, Number.NaN, '', 0n]) {
+    await t.test(`${typeof value}: ${String(value)}`, async (t) => {
+      const { engine, children } = await setup(t)
+      const foreground = engine.start({ ...input(), run_in_background: false }, profile)
+      const receipt = foreground.then(
+        (result) => ({ status: 'fulfilled', result, reason: undefined }),
+        (reason: unknown) => ({ status: 'rejected', result: undefined, reason })
+      )
+      await waitFor(() => children[0]?.calls.length)
+      const task = engine.state!.tasks[0]
+      const done = engine.runtimes.get(task.task_id)!.done
+      const save = engine.store.save.bind(engine.store)
+      engine.store.save = async () => Promise.reject(value)
+      t.after(() => {
+        engine.store.save = save
+      })
+      children[0].calls[0].resolve({ text: 'completed side effect' })
+      await done
+      const response = await receipt
+      const disk = JSON.parse(await readFile(engine.store.file, 'utf8'))
+      assert.equal(disk.tasks[0].status, 'running')
+      assert.equal(disk.tasks[0].output, '')
+      assert.equal(task.status, 'succeeded')
+      assert.equal(task.final_text, 'completed side effect')
+      assert.equal(task.error, undefined)
+      const query = await engine.query({ task_id: task.task_id }).then(
+        (result) => ({ status: 'fulfilled', result, reason: undefined }),
+        (reason: unknown) => ({ status: 'rejected', result: undefined, reason })
+      )
+      assert.equal(query.status, 'rejected', 'unconfirmed disk state must poison reads')
+      assert.equal(response.status, 'rejected')
+      assert.ok(response.reason instanceof Error)
+      assert.match(response.reason.message, /persistence failed/i)
+      assert.equal(response.reason.cause, value)
+      assert.equal(query.reason, response.reason)
+      await assert.rejects(engine.output(task.task_id), (error) => error === response.reason)
+      await assert.rejects(engine.start(input(), profile), (error) => error === response.reason)
+      await assert.rejects(
+        engine.send(task.task_id, 'do not replay'),
+        (error) => error === response.reason
+      )
+      await assert.rejects(engine.append(task.task_id, 'do not replay'), (error) => {
+        assert.ok(error instanceof Error && 'code' in error)
+        assert.equal(error.code, 'TASK_APPEND_PERSIST_FAILED')
+        assert.equal(error.cause, response.reason)
+        return true
+      })
+      await assert.rejects(engine.close(), (error) => {
+        assert.ok(error instanceof Error)
+        assert.equal(error.cause, value)
+        return true
+      })
+      await assert.rejects(engine.query(), (error) => error === response.reason)
+      assert.equal(children[0].disposed, false)
+      const other = new TaskEngine({
+        rootDir: engine.store.rootDir,
+        parentId: engine.parentId,
+        cwd: engine.cwd,
+        createChild: engine.createChild
+      })
+      await assert.rejects(other.init(), /locked|owner/i)
+      engine.store.save = save
+      await engine.close()
+      assert.equal(children[0].disposed, true)
+      const recovered = JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0]
+      assert.equal(recovered.status, 'succeeded')
+      assert.equal(recovered.output, 'completed side effect')
+      assert.equal(engine.waiters.size, 0)
+    })
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
+test('regression: falsy close rejection does not replace the original storage error', async (t) => {
+  const { engine, children } = await setup(t)
+  const original = Object.assign(new Error('original terminal write failure'), { code: 'EIO' })
+  const foreground = engine.start({ ...input(), run_in_background: false }, profile)
+  const receipt = assert.rejects(foreground, (error) => error === original)
+  await waitFor(() => children[0]?.calls.length)
+  const save = engine.store.save.bind(engine.store)
+  engine.store.save = async () => Promise.reject(original)
+  t.after(() => {
+    engine.store.save = save
+  })
+  children[0].calls[0].resolve({ text: 'completed' })
+  await receipt
+  engine.store.save = async () => Promise.reject(null)
+  await assert.rejects(engine.close(), (error) => {
+    assert.ok(error instanceof Error)
+    assert.equal(error.cause, null)
+    return true
+  })
+  await assert.rejects(engine.query(), (error) => error === original)
+  assert.equal(children[0].disposed, false)
+  engine.store.save = save
+  await engine.close()
+  assert.equal(JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].output, 'completed')
+})
+
+for (const stage of ['admission', 'running'] as const) {
+  test(`regression: in-flight ${stage} failure cannot replace the first terminal storage error`, async (t) => {
+    /* oxlint-disable no-await-in-loop -- Each first-error value needs its own controlled write race and owner recovery. */
+    for (const initial of [new Error('first terminal write failure'), undefined]) {
+      await t.test(initial ? 'Error first' : 'undefined first', async (t) => {
+        const { engine, children, rootDir, createChild } = await setup(t, {
+          maxConcurrency: stage === 'admission' ? 1 : 2
+        })
+        const foreground = engine.start({ ...input('A'), run_in_background: false }, profile, {
+          requestId: 'first-error-A'
+        })
+        const firstReceipt = foreground.then(
+          (result) => ({ result, error: undefined }),
+          (error: unknown) => ({ result: undefined, error })
+        )
+        await waitFor(() => children[0]?.calls.length)
+        const a = engine.state!.tasks[0]
+        const aDone = engine.runtimes.get(a.task_id)!.done
+        let queued: TaskSummary
+        if (stage === 'admission') {
+          queued = await engine.start(input('queued for close'), profile)
+        }
+        const entered = deferred()
+        const release = deferred()
+        const save = engine.store.save.bind(engine.store)
+        const later = Object.assign(new Error(`later ${stage} write failure`), { code: 'ENOSPC' })
+        let held = false
+        let failFirst = true
+        engine.store.save = async (state) => {
+          const b = state.tasks.find((task) => task.input.prompt === 'B')
+          if (!held && b?.status === (stage === 'admission' ? 'queued' : 'running')) {
+            held = true
+            entered.resolve()
+            await release.promise
+            throw later
+          }
+          if (failFirst && a.status === 'succeeded') {
+            failFirst = false
+            throw initial
+          }
+          return save(state)
+        }
+        t.after(() => {
+          engine.store.save = save
+          release.resolve()
+        })
+        const bReceipt = engine.start(input('B'), profile, { requestId: 'later-error-B' }).then(
+          (result) => ({ result, error: undefined }),
+          (error: unknown) => ({ result: undefined, error })
+        )
+        await entered.promise
+        const b = engine.state!.tasks.find((task) => task.input.prompt === 'B')!
+        const bDone = engine.runtimes.get(b.task_id)?.done
+        if (stage === 'running') {
+          queued = await engine.start(input('queued for close'), profile)
+        }
+        children[0].calls[0].resolve({ text: 'A side effect completed' })
+        await aDone
+        const first = await firstReceipt
+        assert.ok(first.error instanceof Error)
+        if (initial) {
+          assert.equal(first.error, initial)
+        } else {
+          assert.match(first.error.message, /persistence failed/i)
+          assert.equal(first.error.cause, undefined)
+        }
+        await assert.rejects(engine.query(), (error) => error === first.error)
+        release.resolve()
+        const second = await bReceipt
+        await bDone
+        if (stage === 'admission') {
+          assert.equal(second.error, later, 'the failing operation keeps its own error')
+          assert.equal(engine.state!.tasks.includes(b), false)
+          assert.equal(engine.state!.requests['start:later-error-B'], undefined)
+        } else {
+          assert.ok(second.result)
+          assert.equal(b.status, 'failed')
+          assert.equal(
+            b.error,
+            later.message,
+            'runner failure must not be rewritten as the first error'
+          )
+        }
+        await assert.rejects(engine.query(), (error) => error === first.error)
+        await assert.rejects(engine.output(a.task_id), (error) => error === first.error)
+        await assert.rejects(engine.start(input(), profile), (error) => error === first.error)
+        assert.equal(engine.task(queued!.task_id).status, 'queued')
+        assert.equal(
+          children.length,
+          1,
+          'neither B nor queued work may create a child after poisoning'
+        )
+        assert.equal(a.status, 'succeeded')
+        assert.equal(a.error, undefined)
+        engine.store.save = save
+        await engine.close()
+        assert.equal(children[0].disposed, true)
+        const restored = new TaskEngine({
+          rootDir,
+          parentId: engine.parentId,
+          cwd: rootDir,
+          createChild
+        })
+        await restored.init()
+        try {
+          const recovered = await restored.start(
+            { ...input('A'), run_in_background: false },
+            profile,
+            {
+              requestId: 'first-error-A'
+            }
+          )
+          assert.equal(recovered.task_id, a.task_id)
+          assert.equal(recovered.status, 'succeeded')
+          assert.equal((await restored.output(a.task_id)).output, 'A side effect completed')
+          const canceled = await restored.query({ task_id: queued!.task_id })
+          assert.equal(canceled.status, 'canceled')
+          assert.equal(canceled.cancel_reason, 'Parent closed')
+          assert.equal(
+            (await restored.output(canceled.task_id)).output,
+            '\n\n[aborted] Parent closed'
+          )
+          const fresh = restored.start({ ...input('fresh'), run_in_background: false }, profile)
+          await waitFor(() => children[1]?.calls.length)
+          children[1].calls[0].resolve({ text: 'fresh success' })
+          assert.equal((await fresh).status, 'succeeded')
+          const toStop = await restored.start(input('cancel safely'), profile)
+          await waitFor(() => children[2]?.calls.length)
+          assert.equal((await restored.stop(toStop.task_id)).status, 'canceled')
+          assert.equal(engine.waiters.size, 0)
+        } finally {
+          await restored.close()
+        }
+      })
+    }
+    /* oxlint-enable no-await-in-loop */
+  })
+}
+
+test('regression: unconfirmed foreground failure preserves runner error classification and output', async (t) => {
+  /* oxlint-disable no-await-in-loop -- Each outcome needs its own poisoned owner and terminal write retry. */
+  for (const outcome of ['failed', 'aborted', 'exception'] as const) {
+    await t.test(outcome, async (t) => {
+      const { engine, children } = await setup(t)
+      const foreground = engine.start({ ...input(), run_in_background: false }, profile)
+      const receipt = assert.rejects(foreground, (error) => error === storageFault)
+      await waitFor(() => children[0]?.calls.length)
+      const task = engine.state!.tasks[0]
+      const done = engine.runtimes.get(task.task_id)!.done
+      const save = engine.store.save.bind(engine.store)
+      const storageFault = new Error('terminal storage failure')
+      const runnerFault = new Error('runner failure')
+      engine.store.save = async () => {
+        throw storageFault
+      }
+      t.after(() => {
+        engine.store.save = save
+      })
+      if (outcome === 'exception') {
+        children[0].calls[0].reject(runnerFault)
+      } else {
+        settleResult(children[0].calls[0], outcome, 'partial result', runnerFault.message)
+      }
+      await receipt
+      await done
+      assert.equal(task.status, outcome === 'aborted' ? 'canceled' : 'failed')
+      assert.equal(task.error, runnerFault.message)
+      assert.equal(task.final_text, outcome === 'exception' ? undefined : 'partial result')
+      const output = `${outcome === 'exception' ? '' : 'partial result'}\n\n[${outcome === 'aborted' ? 'aborted' : 'failed'}] runner failure`
+      assert.equal(task.output, output)
+      assert.equal(engine.summary(task).error, runnerFault.message)
+      assert.equal(engine.waiters.size, 0)
+      engine.store.save = save
+      await engine.close()
+      const disk = JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0]
+      assert.equal(disk.status, task.status)
+      assert.equal(disk.error, runnerFault.message)
+      assert.equal(disk.output, output, 'retry must not append a second terminal projection')
+    })
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
+test('regression: a confirmed foreground terminal is not rejected for another task storage failure', async (t) => {
+  const { engine, children } = await setup(t)
+  const fault = new Error('other task terminal storage failure')
+  const unconfirmed = engine.start({ ...input('unconfirmed'), run_in_background: false }, profile)
+  const rejected = assert.rejects(unconfirmed, (error) => error === fault)
+  const confirmed = engine.start({ ...input('confirmed'), run_in_background: false }, profile)
+  await waitFor(() => children.length === 2 && children.every((child) => child.calls.length))
+  const save = engine.store.save.bind(engine.store)
+  let fail = true
+  engine.store.save = async (state) => {
+    if (fail && state.tasks[0].status === 'succeeded') {
+      fail = false
+      throw fault
+    }
+    return save(state)
+  }
+  children[0].calls[0].resolve({ text: 'first result' })
+  await rejected
+  children[1].calls[0].resolve({ text: 'second result' })
+  const result = await confirmed
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.final_text, 'second result')
+  const disk = JSON.parse(await readFile(engine.store.file, 'utf8'))
+  assert.equal(disk.tasks[1].status, 'succeeded')
+  assert.equal(disk.tasks[1].final_text, 'second result')
+})
+
 test('regression: microtask stop after prompt completion retains the slot until abort settles', async (t) => {
   const { engine, children } = await setup(t, { maxConcurrency: 1 })
   const a = await engine.start(input('A'), profile)
@@ -1553,12 +1968,12 @@ test(
       })
       return createChild(args)
     }
-    const result = await engine.start(
-      { ...input(), run_in_background: false },
-      { ...profile, skills: undefined }
+    await assert.rejects(
+      engine.start({ ...input(), run_in_background: false }, { ...profile, skills: undefined }),
+      (error) => error === fault
     )
-    assert.equal(result.status, 'failed')
-    assert.equal(result.error, fault.message)
+    assert.equal(engine.state!.tasks[0].status, 'failed')
+    assert.equal(engine.state!.tasks[0].error, fault.message)
     assert.equal(children.length, 0)
     assert.equal(engine.waiters.size, 0)
     await assert.rejects(engine.start(input(), profile), fault)
@@ -1946,29 +2361,70 @@ test('regression: internal cleanup confirmation rejects malformed or unrelated p
   }
 })
 
-test('regression: omitted maxConcurrency adds no cross-session plugin quota or persistent Infinity', async (t) => {
+test('default concurrency runs four tasks per owner and queues the fifth until capacity is released', async (t) => {
   const { engine, children } = await setup(t)
   const tasks = await Promise.all(
-    Array.from({ length: 17 }, (_, index) => engine.start(input(`independent ${index}`), profile))
+    Array.from({ length: 5 }, (_, index) => engine.start(input(`independent ${index}`), profile))
   )
-  await waitFor(() => children.length === 17 && children.every((child) => child.calls.length === 1))
-  assert.equal(engine.maxConcurrency, Infinity)
-  assert.equal(engine.runtimes.size, 17)
-  assert.equal(new Set(tasks.map((task) => task.session_id)).size, 17)
-  assert.ok((await engine.query()).every((task) => task.status === 'running'))
+  await waitFor(() => children.length === 4 && children.every((child) => child.calls.length === 1))
+  assert.equal(engine.maxConcurrency, 4)
+  assert.equal(engine.runtimes.size, 4)
+  assert.equal(new Set(tasks.map((task) => task.session_id)).size, 5)
+  assert.deepEqual(
+    (await engine.query()).map((task) => task.status),
+    ['running', 'running', 'running', 'running', 'queued']
+  )
+  const queued = tasks[4]
+  assert.equal(queued.status, 'queued')
+  assert.equal(
+    children.some((child) => child.sessionPath === queued.childSessionPath),
+    false
+  )
+
+  const other = await setup(t, { parentId: 'another-owner' })
+  await other.engine.start(input('independent owner capacity'), profile)
+  await waitFor(() => other.children[0]?.calls.length === 1)
+  assert.equal(engine.runtimes.size, 4)
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'queued')
+
   const saved = await readFile(engine.store.file, 'utf8')
   assert.doesNotMatch(saved, /maxConcurrency|Infinity/)
-  assert.equal(JSON.parse(saved).tasks.length, 17)
+  assert.equal(JSON.parse(saved).tasks.length, 5)
+  await finish(engine, children[0])
+  await waitFor(() => children[4]?.calls.length === 1)
+  assert.equal(children.length, 5)
+  assert.equal(engine.runtimes.size, 4)
+  assert.equal(children[4].sessionPath, queued.childSessionPath)
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
 })
 
-test('regression: explicit host concurrency remains validated without inventing a 16 or 64 task ceiling', async (t) => {
+test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe values', async (t) => {
   const { engine, rootDir, createChild } = await setup(t, { maxConcurrency: 1 })
   assert.equal(engine.maxConcurrency, 1)
-  for (const maxConcurrency of [0, -1, 1.5, Number.NaN, Infinity]) {
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    65,
+    Number.MAX_SAFE_INTEGER,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.NaN,
+    Infinity,
+    -Infinity,
+    '4',
+    null,
+    true
+  ]) {
     assert.throws(
       () =>
-        new TaskEngine({ rootDir, parentId: 'invalid', cwd: rootDir, createChild, maxConcurrency }),
-      /Invalid maxConcurrency/
+        new TaskEngine({
+          rootDir,
+          parentId: 'invalid',
+          cwd: rootDir,
+          createChild,
+          maxConcurrency: value as number
+        }),
+      /Invalid maxConcurrency: expected an integer from 1 to 64/
     )
   }
   const explicit = new TaskEngine({
@@ -1976,13 +2432,13 @@ test('regression: explicit host concurrency remains validated without inventing 
     parentId: 'host-policy',
     cwd: rootDir,
     createChild,
-    maxConcurrency: 65
+    maxConcurrency: 64
   })
-  assert.equal(explicit.maxConcurrency, 65)
+  assert.equal(explicit.maxConcurrency, 64)
   await explicit.close()
 })
 
-test('regression: omitted plugin quota does not bypass cleanup quarantine or release its retained runtime', async (t) => {
+test('regression: default capacity does not bypass cleanup quarantine or release its retained runtime', async (t) => {
   const { engine, children } = await setup(t)
   const first = await engine.start(input(), profile)
   await waitFor(() => children[0]?.calls.length)
@@ -1991,7 +2447,7 @@ test('regression: omitted plugin quota does not bypass cleanup quarantine or rel
     Object.assign(new Error('unproven descendant cleanup'), { code: 'CHILD_CLEANUP_FAILED' })
   )
   await runtime.done
-  assert.equal(engine.maxConcurrency, Infinity)
+  assert.equal(engine.maxConcurrency, 4)
   assert.equal(engine.runtimes.get(first.task_id), runtime)
   await assert.rejects(engine.start(input('another session'), profile), {
     code: 'CHILD_CLEANUP_FAILED'

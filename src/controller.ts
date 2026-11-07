@@ -1,8 +1,10 @@
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import { stripTerminalSequences } from '@earendil-works/pi-tui'
 import { TaskEngine } from './engine.ts'
-import { taskCompletionNotice, taskWidget } from './task-presentation.ts'
+import { taskCompletionNotice, taskProgress, taskWidget } from './task-presentation.ts'
 import { loadConfig, resolveProfile } from './config.ts'
 import { createPiChildFactory, type PiChildFactoryOptions } from './pi-backend.ts'
 import { captureParentRuntime, type ParentRuntimeAPI } from './parent-runtime.ts'
@@ -49,6 +51,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function canceled(): Error {
   return Object.assign(new Error('Parent operation canceled'), { name: 'AbortError' })
+}
+
+function widgetText(value: string): string {
+  return stripTerminalSequences(stripVTControlCharacters(value))
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function rpcTaskWidget(tasks: readonly TaskSummary[], hidden: number): string[] {
+  // Share TUI semantics without a width limit or theme; sanitize before ID shortening.
+  const lines = tasks.map((task) => {
+    const safe = { ...task }
+    for (const key of [
+      'task_id',
+      'agent_name',
+      'description',
+      'activity',
+      'error',
+      'cancel_reason'
+    ] as const) {
+      const value = task[key]
+      if (typeof value === 'string') {
+        safe[key] = widgetText(value)
+      }
+    }
+    if (task.stopError) {
+      safe.stopError = { ...task.stopError, message: widgetText(task.stopError.message) }
+    }
+    return widgetText(taskProgress(safe))
+  })
+  if (hidden) {
+    lines.push(`${hidden} more tasks · /tasks list`)
+  }
+  return lines
 }
 
 export class TaskController {
@@ -331,12 +368,19 @@ export class TaskController {
           Number(a.status === 'queued') - Number(b.status === 'queued')
       )
       .slice(0, 6)
-    ctx.ui.setWidget(
-      'task-agents',
-      visible.length
-        ? (_tui, theme) => taskWidget(visible, pending.length - visible.length, theme)
-        : undefined
-    )
+    if (ctx.mode === 'tui') {
+      ctx.ui.setWidget(
+        'task-agents',
+        visible.length
+          ? (_tui, theme) => taskWidget(visible, pending.length - visible.length, theme)
+          : undefined
+      )
+    } else {
+      ctx.ui.setWidget(
+        'task-agents',
+        visible.length ? rpcTaskWidget(visible, pending.length - visible.length) : undefined
+      )
+    }
     if (pending.length && !this.uiTimer) {
       this.uiTimer = setTimeout(() => {
         this.uiTimer = undefined
@@ -397,7 +441,8 @@ export class TaskController {
     input: TaskInput,
     toolCallId: string,
     signal: AbortSignal | undefined,
-    ctx: ExtensionContext
+    ctx: ExtensionContext,
+    nestedToolCall = false
   ): Promise<TaskSummary> {
     return this.admit(ctx, signal, (engine, combined) => {
       const selected = resolveProfile(this.config, input)
@@ -416,7 +461,11 @@ export class TaskController {
             (selected.effort === undefined ? this.pi.getThinkingLevel() : undefined)
         }
       }
-      return engine.start(input, profile, { requestId: toolCallId, signal: combined })
+      return engine.start(input, profile, {
+        requestId: toolCallId,
+        signal: combined,
+        ...(nestedToolCall ? { nestedToolCall: true } : {})
+      })
     })
   }
 
@@ -435,10 +484,15 @@ export class TaskController {
     input: { task_id: string; content: string },
     toolCallId: string,
     signal: AbortSignal | undefined,
-    ctx: ExtensionContext
+    ctx: ExtensionContext,
+    nestedToolCall = false
   ): Promise<TaskSummary> {
     return this.admit(ctx, signal, (engine, combined) =>
-      engine.send(input.task_id, input.content, { requestId: toolCallId, signal: combined })
+      engine.send(input.task_id, input.content, {
+        requestId: toolCallId,
+        signal: combined,
+        ...(nestedToolCall ? { nestedToolCall: true } : {})
+      })
     )
   }
 

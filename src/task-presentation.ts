@@ -1,9 +1,13 @@
 import type { Theme } from '@earendil-works/pi-coding-agent'
-import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui'
+import {
+  replaceControlCharacters as clean,
+  stripTerminalSequences,
+  truncateToWidth,
+  visibleWidth,
+  type Component
+} from '@earendil-works/pi-tui'
 import type { AgentProfile, TaskSummary } from './types.ts'
 
-// oxlint-disable-next-line no-control-regex -- Strip control characters from displayed task text intentionally.
-const clean = (value: string) => value.replace(/[\u0000-\u001F\u007F]/g, ' ')
 const selection = (value: readonly string[] | undefined): string =>
   value === undefined ? 'inherit' : value.length ? `${value.length} selected` : 'off'
 
@@ -96,47 +100,96 @@ const taskIdentifier = (task: TaskSummary) => truncateToWidth(clean(task.task_id
 const taskReason = (task: TaskSummary) =>
   clean(task.stopError?.message ?? task.error ?? task.cancel_reason ?? '')
 
-function taskActivity(task: TaskSummary): string {
+function taskActivity(task: TaskSummary, columns = Infinity, theme?: Theme): string {
   const activity = clean(task.activity ?? '')
-  if (!activity) {
+  // The backend can settle its prompt before the owning engine commits a terminal state.
+  if (!activity || activity.trim() === 'Completed') {
     return ''
   }
   // A completed tool does not imply that its owning task has finished.
-  const label = /: (done|failed)$/.test(activity) || activity === 'Completed' ? 'last' : 'activity'
-  return `${label}: ${activity}`
+  const tool = /^(.*): (running|done|failed)$/.exec(activity)
+  const state = tool?.[2]
+  const token = state === 'running' ? 'accent' : state === 'done' ? 'success' : 'error'
+  const suffix = state ? `: ${theme ? theme.fg(token, state) : state}` : ''
+  const name = tool ? tool[1] : activity
+  const available = columns - visibleWidth(tool ? ': running' : '')
+  // Omit an activity rather than cut off the tool's state.
+  if (available < Math.min(tool ? 2 : 8, visibleWidth(name))) {
+    return ''
+  }
+  return `${truncateToWidth(name, available, '…')}${suffix}`
 }
 
-function taskRow(task: TaskSummary, now: number, columns: number, cleanup = task.cleanup_pending) {
-  const state = [task.status, ...(cleanup ? ['cleanup pending'] : [])]
-  const description = clean(task.description || task.task_id)
+function taskRow(
+  task: TaskSummary,
+  now: number,
+  columns: number,
+  cleanup = task.cleanup_pending,
+  theme?: Theme
+) {
+  const reason = taskReason(task)
+  const state = [
+    ...(task.status === 'running' && !task.cleanup_pending && !reason ? [] : [task.status]),
+    ...(cleanup ? ['cleanup pending'] : [])
+  ]
+  const description = clean(task.description ?? '')
   const role = clean(task.agent_name ?? '')
   const identity = [...state, role, taskIdentifier(task)].filter(Boolean).join(' · ')
   // Drop the role before it can hide the short ID or leave no useful goal prefix.
   const heading =
-    visibleWidth(identity) + 3 + Math.min(6, visibleWidth(description)) <= columns
+    visibleWidth(identity) + (description ? 3 + Math.min(6, visibleWidth(description)) : 0) <=
+    columns
       ? identity
       : [...state, taskIdentifier(task)].join(' · ')
-  const reason = taskReason(task)
-  const detail = [task.cleanup_pending ? reason : '', description].filter(Boolean).join(' · ')
+  const detail = [reason, description].filter(Boolean).join(' · ')
   const available = columns - visibleWidth(heading) - 3
   if (available < Math.min(4, visibleWidth(detail))) {
     return heading
   }
   const elapsed = taskElapsed(task, now)
-  // Keep the existing clock visible when there is still room for a useful goal.
   const clockWidth = elapsed ? 3 + visibleWidth(elapsed) : 0
+  // Share space with a useful goal prefix; diagnostics still outrank activity.
+  const activity =
+    !task.cleanup_pending && !reason
+      ? taskActivity(
+          task,
+          columns === Infinity
+            ? Infinity
+            : Math.min(32, available - Math.min(12, visibleWidth(detail)) - 3),
+          theme
+        )
+      : ''
+  if (activity) {
+    // Reserve the widest tool state so completion does not shift the goal prefix.
+    const goalColumns =
+      available -
+      visibleWidth(stripTerminalSequences(activity).replace(/: (done|failed)$/, ': running')) -
+      3
+    const reserveClock = goalColumns >= visibleWidth(detail) + clockWidth
+    return [
+      heading,
+      truncateToWidth(detail, goalColumns - (reserveClock ? clockWidth : 0), '…'),
+      reserveClock ? elapsed : '',
+      activity
+    ]
+      .filter(Boolean)
+      .join(' · ')
+  }
+  // Keep the existing clock visible when there is still room for a useful goal.
   const reserveClock =
-    !task.cleanup_pending && available >= Math.min(8, visibleWidth(detail)) + clockWidth
+    !task.cleanup_pending && !reason && available >= Math.min(8, visibleWidth(detail)) + clockWidth
   const goalColumns = available - (reserveClock ? clockWidth : 0)
   const goal = truncateToWidth(detail, goalColumns, '…')
   const line = [heading, goal, reserveClock ? elapsed : ''].filter(Boolean).join(' · ')
   if (visibleWidth(detail) > goalColumns || visibleWidth(line) + 4 > columns) {
     return line
   }
-  const tail = [reserveClock ? '' : elapsed, task.cleanup_pending ? '' : reason, taskActivity(task)]
-    .filter(Boolean)
-    .join(' · ')
-  return tail ? truncateToWidth(`${line} · ${tail}`, columns, '…') : line
+  const timed =
+    !reserveClock && elapsed && visibleWidth(line) + clockWidth <= columns
+      ? `${line} · ${elapsed}`
+      : line
+  const recent = taskActivity(task, columns - visibleWidth(timed) - 3, theme)
+  return recent ? `${timed} · ${recent}` : timed
 }
 
 export function taskProgress(task: TaskSummary, now = Date.now()): string {
@@ -156,6 +209,7 @@ export function taskWidget(
       if (!columns) {
         return []
       }
+      const colors = process.env.NO_COLOR === undefined ? theme : undefined
       const lines = tasks.flatMap((task) => {
         const color = task.cleanup_pending
           ? 'warning'
@@ -168,19 +222,21 @@ export function taskWidget(
           visibleWidth(`${task.status} · cleanup pending · ${taskIdentifier(task)}`) > columns
         const rows = splitCleanup
           ? [
-              taskRow(task, now, columns, false),
+              taskRow(task, now, columns, false, colors),
               [
                 'cleanup pending',
                 taskReason(task),
-                clean(task.description || task.task_id),
-                taskElapsed(task, now),
-                taskActivity(task)
+                clean(task.description ?? ''),
+                taskElapsed(task, now)
               ]
                 .filter(Boolean)
                 .join(' · ')
             ]
-          : [taskRow(task, now, columns)]
-        return rows.map((line) => theme.fg(color, truncateToWidth(line, columns, '…')))
+          : [taskRow(task, now, columns, task.cleanup_pending, colors)]
+        return rows.map((line) => {
+          const row = truncateToWidth(line, columns, '…')
+          return colors ? colors.fg(color, row) : stripTerminalSequences(row)
+        })
       })
       if (hidden) {
         const full = `${hidden} more tasks · /tasks list`
@@ -191,7 +247,8 @@ export function taskWidget(
             : visibleWidth(compact) <= columns
               ? compact
               : `${hidden} more`
-        lines.push(theme.fg('dim', truncateToWidth(label, columns, '…')))
+        const hint = truncateToWidth(label, columns, '…')
+        lines.push(colors ? colors.fg('dim', hint) : stripTerminalSequences(hint))
       }
       return lines
     }

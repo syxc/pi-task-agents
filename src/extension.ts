@@ -6,6 +6,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import { TaskController, type TaskControllerOptions } from './controller.ts'
 import { createParentTools } from './parent-tools.ts'
+import { TaskCallAncestry } from './task-call-ancestry.ts'
 import { thinkingLevels } from './config.ts'
 import {
   ACTIVE_TASK_STATUSES,
@@ -59,6 +60,22 @@ export function toolResult(value: unknown, isError = false): TaskToolResult {
   )
 }
 
+function foregroundBusyResult(error: unknown): TaskToolResult | undefined {
+  if (!isRecord(error) || error.code !== 'TASK_FOREGROUND_BUSY') {
+    return
+  }
+  return toolResult(
+    {
+      code: error.code,
+      status: 409,
+      retryable: true,
+      admitted: false,
+      error_message: error instanceof Error ? error.message : String(error)
+    },
+    true
+  )
+}
+
 function renderStopAll(tasks: TaskSummary[]): string {
   const incomplete = tasks.some(
     (task) => isActiveTaskStatus(task.status) || task.cleanup_pending || task.stopError
@@ -89,6 +106,11 @@ export function registerTaskAgents(
     ...dependencies
   })
   const outputProjector = new OutputProjector()
+  const ancestry = new TaskCallAncestry()
+  pi.on('tool_call', (event, ctx) => ancestry.observe(event, ctx))
+  // agent_end is not a drain boundary: detached native calls may still be in permission hooks.
+  pi.on('session_start', () => ancestry.invalidate())
+  pi.on('session_shutdown', () => ancestry.invalidate())
   const register = <T extends TSchema>(
     name: string,
     description: string,
@@ -97,7 +119,8 @@ export function registerTaskAgents(
       params: Static<T>,
       id: string,
       signal: AbortSignal | undefined,
-      ctx: ExtensionContext
+      ctx: ExtensionContext,
+      nestedToolCall: boolean
     ) => Promise<TaskToolResult>
   ): void =>
     pi.registerTool({
@@ -123,6 +146,20 @@ export function registerTaskAgents(
         if (delegated) {
           return delegated
         }
+        const origin = ancestry.take(name, id, params, ctx)
+        if (origin === 'expired') {
+          return toolResult(
+            {
+              code: 'TASK_CALL_EXPIRED',
+              status: 409,
+              retryable: true,
+              admitted: false,
+              error_message:
+                'Task call was not admitted because its session was replaced or shut down while a hook was pending. Retry from the current session.'
+            },
+            true
+          )
+        }
         const binding = parentTools.bind(
           name,
           id,
@@ -131,7 +168,8 @@ export function registerTaskAgents(
             (name === 'task' && !(params as { run_in_background?: boolean }).run_in_background)
         )
         try {
-          return await binding.run(() => execute(params, id, signal, ctx))
+          // Unknown SDK provenance must not silently bypass the capacity guard.
+          return await binding.run(() => execute(params, id, signal, ctx, origin !== 'direct'))
         } finally {
           binding.release()
         }
@@ -165,7 +203,7 @@ export function registerTaskAgents(
         })
       )
     }),
-    async (params, id, signal, ctx) => {
+    async (params, id, signal, ctx, nestedToolCall) => {
       const input = { ...params }
       if (input.model?.trim() === '') {
         delete input.model
@@ -173,7 +211,15 @@ export function registerTaskAgents(
       if (input.effort?.trim() === '') {
         delete input.effort
       }
-      return taskResult(await controller.start(input, id, signal, ctx), input)
+      try {
+        return taskResult(await controller.start(input, id, signal, ctx, nestedToolCall), input)
+      } catch (error) {
+        const busy = foregroundBusyResult(error)
+        if (busy) {
+          return busy
+        }
+        throw error
+      }
     }
   )
 
@@ -246,9 +292,9 @@ export function registerTaskAgents(
       }),
       content: nonempty()
     }),
-    async (params, id, signal, ctx) => {
+    async (params, id, signal, ctx, nestedToolCall) => {
       try {
-        const task = await controller.send(params, id, signal, ctx)
+        const task = await controller.send(params, id, signal, ctx, nestedToolCall)
         const report = taskResult(task, { agent_name: task.agent_name })
         return projectedResult(
           'task_send',
@@ -257,6 +303,10 @@ export function registerTaskAgents(
           ['failed', 'canceled', 'lost'].includes(task.status) || !!task.stopError
         )
       } catch (error) {
+        const busy = foregroundBusyResult(error)
+        if (busy) {
+          return busy
+        }
         const facts = isRecord(error) ? error : undefined
         return toolResult(
           {

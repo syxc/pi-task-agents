@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { TaskStore } from './store.ts'
+import { resolveMaxConcurrency } from './concurrency.ts'
 import { TaskDomain } from './task-domain.ts'
 import { TaskAdmissions } from './engine-admission.ts'
 import { TaskOutputReads } from './engine-output.ts'
@@ -106,15 +107,11 @@ export class TaskEngine {
     notify,
     onChange
   }: TaskEngineOptions) {
-    if (maxConcurrency !== undefined && (!Number.isInteger(maxConcurrency) || maxConcurrency < 1)) {
-      throw new Error('Invalid maxConcurrency')
-    }
+    this.maxConcurrency = resolveMaxConcurrency(maxConcurrency)
     this.parentId = parentId
     this.cwd = resolve(cwd)
     this.store = new TaskStore(rootDir, parentId)
     this.outputReads = new TaskOutputReads(JSON.stringify([this.store.dir, parentId]))
-    // Omission adds no cross-session plugin quota; explicit values remain legacy host policy.
-    this.maxConcurrency = maxConcurrency ?? Infinity
     this.createChild = createChild
     this.notify = notify
     this.onChange = onChange
@@ -172,6 +169,11 @@ export class TaskEngine {
     }
   }
 
+  private latchStorageError(error: unknown): void {
+    // In-flight writes can settle after poisoning; the first observed failure remains the owner error.
+    this.storageError ??= error || new Error('Task persistence failed', { cause: error })
+  }
+
   private assertDispatch(): void {
     this.assertOpen()
     this.safety.assertDispatch()
@@ -188,8 +190,13 @@ export class TaskEngine {
     return this.admission.exclusive(fn)
   }
 
-  persist(): Promise<void> {
-    return this.store.save(this.getState())
+  async persist(): Promise<void> {
+    try {
+      await this.store.save(this.getState())
+    } catch (error) {
+      // A falsy rejection must not bypass the owner's storage-error latch.
+      throw error || new Error('Task persistence failed', { cause: error })
+    }
   }
 
   changed(task: TaskRecord): void {
@@ -251,7 +258,7 @@ export class TaskEngine {
   async start(
     input: TaskInput,
     profile: AgentProfile,
-    { requestId, signal }: TaskRequestOptions = {}
+    { requestId, signal, nestedToolCall }: TaskRequestOptions = {}
   ): Promise<TaskSummary> {
     aborted(signal)
     input = normalizeTaskInput(input)
@@ -266,7 +273,7 @@ export class TaskEngine {
         effective.effort = input.effort
         effective.thinking = undefined
       }
-      return this.enqueue(input, effective, undefined, key)
+      return this.enqueue(input, effective, undefined, key, nestedToolCall)
     })
     return input.run_in_background === true ? result : this.foreground(result, signal)
   }
@@ -286,6 +293,10 @@ export class TaskEngine {
       await this.waitUntil(() => !pending.has(task.status))
       await this.runtimes.get(task.task_id)?.done
       await cancellation
+      // Keep execution facts intact, but do not acknowledge an unconfirmed terminal snapshot.
+      if (this.uncommittedTerminals.has(task.task_id)) {
+        throw this.storageError
+      }
       return { ...this.summary(task), mode: result.mode, accepted: result.accepted }
     } finally {
       signal?.removeEventListener('abort', onAbort)
@@ -296,10 +307,31 @@ export class TaskEngine {
     input: TaskInput,
     profile: AgentProfile,
     previous?: TaskRecord,
-    key?: string
+    key?: string,
+    nestedToolCall = false
   ): Promise<TaskSummary> {
     const execute = captureTaskExecutionContext()
     this.assertDispatch()
+    // The serialized request has already checked durable/in-flight receipts. Count
+    // queued predecessors too: their existing claim can consume an apparently free slot.
+    if (
+      nestedToolCall &&
+      input.run_in_background !== true &&
+      this.runtimes.size +
+        this.getState().tasks.filter((task) => task.status === 'queued').length >=
+        this.maxConcurrency
+    ) {
+      throw Object.assign(
+        new Error(
+          'TASK_FOREGROUND_BUSY: Nested or unverified-origin foreground work was not admitted; owner capacity is full. ' +
+            'Waiting here can deadlock the SDK tool queue. The SDK does not expose its scheduling mode, ' +
+            'so this conservative guard also rejects parallel nested foreground calls. ' +
+            'Retry after a task completes or stop cleanup is confirmed; use task with ' +
+            'run_in_background:true, or task_append for asynchronous continuation.'
+        ),
+        { code: 'TASK_FOREGROUND_BUSY', status: 409, retryable: true }
+      )
+    }
     if (previous) {
       profile = this.safety.continuation(previous)
     }
@@ -335,9 +367,7 @@ export class TaskEngine {
         task,
         key,
         () => this.persist(),
-        (error) => {
-          this.storageError = error
-        }
+        (error) => this.latchStorageError(error)
       )
     } catch (error) {
       this.executionContexts.delete(id)
@@ -351,7 +381,7 @@ export class TaskEngine {
 
   append(taskId: string, content: string, options: TaskRequestOptions = {}): Promise<TaskSummary> {
     const poison = (error: unknown) => {
-      this.storageError = error || new Error('Task append persistence failed')
+      this.latchStorageError(error)
     }
     return appendTask(
       {
@@ -420,7 +450,8 @@ export class TaskEngine {
           { ...task.input, prompt: content, run_in_background: false },
           task.profile,
           task,
-          key
+          key,
+          options.nestedToolCall
         )
       },
       (receipt) => ({ ...receipt, mode: 'duplicate', accepted: true })
@@ -475,7 +506,7 @@ export class TaskEngine {
       try {
         await this.persist()
       } catch (error) {
-        this.storageError = error || new Error('Running task persistence failed')
+        this.latchStorageError(error)
         throw error
       }
       this.changed(task)
@@ -492,7 +523,7 @@ export class TaskEngine {
             try {
               await this.persist()
             } catch (error) {
-              this.storageError = error || new Error('Profile snapshot persistence failed')
+              this.latchStorageError(error)
               throw error
             }
           },
@@ -507,7 +538,7 @@ export class TaskEngine {
             try {
               await this.persist()
             } catch (error) {
-              this.storageError = error || new Error('Command ownership persistence failed')
+              this.latchStorageError(error)
               throw error
             }
           },
@@ -619,7 +650,7 @@ export class TaskEngine {
           } catch {}
         }
       } catch (error) {
-        this.storageError ??= error
+        this.latchStorageError(error)
         this.changed(task)
       }
       if (!this.safety.retains(task.session_id)) {
@@ -697,7 +728,7 @@ export class TaskEngine {
           try {
             await this.persist()
           } catch (failure) {
-            this.storageError ??= failure
+            this.latchStorageError(failure)
           }
           this.changed(task)
         })
@@ -841,7 +872,7 @@ export class TaskEngine {
           await this.persist()
           this.uncommittedTerminals.clear()
         } catch (error) {
-          this.storageError ??= error
+          this.latchStorageError(error)
           throw error
         }
       }
