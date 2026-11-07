@@ -1,18 +1,14 @@
 # MCode 子 Agent 核心功能对照
 
-本清单对照 MCode `3c21163c85a9684030cb147bfef48c6284fa3c46`，用于维护子 Agent 核心契约，不是整个 MCode 宿主的等价证明。`upstream.lock.json` 记录复用模块及受监测源码；上游版本更新后，需要重新审查受影响的行，不能只更新哈希。
+本清单对照 MCode `3c21163c85a9684030cb147bfef48c6284fa3c46`，维护子 Agent 核心契约，不证明整个宿主等价。安装、配置和操作见 [README](../README.md)；父工具桥的机制与信任边界见 [Pi 运行态适配](pi-runtime-adapter.md)。
 
-“对应实现”表示所列行为已有生产调用链及回归，不代表整套功能已验收。“Pi 适配”允许接口和实现结构不同，但仍须保留核心工作流；尚未满足的行为标为“待实现”或“部分实现”，不能以适配边界代替补齐。源码比较、受控 SDK 回归、真实模型验证和外部服务验证分别记录，不互相替代。
+“对应实现”表示所列行为已有生产调用链及回归，不代表整体验收通过；“Pi 适配”允许接口和结构不同，但须保留核心工作流。未满足项须标为“待实现”或“部分实现”，不能作为适配边界排除。源码比较、受控 SDK、真实模型和外部服务验证不能互相替代。
 
-## 架构取舍
-
-- 学习 MCode 的子 Agent 调度思路，按 Pi 官方接口实现。可直接复用的纯领域模块继续复用，不要求代码、资源容器或宿主内部机制逐项相同。核心是角色分工、统一任务状态机、独立历史、续接、取消、持久结果和 owner 通知。
-- 定期同步上游更新，分开维护复用源码、适配逻辑和同步记录。控制本地分叉规模，使版本变更可追溯至受影响的接口及验证项，降低升级成本。
-- 以可靠性、轻量化、简洁性和执行效率为优化目标，通过增量输出、通知去重和按需工具暴露控制 token 开销，不降低安全性、权限约束或核心能力。必要信息优先通过 Pi 内置通道传递；未证实替代方案更优时遵循 MCode 契约，不以长度判断信息是否必要。优于上游的设计应提供具体收益和验证依据。
+按 Pi 官方接口实现，复用纯领域模块，不要求资源容器或宿主机制逐项相同。通过增量输出、通知去重和按需工具暴露控制 token 开销；可靠性、轻量化和效率优化不得削弱安全、权限或核心能力。必要信息优先走 Pi 内置通道；无经验证的更优方案时遵循 MCode 契约，改进主张须有具体收益和验证依据。
 
 ## 需求与验收基线
 
-以下要求定义交付目标，后文对照表记录当前实现与证据。需求不能因现有实现的限制而缩减。
+以下是交付目标，不因当前实现限制而缩减；对照表记录实现和证据。C9 须冻结相关源码后验收，既有定向或早期完整门禁不能代表当前全部需求完成。
 
 | 编号 | 要求 | 验收条件 |
 | --- | --- | --- |
@@ -54,7 +50,7 @@
 | Worker 范围、所有权、最小改动及如实验证 | `V2/assets/agents/_v2/worker.md.hbs` | `prompts/worker.md`、项目指令 | 对应实现；原生写入与 SDK 任务链回归；模型是否遵从指令需按任务检查 |
 | Verifier 不修改交付物，临时产物仅进指定目录 | `V2/assets/agents/_v2/verifier.md.hbs` | `prompts/verifier.md`、角色工具 ceiling | 对应实现；角色门禁与真实 SDK 验证回归；不是文件系统写入隔离 |
 | Verifier 判定、执行状态及观察事实分离 | `AT/task-verification.ts`、`LR/api/injected-conversation-task-turn.ts` | `task-verification.ts`、`pi-backend.ts`、`engine-facts.ts` | 对应实现；固定原始 parser 差分、失败/中止、持久化及公开投影回归 |
-| 子 Agent 内受管后台命令及同逻辑任务结果回收 | `LR/background-task/child-bash-lifecycle.ts`、`LR/api/hosted-agent-capabilities.ts` | `child-commands.ts`、`command-journal.ts`、`command-output.ts`、`child-bash-ports.ts`、`pi-backend.ts`、`engine.ts` | 已接入 C5/C6；复用上游 manager、store、lifecycle 与 waiter，通过原生 `executeTool` 启动、读取和停止命令，并在 `agent_before_settle` 等待和交付结果。`child-commands.test.ts`、`child-command-scope.test.ts`、`managed-command-ownership.test.ts`、`command-output.test.ts` 验证角色/快照、Turn 隔离、持久输出、原生 PID 清理、故障占用及恢复；发布前按 C9 执行冻结验收 |
+| 子 Agent 内受管后台命令及同逻辑任务结果回收 | `LR/background-task/child-bash-lifecycle.ts`、`LR/api/hosted-agent-capabilities.ts` | `child-commands.ts`、`command-journal.ts`、`command-output.ts`、`child-bash-ports.ts`、`pi-backend.ts`、`engine.ts` | 已接入 C5/C6；复用上游 manager、store、lifecycle 与 waiter，经原生 `executeTool` 执行，在 `agent_before_settle` 等待并交付结果。Engine 启动命令前持久化清理所有权，仅当前 owner 的清理证明或成功处置可解除占用；崩溃后未确认所有权进入隔离。`child-commands.test.ts`、`child-command-scope.test.ts`、`managed-command-ownership.test.ts`、`command-output.test.ts` 验证角色/快照、Turn 隔离、持久输出、原生 PID 清理、故障占用及恢复；发布前按 C9 执行冻结验收 |
 | 工具目标级文件观察与不确定性分类 | `LR/turns/file-changes.ts` | `tool-file-observation.ts`、`vendor/mcode-adapters/file-write-targets.ts`、`workspace-observation.ts` | 已接入 C7 的元数据适配；`tool-file-observation.ts` 绑定实际工具事件，复用上游纯目标提取函数，覆盖其他适用角色及嵌套调用。`managed-command-observation.test.ts` 验证受管命令与部分写入的联动；`tool-file-observation.test.ts`、`file-write-targets.test.ts` 验证目标合并、动态/范围外目标、拒绝、失败、中止及并发变化；不提供内容 diff 或通用写审计，发布前按 C9 执行完整联动门禁 |
 | 子 Agent 不再派工或控制父任务 | task-child 工具 surface、共享委派契约 | `resource-selection.ts`、SDK allowlist 和 tool_call guard | 对应实现；`pi-backend.test.ts`、`child-contract.test.ts`；不向子会话开放父 owner 的 task 控制 |
 | 子 Agent 不管父 todos/goals，不直接询问用户或安排独立后续工作 | `V2/.../local-turn-tool-catalog.ts`、共享委派契约 | `resource-selection.ts`、`pi-backend.ts` | 对应实现；拦截 `todo/todowrite`、`ask_user/ask_user_question`、`create_goal/get_goal`、`until`；真实 SDK 验证工具不可调用且扩展 hooks 仍运行 |
@@ -68,32 +64,24 @@
 | PTC 类程序化工具调用、并行组合及结果整理 | `packages/agent-core/src/tools/ptc.ts`、`V2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs` | Pi 原生 `codemode` | Pi 适配；默认插件路径仅组合获准的官方原生及内置 MCP 工具，不转发普通父扩展。`pi-backend-codemode.test.ts` 的显式嵌入 backend 仍覆盖调用方提供的原生/扩展组合、关闭 MCP、权限 hooks 和保存上界；默认父桥的受控 MCP 另见 `resource-inheritance.test.ts` |
 | 原生安装、资源启动和多子会话不能共享错误 UI 状态 | Pi 宿主适配责任 | `resource-mcp.ts`、`pi-backend.ts` | Pi 适配；`host-peer-sdk.test.ts`、`pi-backend-ui-isolation.test.ts` 覆盖无本地 peer 和保留双会话 |
 
-## 适配限制与验收要求
+## 实现与验收边界
 
-- 默认插件路径支持未修改的官方 Pi 1.5.0，不再依赖自定义 SDK 资源快照。工具及权限 hook 在父实例执行，子会话不复制父扩展的全部生命周期。父 runtime 被替换时取消并排空旧后台，而不是继续持有失效上下文。机制、权限和生命周期边界见 [Pi 运行态适配](pi-runtime-adapter.md)；离线 SDK、bundled CLI、安装与真实服务验收分别记录。
-- C5/C6 的命令运行时已接入，受控验证覆盖范围、关闭和资源故障路径；接缝探针不能代替生产链验收。Engine 在原生命令启动前持久化清理所有权；只有当前 owner 的清理证明或成功处置才能解除占用。崩溃后的未确认所有权进入隔离，不重放执行。
-- C7 的目标观察已接入各适用角色，并验证受管命令的已知目标和停止后的部分写入。仍须参加最终冻结验收；元数据变化不等于内容差异，报告不归因并发写入。
-- C8 当前配置为定期变更检查，更新仍需契约审查、适配和回归。`LR/turns/file-changes.ts` 和生成 queued 行及 owner/Turn/执行模式事实的 `LR/background-task/subagent-task-row.ts` 已纳入监测，抽取的目标函数由固定原文哈希及函数体一致性测试保护，函数体仅适配字面路径空格及未解析的 Shell 父目录遍历；检查通过仍不代表所有核心行为都已同步。
-- C9 的最终验收须在相关生产链补齐后冻结源码并执行。既有定向测试或早期完整门禁只覆盖各自快照，不代表当前全部需求已完成。
-
-## 实现边界
-
-- 不复刻 MCode 的完整进程宿主、全局后台调度器或日志控制界面，但必须用原生能力和薄适配满足 C5/C6 的命令工作流。
-- MCode 的部署、通用 Mavis 会话管理、Memory 宿主、完整 TUI 和 SQLite 观察运行时不在本插件范围。PTC 类能力由 Pi 原生 codemode 承接，不另建 PTC 宿主。核心任务行为由上表对应生产链提供，不因排除宿主而直接删除。
+- 默认插件路径支持未修改的官方 Pi 1.5.0，不依赖自定义 SDK 资源快照。工具及权限 hooks 在父实例执行，不复制父扩展生命周期；父 runtime 替换前取消并排空旧后台。详细机制见 [Pi 运行态适配](pi-runtime-adapter.md)。
+- 不复刻 MCode 的完整进程宿主、全局后台调度器、日志控制界面、部署、通用 Mavis 会话管理、Memory 宿主、完整 TUI 或 SQLite 观察运行时；PTC 由 Pi 原生 codemode 承接。这些排除项不缩减 C5/C6 等核心工作流。
 - 准入、permission hooks 和工具门控不能阻止可信第三方扩展自行执行代码，也不是 OS 或网络沙箱。第三方工厂在 SDK 接管之前发生的副作用仍由该工厂负责回滚。
 - 命令输出以当前 Pi 原生 Bash 捕获的输出为边界。仅接收本次原生调用的受校验输出源，并固定 `FileHandle` 身份；历史句柄只读取子会话私有日志，不把任意 URI 当作文件授权。宿主输出格式变化导致无法取得完整输出，或记录、解码不完整时，须明确报告，不能静默返回截取内容并宣称完整。
 - 原生执行结束与外部副作用回滚不同。主动脱离原生工具生命周期的进程、容器或外部服务不由这些句柄接管，也不能因一个 Bash 执行结束就宣称它们已停止。
-- 真实模型探针仅能证明当次角色、源码、资源和输入路径；资源元数据可见不证明任意 MCP 业务接口可用。未经授权不执行真实模型或第三方业务验收。
+- 接缝探针不能代替生产链验收；离线 SDK、bundled CLI、安装和真实服务证据分别记录。真实模型探针仅证明当次角色、源码、资源和输入路径，资源元数据可见不证明任意 MCP 业务接口可用。未经授权不执行真实模型或第三方业务验收。
 
 ## PTC 与 codemode 的对应关系
 
-MCode PTC 和 Pi codemode 都让模型用程序组合多个工具调用、并行取数并整理结果。这里核对能力，不把不同产品或名称当成缺失，也不要求复制 MCode 的 PTC 运行时。
+两者均支持程序化组合工具、并行取数和结果整理，但入口、返回值及运行协议不同：
 
 | 项目 | Pi 适配及区别 |
 | --- | --- |
 | 调用入口 | MCode 使用 `run_code` 及其 JSON 参数；Pi 使用原生 `codemode` 和 JavaScript 输入。脚本调用 `tools.<name>(args)`，不保证原脚本无需修改即可迁移 |
-| 工具与结果 | 调用当前子会话获准的原生、扩展和 MCP 工具；Pi read 返回文本，MCode PTC 提示词使用 `r.data.content`。使用各自的原生返回契约，不假装包装格式相同 |
-| 权限 | 不增加任何工具权限。角色 ceiling、父控制工具屏蔽、permission hooks、显式 deny 和已保存上界仍生效。父开启不会给旧快照自动新增 codemode；父关闭会阻断既有子会话的后续脚本调用，已经执行的副作用不撤回 |
+| 工具与结果 | 默认插件路径仅组合获准的官方原生和内置 MCP 工具；显式嵌入 backend 的调用方可另供扩展。Pi read 返回文本，MCode PTC 提示词使用 `r.data.content`，不统一包装格式 |
+| 权限 | 角色 ceiling、父控制工具屏蔽、permission hooks、显式 deny 和历史上界仍生效。父开启不扩权旧快照；父关闭或引擎关闭时阻断后续脚本调用，已执行的副作用不撤回 |
 | 使用时机 | 父已开启且独立调用批量执行或大结果筛选有收益时优先使用；单次简单操作用直接工具。不强制套脚本，不额外调用模型生成摘要 |
 | 总开关 | 只认父 Pi 当前实际启用的 `codemode`，读取 active 工具而不是仅已注册的工具定义。父关闭或没有可验证的父状态时，子不能自行启用；不另设子 Agent 开关 |
 | MCP 可选性 | 父 Pi 开启后，子可用 codemode 组合获准工具，不要求角色再写启用项。`mcp:false` 或 `mcpServers:[]` 只关闭 MCP；开启 MCP 或角色显式选择不能反过来开启父开关 |
@@ -101,13 +89,15 @@ MCode PTC 和 Pi codemode 都让模型用程序组合多个工具调用、并行
 | 超时与结果记录 | 使用 Pi 的脚本 `timeout_ms`、取消和输出协议；不复刻 MCode 默认 120 秒、共享 batch 预算或 `details.ptc` 侧信道。脚本失败不会撤销之前已执行的工具副作用 |
 | 模型服务 | 子会话 codemode 使用 `models:false`，不开放额外 classifier/image 模型调用；程序化工具组合不因此被关闭 |
 
-同一父会话的开关变化实时约束后续调用。普通插件在父 runtime 替换前取消并排空旧后台，不读取新会话或失效 API；回到原 owner 后可续接已保存历史，并按当前父状态和历史上界重新绑定。关闭引擎时不再批准新的 codemode 调用。
-
-上述受控测试证明列出的工具调用与权限路径，不证明两个宿主的全部超时、预算、媒体和恢复协议完全等价。
+回到原 owner 后，续接按当前父状态与历史上界重新绑定。上述受控测试不证明两个宿主的全部超时、预算、媒体和恢复协议等价。
 
 ## 持续同步
 
-保留 8 个上游任务领域模块，另复用 2 个 child-Bash 生命周期/等待模块，由 Pi 原生命令适配器接入执行与同逻辑任务结果回收。这 10 个文件均有原始/适配哈希和可逆转换核验；另监测 43 个核心参考文件，覆盖公开工具定义、准入/续接、停止/终态/恢复、角色定义及模板、模型装配、实际 task-child 工具 surface、PTC 公共契约、文件观察生产者和许可。文件目标提取仅复用纯函数，以固定原文和函数体一致性测试约束本地差异；除 Pi 品牌路径外，移除路径裁剪以保留 Shell 字面空格，并将可能跨符号目录的父目录遍历标为不确定。原生 write/edit 的别名按 Pi 路径规则单独解析，不引入 diff/数据库宿主。参考文件只用于变化报警，不打包成另一套宿主实现。
+`upstream.lock.json` 记录 8 个任务领域模块、2 个 child-Bash 生命周期/等待模块的原始及适配哈希，由脚本核验可逆转换；复用源码、薄适配与同步记录分开维护，控制分叉规模。
+
+另监测 43 个核心参考文件，覆盖公开工具定义、准入/续接、停止/终态/恢复、角色及模板、模型装配、task-child 工具 surface、PTC、许可及文件观察生产者。其中 `LR/background-task/subagent-task-row.ts` 生成 queued 行和 owner/Turn/执行模式事实，`LR/turns/file-changes.ts` 提供目标提取参考。参考文件仅报警，不打包为宿主实现。
+
+文件目标提取仅复用纯函数，由固定原文哈希及函数体一致性测试约束。除 Pi 品牌路径外，适配仅移除裁剪以保留 Shell 字面空格，并将可能跨符号目录的父目录遍历标为不确定；原生 write/edit 别名按 Pi 规则另行解析，不引入 diff/数据库宿主。
 
 ```sh
 npm run upstream:verify
@@ -116,6 +106,6 @@ npm run upstream:check
 
 前者离线核验本地 vendor 及可逆适配，后者读取上游当前 commit，检查文件变化、移除和任务领域模块清单。GitHub workflow 每周或手动运行检查，不自动迁移功能、开 PR 或合并。
 
-需要更新时，先核对具体 commit 的变化，对上表相关生产链和测试完成适配，再运行带明确 `--ref COMMIT` 的同步命令。受监测契约变化默认阻止同步；`--accept-contract-changes` 只确认已人工审查，不替代适配。删除或移动的参考文件必须先修正路径，不能靠确认参数忽略。
+更新时先审查具体 commit，重新核对上表受影响契约并适配生产链及测试，再运行 `npm run upstream:sync -- --ref COMMIT`，不能只更新哈希。契约变化默认阻止同步；`--accept-contract-changes` 仅确认人工审查，不替代适配。参考文件删除或移动须先修正路径，不能用确认参数忽略。
 
-监测覆盖的是列明的核心入口和生产链，不是整个仓库的依赖闭包。新依赖中的行为变化仍可能需要人工追踪；检查通过不能单独证明全量功能等价。没有运行完整 MCode 测试套件，也没有验证所有外部服务或平台。
+监测不是整个仓库的依赖闭包，新依赖的行为变化仍须人工追踪；检查通过不证明全部核心行为已同步。未运行完整 MCode 测试套件，未验证所有外部服务或平台。
