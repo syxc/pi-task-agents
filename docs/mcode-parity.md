@@ -61,11 +61,11 @@
 | 信息不足向父会话报告 blocker，Memory 写入遵守所有权 | `V2/assets/agents/_default/prompt-session-branch.md.hbs` | 所有角色共用的 SDK 附加指令 | Pi 适配；`child-contract.test.ts` 检查真实模型请求中的共享指令；没有 child-owned Memory 时将持久结论交父会话处理，不另建 Memory 宿主 |
 | Task 显式模型/思考优先，其次角色配置、父有效选择 | `V2/src/application/session/task-agent-binding-capture.ts` | `config.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；使用 Pi 的 provider/id、thinking 和原生 registry，不复刻 MCode 模型组管理器；见配置和 SDK 选模回归 |
 | 换模型不继承不兼容旧参数，既有子会话不随父切换漂移 | `V2/src/service/model-system/catalog/agent-model-selection.ts` | `resolveProfile`、冻结 profile 与 onProfileResolved | 对应设计；`config.test.ts`、`pi-backend.test.ts`、`engine.test.ts` |
-| Skills、扩展、MCP 按允许范围使用并保留权限上界 | binding capture、最终工具 surface | `parent-tools.ts`、`child-parent-tools.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；最终 Skills 来自官方事件，工具通过父原生管线执行，不复制扩展工厂或 MCP 凭据。`parent-tools.test.ts` 验证四角色真实 Task、单实例纯权限 hook、后台与结果过滤、首次 MCP 准备及父停用工具；`runtime-inheritance.test.ts`、`resource-inheritance.test.ts` 保留动态/禁用资源、角色限制、独立历史和恢复回归 |
+| Skills、扩展、MCP 按允许范围使用并保留权限上界 | binding capture、最终工具 surface | `parent-tools.ts`、`child-parent-tools.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；最终 Skills 来自官方事件，已核验的官方原生叶子工具和内置 MCP 通过父管线执行，不复制扩展工厂或凭据；默认插件路径拒绝普通父扩展、同名覆盖及 inline/替代 MCP 适配器，父工具不受影响。`parent-tools.test.ts` 验证四角色真实 Task、单实例纯权限 hook、后台与结果过滤、首次 MCP 准备及父停用工具；`runtime-inheritance.test.ts`、`resource-inheritance.test.ts` 保留动态/禁用资源、角色限制、独立历史和恢复回归 |
 | 子执行保留必要父原生 Shell 设置 | Pi 宿主执行上下文 | `parent-tools.ts`、`pi-backend.ts` | 默认插件路径复用父 Bash 执行管线；仅为观察复制 `shellPath`/`shellCommandPrefix`。`runtime-inheritance.test.ts` 比较实际父执行、子前台 Bash、受管命令和 native codemode |
 | 原生工具 ceiling 与 Plugin/MCP 来源权限分开 | `V2/.../local-turn-tool-catalog.ts` | `resource-selection.ts`、`resource-tool-inventory.ts` | 对应设计；角色 ceiling、MCP deny、发现与 codemode 回归；外部工具不构成只读沙箱 |
 | codemode 总开关由父 Pi 控制，不由角色或 MCP 另行开启 | Pi 原生 active 工具状态 | `controller.ts`、`controller-owners.ts`、`pi-backend.ts` | 对应实现；`codemode-switch.test.ts`、`controller.test.ts` 和真实父 SDK 四角色资源继承回归；无父状态默认关闭，无新增用户配置开关 |
-| PTC 类程序化工具调用、并行组合及结果整理 | `packages/agent-core/src/tools/ptc.ts`、`V2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs` | Pi 原生 `codemode` | Pi 适配，不是能力排除；`pi-backend-codemode.test.ts` 覆盖四角色原生/扩展组合、显式关闭 MCP、权限 hooks 和已保存上界；受控 MCP 调用另见 `resource-inheritance.test.ts` |
+| PTC 类程序化工具调用、并行组合及结果整理 | `packages/agent-core/src/tools/ptc.ts`、`V2/assets/agents/_v2/PTC_TOOL_CALLS.md.hbs` | Pi 原生 `codemode` | Pi 适配；默认插件路径仅组合获准的官方原生及内置 MCP 工具，不转发普通父扩展。`pi-backend-codemode.test.ts` 的显式嵌入 backend 仍覆盖调用方提供的原生/扩展组合、关闭 MCP、权限 hooks 和保存上界；默认父桥的受控 MCP 另见 `resource-inheritance.test.ts` |
 | 原生安装、资源启动和多子会话不能共享错误 UI 状态 | Pi 宿主适配责任 | `resource-mcp.ts`、`pi-backend.ts` | Pi 适配；`host-peer-sdk.test.ts`、`pi-backend-ui-isolation.test.ts` 覆盖无本地 peer 和保留双会话 |
 
 ## 适配限制与验收要求

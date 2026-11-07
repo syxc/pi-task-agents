@@ -1,7 +1,10 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, Skill, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { VERSION } from '@earendil-works/pi-coding-agent';
 import type { ParentRuntimeSnapshot } from './parent-runtime.ts';
 import { taskChildBlockedTools } from './resource-selection.ts';
+import { taskExecutionBinding, type ParentToolBinding } from './task-execution-context.ts';
 
 export type ParentTool = ToolDefinition & {
   sourceInfo: ReturnType<ExtensionAPI['getAllTools']>[number]['sourceInfo'];
@@ -12,13 +15,27 @@ export type ParentTool = ToolDefinition & {
 export type ToolPermission = (name: string, args: unknown) => boolean;
 type Dispatch = (ctx: ExtensionToolContext) => ReturnType<ToolDefinition['execute']>;
 const abortError = () => Object.assign(new Error('Parent tool admission canceled'), { name: 'AbortError' });
+const nativeLeaves = new Set(['read', 'write', 'edit', 'bash', 'powershell', 'grep', 'find', 'ls']);
+const mcpLeaves = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']);
+
+/** The trusted host's provenance, not a tool's name or reachability hints, identifies audited code. */
+function verifiedLeaf(tool: ReturnType<ExtensionAPI['getAllTools']>[number]): boolean {
+  // These implementations never call executeTool or retain a delegated context.
+  // Re-audit before accepting another SDK version or built-in implementation.
+  if (VERSION !== '1.5.0' || tool.sourceInfo.source !== 'builtin') return false;
+  if (tool.sourceInfo.path === 'builtin:' + tool.name) return nativeLeaves.has(tool.name);
+  return tool.sourceInfo.path === 'builtin:mcp' && (mcpLeaves.has(tool.name)
+    || tool.name.startsWith('mcp__') && tool.namespace?.name.startsWith('mcp__') === true);
+}
 
 /** Share the parent's execution pipeline, not extension factories or MCP credentials. */
 export function createParentTools(pi: ExtensionAPI) {
   const pending = new Map<string, Dispatch>();
-  const dispatchers = new WeakMap<object, ExtensionToolContext['tools'][number]>();
+  const dispatchers = new WeakMap<object, ParentToolBinding>();
   const permissionIds = new WeakMap<ToolPermission, string>();
-  const scopes = new Map<string, { permits: ToolPermission; users: number }>();
+  type Scope = { active: boolean; caller: string; check: ToolPermission; cancel: AbortController };
+  const authority = new AsyncLocalStorage<Scope>();
+  const scopes = new Set<Scope>();
   const prefix = 'task-agent-' + randomUUID() + '/';
   let options: { skills: Skill[] } | undefined;
   let skills: Skill[] = [];
@@ -26,15 +43,22 @@ export function createParentTools(pi: ExtensionAPI) {
   let sessionId: string | undefined;
   let generation = 0;
   let toolEpoch = 0;
+  const revoke = () => {
+    for (const scope of scopes) { scope.active = false; scope.cancel.abort(); }
+  };
   // Pi clears nested-call IDs at agent_end; each child policy otherwise shares a bounded recorder.
   pi.on('agent_end', () => { toolEpoch++; });
   pi.on('tool_call', event => {
-    if (!event.parentToolCallId?.startsWith(prefix)) return;
-    const scope = scopes.get(event.parentToolCallId);
-    if (!scope?.permits(event.toolName, event.input)) return { block: true, reason: 'Tool is outside the delegated child scope' };
-    scopes.set(event.toolCallId, scope);
+    const parent = event.parentToolCallId;
+    if (!parent) return;
+    const scope = authority.getStore();
+    if (!scope && !parent.startsWith(prefix)) return;
+    if (!scope?.active || scope.caller !== parent || !scope.check(event.toolName, event.input)) {
+      return { block: true, reason: 'Tool is outside the delegated child scope or its authority has expired' };
+    }
+    // Only the root-to-leaf hop is admitted. Unknown implementations are
+    // excluded before dispatch: a nested serial call queues before this hook.
   });
-  pi.on('tool_execution_end', event => { scopes.delete(event.toolCallId); });
   pi.on('before_agent_start', event => { options = event.systemPromptOptions; });
   pi.on('agent_start', (_event, ctx) => {
     skills = structuredClone(options?.skills ?? []);
@@ -50,9 +74,14 @@ export function createParentTools(pi: ExtensionAPI) {
   });
 
   return {
-    bind(name: string, ctx: ExtensionContext) {
+    bind(name: string, id: string, ctx: ExtensionContext, inline: boolean) {
       const wrapper = (ctx as ExtensionToolContext).tools?.find(tool => tool.name === name);
-      if (wrapper) dispatchers.set(ctx, wrapper);
+      const binding = wrapper && { owner: pi, ctx: ctx as ExtensionToolContext, tool: wrapper, id, inline };
+      if (binding) dispatchers.set(ctx, binding);
+      return {
+        run: <T>(execute: () => T): T => taskExecutionBinding.run(binding, execute),
+        release() { if (binding) binding.inline = false; },
+      };
     },
     // This private path only constructs a fresh native context. The target always goes through executeTool.
     dispatch(id: string, ctx: ExtensionContext): ReturnType<ToolDefinition['execute']> | undefined {
@@ -61,11 +90,12 @@ export function createParentTools(pi: ExtensionAPI) {
       pending.delete(id);
       return call(ctx as ExtensionToolContext);
     },
-    invalidate() { generation++; pending.clear(); scopes.clear(); skills = []; options = undefined; },
+    invalidate() { generation++; revoke(); pending.clear(); skills = []; options = undefined; },
     async capture(ctx: ExtensionContext, signal?: AbortSignal): Promise<ParentRuntimeSnapshot> {
       if (signal?.aborted) throw abortError();
       const toolCtx = ctx as ExtensionToolContext;
-      const dispatcher = dispatchers.get(ctx) ?? toolCtx.tools?.find(tool => tool.name === 'task');
+      const binding = dispatchers.get(ctx);
+      const dispatcher = binding?.tool ?? toolCtx.tools?.find(tool => tool.name === 'task');
       if (!dispatcher || typeof toolCtx.executeTool !== 'function') {
         throw new Error('Task admission requires Pi tool execution context');
       }
@@ -77,7 +107,7 @@ export function createParentTools(pi: ExtensionAPI) {
       };
       assertOwner();
       const callable = new Set(toolCtx.tools.map(tool => tool.name));
-      const definitions = pi.getAllTools().filter(tool => callable.has(tool.name) && tool.exposure !== 'hidden'
+      const definitions = pi.getAllTools().filter(tool => verifiedLeaf(tool) && callable.has(tool.name) && tool.exposure !== 'hidden'
         && !taskChildBlockedTools.includes(tool.name.trim().normalize('NFKC').toLowerCase())
         && !['codemode', 'tool_search', 'bash_task'].includes(tool.name));
       const fingerprints = new Map(definitions.map(definition => [definition.name, JSON.stringify(definition)]));
@@ -87,20 +117,42 @@ export function createParentTools(pi: ExtensionAPI) {
           assertOwner();
           if (callSignal?.aborted) throw abortError();
           const current = pi.getAllTools().find(tool => tool.name === definition.name);
-          if (!current || JSON.stringify(current) !== fingerprints.get(definition.name)) throw new Error('Parent tool definition changed; start a new task');
+          if (!current || !verifiedLeaf(current) || JSON.stringify(current) !== fingerprints.get(definition.name)) throw new Error('Parent tool definition changed; start a new task');
           let policyId = permissionIds.get(permits);
           if (!policyId) { policyId = randomUUID(); permissionIds.set(permits, policyId); }
           const invocation = `${prefix}${policyId}-${toolEpoch}`;
-          const scope = scopes.get(invocation) ?? { permits, users: 0 };
-          scope.users++; scopes.set(invocation, scope);
-          pending.set(invocation, async fresh => {
-            const outcome = await fresh.executeTool(definition.name, args, { signal: callSignal, onUpdate });
+          // A retained child keeps its original inventory, but each execution
+          // uses the binding captured for that task's own admission.
+          const executing = taskExecutionBinding.getStore();
+          const activeBinding = executing?.owner === pi ? executing : binding;
+          const inline = activeBinding?.inline === true;
+          const caller = inline ? activeBinding.id : invocation;
+          const cancel = new AbortController();
+          const combined = callSignal ? AbortSignal.any([callSignal, cancel.signal]) : cancel.signal;
+          const scope: Scope = { active: true, caller, cancel,
+            check: (name, input) => {
+              try {
+                assertOwner();
+                const live = pi.getAllTools().find(tool => tool.name === name);
+                return !combined.aborted && permits(name, input) && !!live && verifiedLeaf(live) && JSON.stringify(live) === fingerprints.get(name);
+              } catch { return false; }
+            } };
+          const invoke: Dispatch = async fresh => {
+            const outcome = await fresh.executeTool(definition.name, args, { signal: combined, onUpdate });
+            if (!scope.active || combined.aborted) throw abortError();
             return { ...outcome.result, ...(outcome.isError ? { isError: true } : {}) };
-          });
-          try { return await dispatcher.execute(invocation, {}, callSignal, onUpdate); }
-          finally {
+          };
+          scopes.add(scope);
+          // A waiting foreground admission must keep the SDK's real ancestry:
+          // inventing a caller ID loses holdsQueue and waits on its own Task.
+          if (!inline) pending.set(invocation, invoke);
+          try {
+            return await authority.run(scope, () => inline ? invoke(activeBinding.ctx)
+              : (activeBinding?.tool ?? dispatcher).execute(invocation, {}, combined, onUpdate));
+          } finally {
+            scope.active = false;
             pending.delete(invocation);
-            if (--scope.users === 0) scopes.delete(invocation);
+            scopes.delete(scope);
           }
         };
         return { ...definition, label: definition.name, delegate,

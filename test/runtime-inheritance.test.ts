@@ -51,8 +51,8 @@ async function setup(t, { resourcesDisabled = false, prefix = '', runtimeSkill =
     noExtensions: resourcesDisabled, noSkills: resourcesDisabled, disabledBuiltinExtensions: withoutMcp ? ['mcp'] : undefined,
     extensionFactories: [
       ...(codemode ? [sdk.createCodemodeExtension({ mode: 'on', models: false })] : []),
-      ...(runtimeMcp ? [sdk.createMcpExtension({ startupWaitMs: 10000,
-        loadConfig: () => ({ servers: [], errors: [] }), logPath: join(root, 'parent-mcp.log') }),
+      ...(runtimeMcp ? [{ name: 'mcp', builtin: true, factory: sdk.createMcpExtension({ startupWaitMs: 10000,
+        loadConfig: () => ({ servers: [], errors: [] }), logPath: join(root, 'parent-mcp.log') }) },
         { name: 'owned-runtime-mcp-registration', factory: pi => pi.registerMcpServer('ownedruntime', { command: process.execPath,
           args: [fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url)), join(root, 'mcp-audit.jsonl'), 'runtime-only'], exposure: 'direct' }) }] : []),
       ...(runtimeSkill ? [{ name: 'owned-runtime-skill-contribution', factory: pi => {
