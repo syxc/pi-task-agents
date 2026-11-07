@@ -95,6 +95,7 @@ export class TaskEngine {
   private closed = false
   private closing?: Promise<void>
   private storageError: unknown
+  private readonly uncommittedTerminals = new Set<string>()
 
   constructor({
     rootDir,
@@ -470,6 +471,14 @@ export class TaskEngine {
     }
     session.active = task
     runtime.ready = Promise.resolve().then(async () => {
+      // Initialization must not outlive a failed running-row write and its owner cleanup.
+      try {
+        await this.persist()
+      } catch (error) {
+        this.storageError = error || new Error('Running task persistence failed')
+        throw error
+      }
+      this.changed(task)
       if (!session.child) {
         session.child = await this.createChild({
           profile: freeze(clone(task.profile)),
@@ -526,8 +535,6 @@ export class TaskEngine {
     })
     runtime.ready.catch(() => {})
     try {
-      await this.persist()
-      this.changed(task)
       const child = await runtime.ready
       if (this.storageError) {
         throw this.storageError
@@ -536,7 +543,7 @@ export class TaskEngine {
       if (child.sessionPath && child.sessionPath !== task.childSessionPath) {
         throw new Error('Child session path does not match assigned path')
       }
-      if (!runtime.stopReason) {
+      if (!runtime.stopReason && !this.closed) {
         if (task.profile.timeoutMs > 0) {
           runtime.timer = setTimeout(() => {
             this.cancel(task, 'Task timed out', 'failed').catch(() => {})
@@ -551,6 +558,8 @@ export class TaskEngine {
         recordChildFacts(task, result)
         outcome = runnerOutcome(result)
       } else {
+        runtime.stopReason ??= 'Parent closed'
+        task.cancel_reason ??= runtime.stopReason
         outcome = { status: 'aborted', errorMessage: runtime.stopReason }
       }
     } catch (error) {
@@ -600,7 +609,9 @@ export class TaskEngine {
         await this.domain.finish(task, runtime.stopStatus ?? terminal.status)
         task.notification_pending =
           (task.status !== 'canceled' || !runtime.stopReason) && task.notify_completion !== false
+        this.uncommittedTerminals.add(task.task_id)
         await this.persist()
+        this.uncommittedTerminals.delete(task.task_id)
         this.changed(task)
         if (task.notification_pending) {
           try {
@@ -608,7 +619,7 @@ export class TaskEngine {
           } catch {}
         }
       } catch (error) {
-        this.storageError = error
+        this.storageError ??= error
         this.changed(task)
       }
       if (!this.safety.retains(task.session_id)) {
@@ -629,8 +640,13 @@ export class TaskEngine {
       runtime.shutdownReason = reason
     }
     if (runtime?.sealed || !pending.has(task.status)) {
-      if (pending.has(task.status)) {
+      if (pending.has(task.status) || runtime?.sealed) {
         await runtime?.done
+      }
+      if (this.uncommittedTerminals.has(task.task_id)) {
+        await this.persist()
+        this.uncommittedTerminals.delete(task.task_id)
+        this.changed(task)
       }
       return this.summary(task)
     }
@@ -646,7 +662,10 @@ export class TaskEngine {
       if (terminal.lastError) {
         task.error = terminal.lastError.message
       }
+      // A failed save may have committed; retain the terminal producer and retry only the write.
+      this.uncommittedTerminals.add(task.task_id)
       await this.persist()
+      this.uncommittedTerminals.delete(task.task_id)
       this.changed(task)
       return this.summary(task)
     }
@@ -678,7 +697,7 @@ export class TaskEngine {
           try {
             await this.persist()
           } catch (failure) {
-            this.storageError = failure
+            this.storageError ??= failure
           }
           this.changed(task)
         })
@@ -796,7 +815,12 @@ export class TaskEngine {
       const tasks = this.getState().tasks
       await Promise.all(
         tasks
-          .filter((task) => pending.has(task.status))
+          .filter(
+            (task) =>
+              pending.has(task.status) ||
+              this.runtimes.has(task.task_id) ||
+              this.uncommittedTerminals.has(task.task_id)
+          )
           .map((task) => this.cancel(task, 'Parent closed', 'canceled', true))
       )
       const hadCleanupFailure = this.safety.quarantined
@@ -807,11 +831,17 @@ export class TaskEngine {
           .map(([, runtime]) => Promise.resolve(runtime.done))
       )
       const recovered = this.safety.confirmDisposed(confirmed, tasks)
-      if (hadCleanupFailure || recovered || this.safety.quarantined) {
+      if (
+        this.uncommittedTerminals.size ||
+        hadCleanupFailure ||
+        recovered ||
+        this.safety.quarantined
+      ) {
         try {
           await this.persist()
+          this.uncommittedTerminals.clear()
         } catch (error) {
-          this.storageError = error
+          this.storageError ??= error
           throw error
         }
       }
