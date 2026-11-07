@@ -11,6 +11,7 @@ const failure = (code: string, message: string): Error =>
 export class SessionSafety {
   private readonly restored = new Set<string>()
   private readonly unresolved = new Map<string, TaskRecord>()
+  private readonly orphaned = new Set<string>()
   private state?: SafetyState
 
   restore(state: TaskState): void {
@@ -20,6 +21,10 @@ export class SessionSafety {
       this.restored.add(task.session_id)
       if (task.stopError?.code === cleanupFailed && !confirmed.has(task.task_id)) {
         this.unresolved.set(task.session_id, task)
+        this.orphaned.add(task.session_id)
+      }
+      if (task.ownedCommandCleanupPending) {
+        this.orphaned.add(task.session_id)
       }
     }
   }
@@ -89,7 +94,8 @@ export class SessionSafety {
     const confirmed = new Set<string>()
     await Promise.all(
       [...sessions].map(async ([id, session]) => {
-        if (!session.child) {
+        // A new or empty child cannot certify effects owned by a previous process.
+        if (!session.child || this.orphaned.has(id)) {
           return
         }
         try {
@@ -111,7 +117,7 @@ export class SessionSafety {
     const before = confirmed.size
     let markerCleared = false
     for (const task of tasks) {
-      if (sessions.has(task.session_id)) {
+      if (sessions.has(task.session_id) && !this.orphaned.has(task.session_id)) {
         if (task.ownedCommandCleanupPending) {
           delete task.ownedCommandCleanupPending
           markerCleared = true
@@ -125,7 +131,9 @@ export class SessionSafety {
       this.state.cleanupConfirmed = [...confirmed]
     }
     for (const id of sessions) {
-      this.unresolved.delete(id)
+      if (!this.orphaned.has(id)) {
+        this.unresolved.delete(id)
+      }
     }
     return markerCleared || confirmed.size !== before
   }

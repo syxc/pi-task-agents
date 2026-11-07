@@ -112,6 +112,7 @@ export class TaskEngine {
   private disposing?: Promise<Set<string>>
   private storageError: unknown
   private readonly uncommittedTerminals = new Set<string>()
+  private uncommittedCleanup = false
 
   constructor({
     rootDir,
@@ -158,10 +159,15 @@ export class TaskEngine {
     }
     this.safety.restore(this.getState())
     for (const task of this.getState().tasks) {
-      if (task.ownedCommandCleanupPending) {
+      if (
+        task.ownedCommandCleanupPending &&
+        !(task.stopError?.code === 'CHILD_CLEANUP_FAILED' && this.safety.retains(task.session_id))
+      ) {
         this.safety.record(
           task,
-          new Error('Managed command cleanup was not confirmed before the previous owner exited'),
+          new Error(
+            'Child initialization or managed command cleanup was not confirmed before the previous owner exited'
+          ),
           true
         )
       }
@@ -535,9 +541,15 @@ export class TaskEngine {
       this.sessions.set(task.session_id, session)
     }
     session.active = task
+    let initializingChild = false
     runtime.ready = Promise.resolve()
       .then(async () => {
-        // Initialization must not outlive a failed running-row write and its owner cleanup.
+        initializingChild = !session.child
+        if (initializingChild) {
+          // The legacy command lease also covers initialization, before extensions can run.
+          task.ownedCommandCleanupPending = true
+        }
+        // A failed ownership write must never reach the factory.
         try {
           await this.persist()
         } catch (error) {
@@ -603,6 +615,22 @@ export class TaskEngine {
         }
         return session.child
       })
+      .catch((error: unknown) => {
+        // No invocation, or a factory's clean rejection, owns no remaining initialization effects.
+        if (
+          initializingChild &&
+          !session.child &&
+          !(
+            error &&
+            typeof error === 'object' &&
+            (('code' in error && error.code === 'CHILD_CLEANUP_FAILED') || 'cleanupChild' in error)
+          )
+        ) {
+          delete task.ownedCommandCleanupPending
+          initializingChild = false
+        }
+        throw error
+      })
       .finally(() => {
         runtime.initializing = false
       })
@@ -623,6 +651,18 @@ export class TaskEngine {
       if (child.sessionPath && child.sessionPath !== task.childSessionPath) {
         throw new Error('Child session path does not match assigned path')
       }
+      if (initializingChild && !runtime.initializationCanceled && !this.closed) {
+        // ready has handed off to the existing active-task contract. A canceled initializer
+        // keeps its lease until the original child has actually been disposed instead.
+        delete task.ownedCommandCleanupPending
+        initializingChild = false
+        try {
+          await this.persist()
+        } catch (error) {
+          this.latchStorageError(error)
+          throw error
+        }
+      }
       if (!runtime.stopReason && !this.closed) {
         const prompting = child.prompt(task.input.prompt, { turnId: task.sub_turn_id })
         startedResolve(child)
@@ -640,6 +680,7 @@ export class TaskEngine {
     } catch (error) {
       const failure = recordChildFailure(task, error)
       if (
+        !initializingChild &&
         failure.partialResult &&
         typeof failure.partialResult === 'object' &&
         'commandCleanupConfirmed' in failure.partialResult &&
@@ -675,7 +716,13 @@ export class TaskEngine {
         await runtime.stopWait?.catch(() => {})
       }
       if (task.ownedCommandCleanupPending) {
-        this.safety.record(task, new Error('Managed command cleanup is unconfirmed'), true)
+        if (!this.safety.retains(task.session_id)) {
+          this.safety.record(
+            task,
+            new Error('Child initialization or managed command cleanup is unconfirmed'),
+            true
+          )
+        }
         runtime.stopStatus ??= 'failed'
       }
       runtime.sealed = true
@@ -1135,15 +1182,13 @@ export class TaskEngine {
           .map(([, runtime]) => Promise.resolve(runtime.done))
       )
       const recovered = this.safety.confirmDisposed(confirmed, tasks)
-      if (
-        this.uncommittedTerminals.size ||
-        hadCleanupFailure ||
-        recovered ||
-        this.safety.quarantined
-      ) {
+      // A failed receipt write must still be retried after in-memory cleanup is confirmed.
+      this.uncommittedCleanup ||= hadCleanupFailure || recovered
+      if (this.uncommittedTerminals.size || this.uncommittedCleanup || this.safety.quarantined) {
         try {
           await this.persist()
           this.uncommittedTerminals.clear()
+          this.uncommittedCleanup = false
         } catch (error) {
           this.latchStorageError(error)
           throw error

@@ -58,7 +58,16 @@ test(
     const persist = engine.persist.bind(engine)
     let held = false
     engine.persist = async () => {
-      if (!held && engine.getState().tasks.some((task) => task.ownedCommandCleanupPending)) {
+      if (
+        !held &&
+        engine
+          .getState()
+          .tasks.some(
+            (task) =>
+              task.ownedCommandCleanupPending &&
+              engine.runtimes.get(task.task_id)?.initializing === false
+          )
+      ) {
         held = true
         entered.resolve()
         await release.promise
@@ -143,9 +152,10 @@ test(
       assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
       const session = engine.sessions.get(task.session_id)!
       assert.ok(session.child)
-      // The existing, now-confirmed owner supplies cleanup; no model or process is recreated.
+      // Even a handle injected from another owner cannot certify this copied orphan image.
       recovered.sessions.set(task.session_id, session)
-      await recovered.close()
+      await assert.rejects(recovered.close(), { code: 'CHILD_CLEANUP_FAILED' })
+      assert.equal((await recovered.query({ task_id: task.task_id })).cleanup_pending, true)
       assert.equal(replayed, 0)
 
       const shutdownPid = join(f.root, 'shutdown-command.pid'),
@@ -190,12 +200,8 @@ test(
     } finally {
       release.resolve()
       await engine.close()
-      if (recovered && !recovered.closed) {
-        for (const [id, session] of engine.sessions) {
-          recovered.sessions.set(id, session)
-        }
-        await recovered.close()
-      }
+      // Release only the fixture's store lock; the copied orphan must remain quarantined.
+      await recovered?.store.close()
     }
   }
 )

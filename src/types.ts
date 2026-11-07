@@ -145,7 +145,7 @@ export interface TaskRecord {
   cursor: number
   notification_pending: boolean
   notify_completion: boolean
-  /** Internal durable ownership marker; never a public completion or cleanup claim. */
+  /** Durable initialization/command lease. Keep the legacy field name for existing snapshots. */
   ownedCommandCleanupPending?: true
   final_text?: string
   /** Historical runtime completion facts, never a review verdict or file observation. */
