@@ -1,5 +1,5 @@
 export const DEFAULT_MAX_CONCURRENCY = 4
-export const MAX_CONCURRENCY = 64
+export const MAX_CONCURRENCY = 10
 
 /** Resolve one owner's capacity without changing queue or cleanup accounting. */
 export function resolveMaxConcurrency(

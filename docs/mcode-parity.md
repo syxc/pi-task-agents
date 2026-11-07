@@ -33,7 +33,7 @@
 | Task 标题规范化、允许空 prompt、无效参数拒绝 | `LR/api/local-task-input.ts` | `task-domain.ts`、`config.ts` | 对应实现；`engine.test.ts` 的 Unicode、空 prompt 和输入边界回归 |
 | 默认前台等待，显式后台仅返回准入回执 | `AT/local-task.ts`、`LR/api/local-task-runner.ts` | `extension.ts`、`engine.ts` | 对应实现；`engine.test.ts`、`tool-result-golden.test.ts` |
 | 独立子会话，不复制父对话 | `LR/api/local-task-runner.ts`、子会话共享契约 | `pi-backend.ts`、`child-session-file.ts` | 对应实现；`pi-backend.test.ts` 的独立历史与续接 |
-| 队列、并发占用、取消排队任务 | `LR/background-task/runner.ts` | `engine.ts`、`engine-admission.ts` | Pi 适配；每个父会话默认并发 4，可配置 1–64；`engine.test.ts` 覆盖并发、排队和取消 |
+| 队列、并发占用、取消排队任务 | `LR/background-task/runner.ts` | `engine.ts`、`engine-admission.ts` | Pi 适配；每个父会话默认并发 4，可配置 1 至 10；`config.test.ts`、`engine.test.ts` 覆盖合法 10、拒绝 11，以及 10 个占槽、第 11 个排队、空槽调度、排队取消和清理占槽 |
 | 已准入请求去重，持久化先于执行 | `LR/api/local-task-append.ts` | `engine-admission.ts`、`engine-append.ts` | 对应实现；`engine.test.ts` 的提交前后崩溃、去重回执和补偿回归 |
 | 运行中 append 合并到原 Turn，排队时不重复派发 | `LR/api/local-task-append.ts`、steering service | `engine-append.ts`、`child-steering.ts` | 对应实现；`engine.test.ts`、`task-lineage.test.ts` |
 | 闲置 append 新建任务、沿用子历史及权限快照 | `LR/api/local-task-append-lifecycle.ts` | `engine.ts`、`engine-session-safety.ts` | 对应实现；续接、冻结 profile、重启和历史权限回归 |

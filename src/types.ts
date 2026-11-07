@@ -187,7 +187,7 @@ export interface TaskEngineOptions {
   rootDir: string
   parentId: string
   cwd: string
-  /** Per-owner capacity: defaults to 4; explicit values must be safe integers from 1 to 64. */
+  /** Per-owner capacity: defaults to 4; explicit values must be safe integers from 1 to 10. */
   maxConcurrency?: number
   createChild: CreateChild
   notify?: (task: TaskSummary) => void | Promise<void>
@@ -221,7 +221,7 @@ export interface ConfigLoadOptions {
 export interface TaskAgentsConfig {
   readonly cwd: string
   readonly agentDir: string
-  /** loadConfig resolves omission to 4; explicit values must be safe integers from 1 to 64. */
+  /** loadConfig resolves omission to 4; explicit values must be safe integers from 1 to 10. */
   readonly maxConcurrency?: number
   readonly roles: Readonly<Record<string, AgentProfile>>
   readonly diagnostics: readonly string[]

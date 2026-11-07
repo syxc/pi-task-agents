@@ -2398,13 +2398,83 @@ test('default concurrency runs four tasks per owner and queues the fifth until c
   assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
 })
 
-test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe values', async (t) => {
+test('maximum concurrency runs ten tasks, queues the eleventh, cancels queued work and fills a freed slot', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 10 })
+  const tasks = await Promise.all(
+    Array.from({ length: 12 }, (_, index) => engine.start(input(`maximum ${index}`), profile))
+  )
+  await waitFor(() => children.length === 10 && children.every((child) => child.calls.length === 1))
+  assert.equal(engine.maxConcurrency, 10)
+  assert.equal(engine.runtimes.size, 10)
+  assert.deepEqual(
+    (await engine.query()).map((task) => task.status),
+    [...Array.from({ length: 10 }, () => 'running'), 'queued', 'queued']
+  )
+  const queued = tasks[10]
+  const canceled = tasks[11]
+  assert.equal(queued.status, 'queued')
+  assert.equal((await engine.stop(canceled.task_id)).status, 'canceled')
+  assert.equal(children.length, 10)
+  assert.equal(engine.runtimes.size, 10)
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'queued')
+
+  await finish(engine, children[0])
+  await waitFor(() => children[10]?.calls.length === 1)
+  assert.equal(children.length, 11)
+  assert.equal(engine.runtimes.size, 10)
+  assert.equal(children[10].sessionPath, queued.childSessionPath)
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
+  assert.equal((await engine.query({ task_id: canceled.task_id })).status, 'canceled')
+  assert.equal(
+    children.some((child) => child.sessionPath === canceled.childSessionPath),
+    false
+  )
+})
+
+test('maximum concurrency retains a stopping task slot until cleanup settles', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 10 })
+  const tasks = await Promise.all(
+    Array.from({ length: 11 }, (_, index) => engine.start(input(`cleanup ${index}`), profile))
+  )
+  await waitFor(() => children.length === 10 && children.every((child) => child.calls.length === 1))
+  const first = tasks[0]
+  const queued = tasks[10]
+  const runtime = engine.runtimes.get(first.task_id)
+  const releaseAbort = deferred()
+  children[0].abort = () => releaseAbort.promise
+  const stopping = engine.stop(first.task_id)
+  try {
+    await waitFor(
+      async () => (await engine.query({ task_id: first.task_id })).status === 'stopping'
+    )
+    settleResult(children[0].calls[0], 'aborted', '', 'Interrupted')
+    await tick()
+    engine.pump()
+    assert.equal(engine.runtimes.get(first.task_id), runtime)
+    assert.equal(engine.runtimes.size, 10)
+    assert.equal(children.length, 10)
+    assert.equal((await engine.query({ task_id: queued.task_id })).status, 'queued')
+  } finally {
+    releaseAbort.resolve()
+    await stopping
+  }
+  await waitFor(() => children[10]?.calls.length === 1)
+  assert.equal((await engine.query({ task_id: first.task_id })).status, 'canceled')
+  assert.equal((await engine.query({ task_id: queued.task_id })).status, 'running')
+  assert.equal(children[10].sessionPath, queued.childSessionPath)
+  assert.equal(engine.runtimes.has(first.task_id), false)
+  assert.equal(engine.runtimes.size, 10)
+})
+
+test('direct engine concurrency accepts 1 and 10 and rejects invalid or unsafe values', async (t) => {
   const { engine, rootDir, createChild } = await setup(t, { maxConcurrency: 1 })
   assert.equal(engine.maxConcurrency, 1)
   for (const value of [
     0,
     -1,
     1.5,
+    11,
+    64,
     65,
     Number.MAX_SAFE_INTEGER,
     Number.MAX_SAFE_INTEGER + 1,
@@ -2424,7 +2494,7 @@ test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe v
           createChild,
           maxConcurrency: value as number
         }),
-      /Invalid maxConcurrency: expected an integer from 1 to 64/
+      /Invalid maxConcurrency: expected an integer from 1 to 10/
     )
   }
   const explicit = new TaskEngine({
@@ -2432,9 +2502,9 @@ test('direct engine concurrency accepts 1 and 64 and rejects invalid or unsafe v
     parentId: 'host-policy',
     cwd: rootDir,
     createChild,
-    maxConcurrency: 64
+    maxConcurrency: 10
   })
-  assert.equal(explicit.maxConcurrency, 64)
+  assert.equal(explicit.maxConcurrency, 10)
   await explicit.close()
 })
 
