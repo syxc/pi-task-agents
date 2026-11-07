@@ -328,7 +328,14 @@ export class TaskController {
       .slice(0, 6)
     ctx.ui.setWidget(
       'task-agents',
-      visible.length ? visible.map((task) => taskProgress(task)) : undefined
+      visible.length
+        ? [
+            ...visible.map((task) => taskProgress(task)),
+            ...(pending.length > visible.length
+              ? [`${pending.length - visible.length} more tasks · /tasks list`]
+              : [])
+          ]
+        : undefined
     )
     if (pending.length && !this.uiTimer) {
       this.uiTimer = setTimeout(() => {
@@ -533,22 +540,26 @@ export class TaskController {
     this.receiptTimer = undefined
   }
 
-  async stopAll(reason = 'Parent canceled'): Promise<void> {
+  async stopAll(reason = 'Parent canceled'): Promise<TaskSummary[]> {
     this.pause()
     for (const admission of this.admissions) {
       admission.abort()
     }
     const engine = this.engine
     if (!engine) {
-      return
+      return []
     }
     const tasks = await engine.query()
-    await Promise.all(
+    const results = await Promise.all(
       tasks
-        .filter((task) => isActiveTaskStatus(task.status))
-        .map((task) => engine.stop(task.task_id, reason))
+        .filter((task) => isActiveTaskStatus(task.status) || task.cleanup_pending)
+        // Terminal cleanup holds cannot be stopped again, but must remain in the report.
+        .map(async (task) =>
+          isActiveTaskStatus(task.status) ? engine.stop(task.task_id, reason) : task
+        )
     )
     await this.updateUI()
+    return results
   }
 
   private async closeOwner(preserve = false): Promise<void> {
