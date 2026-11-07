@@ -93,26 +93,54 @@ export function taskCompletionNotice(task: TaskSummary): string {
 
 const taskIdentifier = (task: TaskSummary) => truncateToWidth(clean(task.task_id), 8, '')
 
-function taskDetails(task: TaskSummary, now: number): string {
-  const reason = task.stopError?.message ?? task.error ?? task.cancel_reason
-  return [
-    ...(reason ? [clean(reason)] : []),
-    ...(task.activity ? [clean(task.activity)] : []),
-    taskElapsed(task, now),
-    clean(task.agent_name ?? ''),
-    clean(task.description || task.task_id)
-  ]
+const taskReason = (task: TaskSummary) =>
+  clean(task.stopError?.message ?? task.error ?? task.cancel_reason ?? '')
+
+function taskActivity(task: TaskSummary): string {
+  const activity = clean(task.activity ?? '')
+  if (!activity) {
+    return ''
+  }
+  // A completed tool does not imply that its owning task has finished.
+  const label = /: (done|failed)$/.test(activity) || activity === 'Completed' ? 'last' : 'activity'
+  return `${label}: ${activity}`
+}
+
+function taskRow(task: TaskSummary, now: number, columns: number, cleanup = task.cleanup_pending) {
+  const state = [task.status, ...(cleanup ? ['cleanup pending'] : [])]
+  const description = clean(task.description || task.task_id)
+  const role = clean(task.agent_name ?? '')
+  const identity = [...state, role, taskIdentifier(task)].filter(Boolean).join(' · ')
+  // Drop the role before it can hide the short ID or leave no useful goal prefix.
+  const heading =
+    visibleWidth(identity) + 3 + Math.min(6, visibleWidth(description)) <= columns
+      ? identity
+      : [...state, taskIdentifier(task)].join(' · ')
+  const reason = taskReason(task)
+  const detail = [task.cleanup_pending ? reason : '', description].filter(Boolean).join(' · ')
+  const available = columns - visibleWidth(heading) - 3
+  if (available < Math.min(4, visibleWidth(detail))) {
+    return heading
+  }
+  const elapsed = taskElapsed(task, now)
+  // Keep the existing clock visible when there is still room for a useful goal.
+  const clockWidth = elapsed ? 3 + visibleWidth(elapsed) : 0
+  const reserveClock =
+    !task.cleanup_pending && available >= Math.min(8, visibleWidth(detail)) + clockWidth
+  const goalColumns = available - (reserveClock ? clockWidth : 0)
+  const goal = truncateToWidth(detail, goalColumns, '…')
+  const line = [heading, goal, reserveClock ? elapsed : ''].filter(Boolean).join(' · ')
+  if (visibleWidth(detail) > goalColumns || visibleWidth(line) + 4 > columns) {
+    return line
+  }
+  const tail = [reserveClock ? '' : elapsed, task.cleanup_pending ? '' : reason, taskActivity(task)]
     .filter(Boolean)
     .join(' · ')
+  return tail ? truncateToWidth(`${line} · ${tail}`, columns, '…') : line
 }
 
 export function taskProgress(task: TaskSummary, now = Date.now()): string {
-  return [
-    task.status,
-    ...(task.cleanup_pending ? ['cleanup pending'] : []),
-    taskIdentifier(task),
-    taskDetails(task, now)
-  ].join(' · ')
+  return taskRow(task, now, Infinity)
 }
 
 export function taskWidget(
@@ -140,17 +168,30 @@ export function taskWidget(
           visibleWidth(`${task.status} · cleanup pending · ${taskIdentifier(task)}`) > columns
         const rows = splitCleanup
           ? [
-              `${task.status} · ${taskIdentifier(task)}`,
-              `cleanup pending · ${taskDetails(task, now)}`
+              taskRow(task, now, columns, false),
+              [
+                'cleanup pending',
+                taskReason(task),
+                clean(task.description || task.task_id),
+                taskElapsed(task, now),
+                taskActivity(task)
+              ]
+                .filter(Boolean)
+                .join(' · ')
             ]
-          : [taskProgress(task, now)]
+          : [taskRow(task, now, columns)]
         return rows.map((line) => theme.fg(color, truncateToWidth(line, columns, '…')))
       })
       if (hidden) {
         const full = `${hidden} more tasks · /tasks list`
-        const label = visibleWidth(full) <= columns ? full : `${hidden} more · /tasks list`
-        // Preserve the count before the hint, even in extremely narrow terminals.
-        lines.push(theme.fg('dim', truncateToWidth(label, columns, '')))
+        const compact = `${hidden} more /tasks list`
+        const label =
+          visibleWidth(full) <= columns
+            ? full
+            : visibleWidth(compact) <= columns
+              ? compact
+              : `${hidden} more`
+        lines.push(theme.fg('dim', truncateToWidth(label, columns, '…')))
       }
       return lines
     }

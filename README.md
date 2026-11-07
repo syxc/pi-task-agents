@@ -43,7 +43,7 @@ pi install git:github.com/syxc/pi-task-agents
 
 续接保留子历史、角色及权限上界。查询保留失败或停止原因；新续接任务另有 `parent_task_id` 和执行模式，后台 append 标为 `append`，旧记录不补推来源。
 
-- 查看：`/tasks list`、`/tasks roles`、`/tasks show <id>`。状态栏显示运行数和排队数，任务区域显示耗时与当前活动。
+- 查看：`/tasks list`、`/tasks roles`、`/tasks show <id>`。状态栏显示运行数和排队数；任务区域优先显示状态和任务身份，空间允许时显示目标、耗时及活动。
 - 停止：`/tasks stop <id>`、`/tasks stop-all`。
 - 恢复通知：`/tasks resume`，不重启任务。
 

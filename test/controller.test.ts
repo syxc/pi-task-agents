@@ -1267,7 +1267,8 @@ test('SDK task widget bounds CJK rows, prioritizes cleanup and retains hidden co
       assert.match(lines.at(-1), /3 more.*\/tasks list/)
       if (width >= 40) {
         assert.match(lines[0], /cleanup/)
-        assert.match(lines[1], /bash: running/)
+        assert.match(lines[1], /worker.*active.*长中文任务/)
+        assert.doesNotMatch(lines[1], /bash: running/, 'long goals outrank activity')
       }
       if (width >= 80) {
         assert.match(lines[0], /dispose failed/)
@@ -1446,7 +1447,7 @@ test('SDK task widget refresh uses differential rendering and only the existing 
   }
   try {
     const engine = await f.controller.ensure(f.ctx)
-    engine.tasks = [{ task_id: 'active', status: 'running', description: '中文👩‍🚒é'.repeat(50) }]
+    engine.tasks = [{ task_id: 'active', status: 'running', description: '中文👩‍🚒é' }]
     const timeout = t.mock.method(globalThis, 'setTimeout')
     const interval = t.mock.method(globalThis, 'setInterval')
     await f.controller.updateUI()
