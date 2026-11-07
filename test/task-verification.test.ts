@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
-import ts from 'typescript'
+import ts from 'typescript-fixture'
 import {
   parseModelVerdict,
   buildVerification,

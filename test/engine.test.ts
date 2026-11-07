@@ -2774,7 +2774,7 @@ function upstreamSteeringFixture(): Promise<FixtureFactory> {
       'utf8'
     )
     assert.equal(createHash('sha256').update(source).digest('hex'), watched.sha256)
-    const ts = await import('typescript')
+    const ts = await import('typescript-fixture')
     const compiled = ts.transpileModule(source, {
       compilerOptions: {
         target: ts.ScriptTarget.ES2023,
@@ -3133,7 +3133,7 @@ test('source comparison: task turn encoding is an unchanged reversible index and
     ),
     source
   )
-  const ts = await import('typescript')
+  const ts = await import('typescript-fixture')
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2023,
@@ -3195,7 +3195,7 @@ function upstreamTerminalFixture(): Promise<SourceTerminalWriter> {
       await readFile(new URL('../upstream.lock.json', import.meta.url), 'utf8')
     )
     assert.equal(lock.commit, '3c21163c85a9684030cb147bfef48c6284fa3c46')
-    const ts = await import('typescript')
+    const ts = await import('typescript-fixture')
     const compiled = ts.transpileModule(source, {
       compilerOptions: {
         target: ts.ScriptTarget.ES2023,
