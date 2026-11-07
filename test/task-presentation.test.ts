@@ -55,6 +55,25 @@ test('task elapsed times are bounded, readable, and do not invent missing timest
   assert.equal(taskElapsed({ created_at }, 0), '0s')
 })
 
+test('progress preserves graphemes at former UTF-16 cutoffs and puts critical state first', () => {
+  for (const grapheme of ['😀', '👩‍🚒', '🇨🇳', 'é', '✊🏽']) {
+    const description = '中'.repeat(99) + grapheme + ' description tail'
+    const reason = '错'.repeat(159) + grapheme + ' reason tail'
+    const line = taskProgress({
+      task_id: 'unicode',
+      status: 'failed',
+      agent_name: 'worker',
+      description,
+      error: reason,
+      cleanup_pending: true
+    } as Parameters<typeof taskProgress>[0])
+    assert.equal(line.isWellFormed(), true)
+    assert.ok(line.includes(description))
+    assert.ok(line.includes(reason))
+    assert.ok(line.startsWith('failed · cleanup pending · '))
+  }
+})
+
 test('progress shows activity and failure reasons without terminal control characters', () => {
   const line = taskProgress({
     task_id: 't1',
