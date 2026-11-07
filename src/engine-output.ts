@@ -23,6 +23,7 @@ export class TaskOutputReads {
     read: (offset: number) => Promise<T>
   ): Promise<T> {
     const cursorKey = JSON.stringify([this.owner, taskId])
+    let committed = false
     const previous = runtime.reads.get(cursorKey) ?? Promise.resolve()
     const result = previous
       .catch(() => {})
@@ -30,7 +31,9 @@ export class TaskOutputReads {
         aborted(signal)
         const output = await read(runtime.cursors.get(cursorKey) ?? 0)
         aborted(signal)
+        // A committed cursor must be accompanied by a delivered result.
         runtime.cursors.set(cursorKey, output.next_offset)
+        committed = true
         return output
       })
     runtime.reads.set(cursorKey, result)
@@ -40,6 +43,35 @@ export class TaskOutputReads {
       }
     }
     result.then(cleanup, cleanup)
-    return result
+    if (!signal) {
+      return result
+    }
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort)
+        if (committed) {
+          return
+        }
+        try {
+          aborted(signal)
+        } catch (error) {
+          reject(error)
+        }
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      if (signal.aborted) {
+        onAbort()
+      }
+      result.then(
+        (value: T) => {
+          signal.removeEventListener('abort', onAbort)
+          resolve(value)
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', onAbort)
+          reject(error)
+        }
+      )
+    })
   }
 }

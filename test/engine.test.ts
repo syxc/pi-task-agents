@@ -2810,6 +2810,30 @@ test('regression: automatic reads serialize the wait and cursor update rather th
   assert.equal(engine.waiters.size, 0)
 })
 
+test(
+  'canceling a queued automatic output read leaves the task and cursor intact',
+  { timeout: 10000 },
+  async (t) => {
+    const { engine, children } = await setup(t)
+    const task = await engine.start(input(), profile)
+    await waitFor(() => children[0]?.calls.length)
+    const first = engine.output(task.task_id, { wait_ms: 30000 })
+    await waitFor(() => engine.waiters.size === 1)
+    const controller = new AbortController()
+    const canceled = engine.output(task.task_id, { wait_ms: 30000, signal: controller.signal })
+    controller.abort()
+    await assert.rejects(canceled, { name: 'AbortError' })
+    assert.equal((await engine.query({ task_id: task.task_id })).status, 'running')
+    children[0].calls[0].resolve(terminalResult('succeeded', 'hello'))
+    const output = await first
+    assert.equal(output.output, 'hello')
+    assert.equal(output.next_offset, 5)
+    const next = await engine.output(task.task_id)
+    assert.equal(next.offset, 5)
+    assert.equal(next.output, '')
+  }
+)
+
 test('regression: reversible task turn IDs are durable before prompt, stable on replay and change with an idle continuation', async (t) => {
   const { engine, children, rootDir, createChild } = await setup(t)
   engine.createChild = async (args) => {
