@@ -368,7 +368,11 @@ export async function createChildCommands(options: {
         throw new Error(task.lastError?.message ?? 'Command admission failed')
       }
       await options.onStarted?.(run.id)
-      running.get(task.taskId)!.admit()
+      const admitted = running.get(task.taskId)
+      if (!admitted) {
+        throw new Error('Owned command stopped before execution could start')
+      }
+      admitted.admit()
       return reply({ command_id: task.taskId, status: task.status })
     } catch (error) {
       const execution = created ? running.get(created) : undefined

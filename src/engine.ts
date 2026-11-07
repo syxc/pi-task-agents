@@ -327,7 +327,9 @@ export class TaskEngine {
         await cancellation
         // Keep execution facts intact, but do not acknowledge an unconfirmed terminal snapshot.
         if (this.uncommittedTerminals.has(task.task_id)) {
-          throw this.storageError
+          // A failed queued cancellation is retryable and does not latch a storage error,
+          // so the waiter still needs a defined rejection instead of throwing undefined.
+          throw this.storageError ?? new Error('Task stop persistence is unconfirmed')
         }
         return { ...this.summary(task), mode: result.mode, accepted: result.accepted }
       })()

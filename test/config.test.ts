@@ -209,6 +209,19 @@ test('a global config file symlink cannot alias an untrusted project config', as
   assert.equal(config.diagnostics.length, 1)
 })
 
+test('a trusted project config aliased to the global file is merged once', async (t) => {
+  const paths = await setup(t)
+  await save(paths.global, {
+    maxConcurrency: 3,
+    roles: { worker: { instructions: 'Shared note.' } }
+  })
+  await symlink(paths.global, paths.project)
+  const config = await loadConfig({ ...paths, projectTrusted: true })
+  assert.equal(config.maxConcurrency, 3)
+  assert.deepEqual(config.sources, [paths.global])
+  assert.equal(profile(config, 'worker').instructions.match(/Shared note\./g)?.length, 1)
+})
+
 test('an agentDir alias preserves missing-file and dangling-symlink diagnostics', async (t) => {
   const paths = await setup(t)
   const alias = join(paths.dir, 'project-agent-alias')

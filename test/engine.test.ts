@@ -670,6 +670,36 @@ test('regression: queued cancel retries a failed terminal write without repeatin
   assert.equal(children.length, 1)
 })
 
+test('regression: an unconfirmed queued cancellation rejects its foreground waiter with a defined error', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 1 })
+  await engine.start(input('blocker'), profile)
+  const foreground = engine.start(
+    { ...input('blocked foreground'), run_in_background: false },
+    profile
+  )
+  await waitFor(() => children[0]?.calls.length)
+  const queued = (await engine.query()).find((task) => task.status === 'queued')
+  assert.ok(queued)
+  const save = engine.store.save.bind(engine.store)
+  const fault = new Error('queued cancel write failed')
+  engine.store.save = async () => {
+    throw fault
+  }
+  const rejected = assert.rejects(foreground, (error) => {
+    assert.ok(
+      error instanceof Error,
+      'an unconfirmed terminal write must not reject with undefined'
+    )
+    assert.match(error.message, /unconfirmed/)
+    return true
+  })
+  await assert.rejects(engine.stop(queued.task_id, 'stop queued'), fault)
+  engine.changed(engine.task(queued.task_id))
+  await rejected
+  engine.store.save = save
+  await engine.close()
+})
+
 test('regression: close retries uncertain queued cancellations and retains ownership on another write failure', async (t) => {
   /* oxlint-disable no-await-in-loop -- Each case owns a separate store and completes its close retries before cleanup. */
   for (const committed of [false, true]) {

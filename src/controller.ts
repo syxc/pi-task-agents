@@ -135,6 +135,25 @@ export class TaskController {
       }
       const rootDir = join(this.agentDir, 'task-agents', 'sessions')
       let owner = getOwner(rootDir, id)
+      if (owner?.cleanupFailed) {
+        // A previous close could not prove cleanup. Its store lock and child leases
+        // remain owned, so retry that close before reusing or replacing the engine.
+        const stale = owner
+        let failure: unknown
+        try {
+          await stale.engine.close()
+        } catch (error) {
+          failure = error
+        }
+        if (generation !== this.generation) {
+          throw canceled()
+        }
+        if (failure) {
+          throw failure
+        }
+        forgetOwner(stale)
+        owner = undefined
+      }
       if (owner) {
         if (owner.attached) {
           throw new Error('Task owner is already attached')
@@ -180,7 +199,13 @@ export class TaskController {
           await engine.close()
           throw canceled()
         }
-        retainOwner(handle)
+        try {
+          retainOwner(handle)
+        } catch (error) {
+          // Losing the retention race must not leave an initialized store lock behind.
+          await engine.close().catch(() => {})
+          throw error
+        }
         owner = handle
       }
       owner.attached = this
@@ -264,17 +289,15 @@ export class TaskController {
     }
     const lines = text.split('\n')
     const entries: unknown[] = []
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index]
+    for (const line of lines) {
       if (!line.trim()) {
         continue
       }
       try {
         entries.push(JSON.parse(line) as unknown)
       } catch {
-        if (index !== lines.length - 1) {
-          throw new Error('Parent history contains an invalid receipt record')
-        }
+        // Pi skips torn or malformed JSONL records and repairs a missing final
+        // newline, so one crashed append must not block every later receipt.
       }
     }
     return entries
@@ -695,22 +718,29 @@ export class TaskController {
       }
       released = true
     } finally {
-      // Failed cleanup retains the owner lease and engine for an explicit retry.
-      if (released) {
-        if (owner) {
-          owner.attached = undefined
+      // An unconfirmed close keeps the engine retained for a retry, but this
+      // controller must release its attachment and live parent callbacks.
+      if (owner) {
+        owner.attached = undefined
+        if (released) {
           if (!preserve) {
             forgetOwner(owner)
           }
+        } else {
+          owner.cleanupFailed = true
         }
-        this.owner = undefined
-        this.engine = undefined
-        this.inFlight.clear()
-        this.attempts.clear()
+      }
+      this.owner = undefined
+      this.engine = undefined
+      this.inFlight.clear()
+      this.attempts.clear()
+      try {
         if (this.ctx?.hasUI) {
           this.ctx.ui.setStatus('task-agents', undefined)
           this.ctx.ui.setWidget('task-agents', undefined)
         }
+      } catch {
+        // UI teardown is best effort; control state must still be released.
       }
       this.closing = false
     }
@@ -728,10 +758,14 @@ export class TaskController {
       admission.abort()
     }
     await this.initializing
+    let closed = false
     try {
       await this.closeOwner(preserve)
+      closed = true
     } finally {
-      if (!preserve) {
+      // Do not immediately retry a close that just failed; the retained owner keeps
+      // its quarantine and is retried by a later shutdown or reattach.
+      if (!preserve && closed) {
         await closeDetachedOwners(join(this.agentDir, 'task-agents', 'sessions'))
       }
     }

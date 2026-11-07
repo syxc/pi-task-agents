@@ -412,8 +412,12 @@ export async function loadConfig({
   }
   const globalFile = resolve(agentDir, 'task-agents.json')
   const projectFile = resolve(cwd, '.pi/task-agents.json')
-  const globalIsProject = !projectTrusted && (await sameConfigFile(globalFile, projectFile))
-  const files = [...(globalIsProject ? [] : [globalFile]), ...(projectTrusted ? [projectFile] : [])]
+  const aliased = await sameConfigFile(globalFile, projectFile)
+  // An untrusted alias is skipped entirely; a trusted alias is one configuration layer, not two.
+  const files = [
+    ...(!aliased || projectTrusted ? [globalFile] : []),
+    ...(projectTrusted && !aliased ? [projectFile] : [])
+  ]
   for (const file of new Set(files)) {
     // oxlint-disable-next-line no-await-in-loop -- Preserve configuration order and stop at the first invalid resource.
     const config = await readConfig(file)

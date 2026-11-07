@@ -15,6 +15,8 @@ export interface ControllerOwner {
   codemodeEnabled?: boolean
   readCodemodeEnabled?: () => boolean
   hostRuntime?: ParentRuntimeSnapshot
+  // A retained engine whose close attempt failed; reuse requires a confirmed close retry.
+  cleanupFailed?: true
 }
 
 // Pi reloads extension modules on session replacement. Keep detached engines in

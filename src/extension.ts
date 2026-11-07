@@ -414,9 +414,13 @@ export function registerTaskAgents(
     }
   })
   pi.on('session_shutdown', async (event) => {
-    // Drain delegated tools while the owner's native hooks and MCP connections still exist.
-    await controller.shutdown(event.reason)
-    parentTools.invalidate()
+    try {
+      // Drain delegated tools while the owner's native hooks and MCP connections still exist.
+      await controller.shutdown(event.reason)
+    } finally {
+      // A failed close must not keep stale runtime captures or dispatches alive.
+      parentTools.invalidate()
+    }
   })
   pi.on('before_agent_start', async (event, ctx) => {
     const epoch = controller.cancelEpoch
