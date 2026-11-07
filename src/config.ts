@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AgentProfile, ConfigLoadOptions, TaskAgentsConfig } from './types.ts'
 import { isResourceName, within } from './resource-selection.ts'
+import { DEFAULT_MAX_CONCURRENCY, resolveMaxConcurrency } from './concurrency.ts'
 
 type RoleOptions = { -readonly [K in keyof Omit<AgentProfile, 'name'>]?: AgentProfile[K] }
 type RoleInput = Omit<RoleOptions, 'thinking'> & { thinking?: string }
@@ -286,8 +287,7 @@ async function readConfig(file: string): Promise<ParsedConfig | undefined> {
   object(config, file, ['maxConcurrency', 'roles'])
   let maxConcurrency: number | undefined
   if (own(config, 'maxConcurrency')) {
-    integer(config.maxConcurrency, file + '.maxConcurrency', 1, 64)
-    maxConcurrency = config.maxConcurrency
+    maxConcurrency = resolveMaxConcurrency(config.maxConcurrency, file + '.maxConcurrency')
   }
   if (own(config, 'roles')) {
     object(config.roles, file + '.roles')
@@ -398,13 +398,14 @@ export async function loadConfig({
   const result: {
     cwd: string
     agentDir: string
-    maxConcurrency?: number
+    maxConcurrency: number
     roles: Record<string, AgentProfile>
     diagnostics: string[]
     sources: string[]
   } = {
     cwd: resolve(cwd),
     agentDir: resolve(agentDir),
+    maxConcurrency: DEFAULT_MAX_CONCURRENCY,
     roles,
     diagnostics: [] as string[],
     sources: [] as string[]

@@ -50,8 +50,8 @@ function assertFrozen(value: unknown): void {
 test('missing configuration inherits models/resources and selects native Pi tools', async (t) => {
   const paths = await setup(t)
   const config = await loadConfig(paths)
-  assert.equal(config.maxConcurrency, undefined)
-  assert.equal(Object.hasOwn(config, 'maxConcurrency'), false)
+  assert.equal(config.maxConcurrency, 4)
+  assert.equal(Object.hasOwn(config, 'maxConcurrency'), true)
   assert.deepEqual(config.sources, [])
   assert.deepEqual(config.diagnostics, [])
   assert.deepEqual(Object.keys(config.roles), ['explore', 'worker', 'verifier', 'mavis'])
@@ -109,6 +109,30 @@ test('global and trusted project layers append instructions and replace explicit
   assert.ok(actual.instructions.endsWith('Global note.\n\nProject note.'))
 })
 
+test('concurrency layers inherit defaults and global values without trusting project overrides', async (t) => {
+  const paths = await setup(t)
+  await save(paths.global, { roles: { worker: { instructions: 'Global role only.' } } })
+  await save(paths.project, { roles: { worker: { instructions: 'Project role only.' } } })
+  assert.equal((await loadConfig({ ...paths, projectTrusted: true })).maxConcurrency, 4)
+
+  await save(paths.global, { maxConcurrency: 9 })
+  assert.equal((await loadConfig({ ...paths, projectTrusted: true })).maxConcurrency, 9)
+  await save(paths.project, { maxConcurrency: 2 })
+  assert.equal((await loadConfig(paths)).maxConcurrency, 9)
+  assert.equal((await loadConfig({ ...paths, projectTrusted: true })).maxConcurrency, 2)
+
+  await save(paths.global, {})
+  await save(paths.project, { maxConcurrency: 65 })
+  const untrusted = await loadConfig(paths)
+  assert.equal(untrusted.maxConcurrency, 4)
+  assert.deepEqual(untrusted.sources, [paths.global])
+  assert.match(untrusted.diagnostics[0], /Untrusted project configuration ignored/)
+  await assert.rejects(
+    loadConfig({ ...paths, projectTrusted: true }),
+    /maxConcurrency: expected an integer from 1 to 64/
+  )
+})
+
 test('untrusted project config is not parsed or executed and gets a clear diagnostic', async (t) => {
   const paths = await setup(t)
   await save(paths.global, { maxConcurrency: 3 })
@@ -127,7 +151,7 @@ test('an agentDir equal to project .pi cannot bypass project trust', async (t) =
   await save(paths.project, { maxConcurrency: 8 })
   const options = { cwd: paths.cwd, agentDir: dirname(paths.project) }
   const untrusted = await loadConfig(options)
-  assert.equal(untrusted.maxConcurrency, undefined)
+  assert.equal(untrusted.maxConcurrency, 4)
   assert.deepEqual(untrusted.sources, [])
   assert.equal(untrusted.diagnostics.length, 1)
   const trusted = await loadConfig({ ...options, projectTrusted: true })
@@ -141,7 +165,7 @@ test('a symlink agentDir alias cannot load an untrusted project config', async (
   await symlink(dirname(paths.project), alias)
   await save(paths.project, { maxConcurrency: 17, roles: { worker: { tools: ['bash'] } } })
   const config = await loadConfig({ cwd: paths.cwd, agentDir: alias })
-  assert.equal(config.maxConcurrency, undefined)
+  assert.equal(config.maxConcurrency, 4)
   assert.deepEqual(profile(config, 'worker').tools, roleTools('worker'))
   assert.deepEqual(config.sources, [])
   assert.equal(config.diagnostics.length, 1)
@@ -149,7 +173,7 @@ test('a symlink agentDir alias cannot load an untrusted project config', async (
   assert.match(config.diagnostics[0], /Untrusted project configuration ignored/)
   await writeFile(paths.project, '{ invalid and untrusted JSON')
   const invalid = await loadConfig({ cwd: paths.cwd, agentDir: alias })
-  assert.equal(invalid.maxConcurrency, undefined)
+  assert.equal(invalid.maxConcurrency, 4)
   assert.deepEqual(invalid.sources, [])
   assert.equal(invalid.diagnostics.length, 1)
 })
@@ -159,7 +183,7 @@ test('a global config file symlink cannot alias an untrusted project config', as
   await save(paths.project, { maxConcurrency: 17 })
   await symlink(paths.project, paths.global)
   const config = await loadConfig(paths)
-  assert.equal(config.maxConcurrency, undefined)
+  assert.equal(config.maxConcurrency, 4)
   assert.deepEqual(config.sources, [])
   assert.equal(config.diagnostics.length, 1)
 })
@@ -170,12 +194,12 @@ test('an agentDir alias preserves missing-file and dangling-symlink diagnostics'
   await symlink(dirname(paths.project), alias)
   const options = { cwd: paths.cwd, agentDir: alias }
   const missing = await loadConfig(options)
-  assert.equal(missing.maxConcurrency, undefined)
+  assert.equal(missing.maxConcurrency, 4)
   assert.deepEqual(missing.sources, [])
   assert.deepEqual(missing.diagnostics, [])
   await symlink(join(paths.dir, 'missing.json'), paths.project)
   const dangling = await loadConfig(options)
-  assert.equal(dangling.maxConcurrency, undefined)
+  assert.equal(dangling.maxConcurrency, 4)
   assert.deepEqual(dangling.sources, [])
   assert.equal(dangling.diagnostics.length, 1)
   assert.ok(dangling.diagnostics[0].includes(paths.project))
@@ -271,7 +295,7 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
     [[], /expected an object/],
     [{ maxConcurency: 2 }, /unknown key/],
     [{ auth: {} }, /unknown key/],
-    ...[0, 65, -1, 1.5, '4', null].map((maxConcurrency) => [
+    ...[0, 65, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4', null].map((maxConcurrency) => [
       { maxConcurrency },
       /expected an integer/
     ]),
@@ -540,7 +564,7 @@ test('effort config normalizes the thinking alias and rejects conflicting select
   await assert.rejects(loadConfig(paths), /thinking and effort conflict/)
   await save(paths.global, {})
   config = await loadConfig(paths)
-  assert.equal(JSON.stringify(config).includes('maxConcurrency'), false)
+  assert.equal(config.maxConcurrency, 4)
   await save(paths.global, { maxConcurrency: 64 })
   assert.equal((await loadConfig(paths)).maxConcurrency, 64)
 })

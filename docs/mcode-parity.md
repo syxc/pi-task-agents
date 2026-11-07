@@ -33,7 +33,7 @@
 | Task 标题规范化、允许空 prompt、无效参数拒绝 | `LR/api/local-task-input.ts` | `task-domain.ts`、`config.ts` | 对应实现；`engine.test.ts` 的 Unicode、空 prompt 和输入边界回归 |
 | 默认前台等待，显式后台仅返回准入回执 | `AT/local-task.ts`、`LR/api/local-task-runner.ts` | `extension.ts`、`engine.ts` | 对应实现；`engine.test.ts`、`tool-result-golden.test.ts` |
 | 独立子会话，不复制父对话 | `LR/api/local-task-runner.ts`、子会话共享契约 | `pi-backend.ts`、`child-session-file.ts` | 对应实现；`pi-backend.test.ts` 的独立历史与续接 |
-| 队列、并发占用、取消排队任务 | `LR/background-task/runner.ts` | `engine.ts`、`engine-admission.ts` | 对应实现；`engine.test.ts` 的并发、排队、取消回归；省略并发参数不新增插件配额 |
+| 队列、并发占用、取消排队任务 | `LR/background-task/runner.ts` | `engine.ts`、`engine-admission.ts` | Pi 适配；每个父会话默认并发 4，可配置 1–64；`engine.test.ts` 覆盖并发、排队和取消 |
 | 已准入请求去重，持久化先于执行 | `LR/api/local-task-append.ts` | `engine-admission.ts`、`engine-append.ts` | 对应实现；`engine.test.ts` 的提交前后崩溃、去重回执和补偿回归 |
 | 运行中 append 合并到原 Turn，排队时不重复派发 | `LR/api/local-task-append.ts`、steering service | `engine-append.ts`、`child-steering.ts` | 对应实现；`engine.test.ts`、`task-lineage.test.ts` |
 | 闲置 append 新建任务、沿用子历史及权限快照 | `LR/api/local-task-append-lifecycle.ts` | `engine.ts`、`engine-session-safety.ts` | 对应实现；续接、冻结 profile、重启和历史权限回归 |
@@ -126,12 +126,12 @@ Pi 适配使用原生 `codemode`，对应 MCode 的 `packages/agent-core/src/too
 文件目标提取仅复用纯函数，由固定原文哈希及函数体一致性测试约束。除 Pi 品牌路径外，适配仅移除裁剪以保留 Shell 字面空格，并将可能跨符号目录的父目录遍历标为不确定；原生 write/edit 别名按 Pi 规则另行解析，不引入 diff/数据库宿主。
 
 ```sh
-npm run upstream:verify
-npm run upstream:check
+pnpm run upstream:verify
+pnpm run upstream:check
 ```
 
 前者离线核验本地 vendor 及可逆适配，后者读取上游当前 commit，检查文件变化、移除和任务领域模块清单。[上游检查 workflow](../.github/workflows/upstream.yml) 每周或手动运行，不自动迁移功能、开 PR 或合并。
 
-更新时先审查具体 commit，重新核对上表受影响契约并适配生产链及测试，再运行 `npm run upstream:sync -- --ref COMMIT`，不能只更新哈希。契约变化默认阻止同步；`--accept-contract-changes` 仅确认人工审查，不替代适配。参考文件删除或移动须先修正路径，不能用确认参数忽略。
+更新时先审查具体 commit，重新核对上表受影响契约并适配生产链及测试，再运行 `pnpm run upstream:sync --ref COMMIT`，不能只更新哈希。契约变化默认阻止同步；`--accept-contract-changes` 仅确认人工审查，不替代适配。参考文件删除或移动须先修正路径，不能用确认参数忽略。
 
 哈希、可逆转换、契约变化阻断及删除/移动处理的回归见 `upstream.test.ts`。监测不是整个仓库的依赖闭包，新依赖的行为变化仍须人工追踪；检查通过不证明全部核心行为已同步。未运行完整 MCode 测试套件，未验证所有外部服务或平台。

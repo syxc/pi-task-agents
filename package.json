@@ -32,6 +32,7 @@
     "test/",
     "scripts/",
     "tsconfig.json",
+    "pnpm-workspace.yaml",
     "upstream.lock.json"
   ],
   "type": "module",
@@ -44,7 +45,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs",
-    "check": "npm run typecheck && node scripts/check.mjs && npm run upstream:verify && npm run lint && npm run lint:type-aware && npm run lint:markdown && npm run format:check",
+    "check": "pnpm run typecheck && node scripts/check.mjs && pnpm run upstream:verify && pnpm run lint && pnpm run lint:type-aware && pnpm run lint:markdown && pnpm run format:check",
     "lint": "oxlint -c .oxlintrc.json .",
     "lint:markdown": "markdownlint-cli2",
     "lint:markdown:fix": "markdownlint-cli2 --fix",
@@ -66,7 +67,8 @@
     "oxlint": "1.92.0",
     "oxlint-tsgolint": "7.0.2006",
     "typebox": "1.3.27",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2",
+    "typescript-fixture": "npm:typescript@5.9.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -74,14 +76,10 @@
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
-  "overrides": {
-    "markdownlint-cli2": {
-      "markdownlint": "0.42.1"
-    }
-  },
   "engines": {
     "node": ">=22.19.0"
   },
+  "packageManager": "pnpm@11.15.1",
   "pi": {
     "extensions": [
       "./src/extension.ts"

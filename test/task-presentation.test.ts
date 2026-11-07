@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { InteractiveMode, initTheme } from '@earendil-works/pi-coding-agent'
+import { InteractiveMode, initTheme, type Theme } from '@earendil-works/pi-coding-agent'
 import {
   Container,
   TuiMainScreen,
@@ -28,7 +28,12 @@ const sampleTask = (overrides: Partial<TaskSummary> = {}): TaskSummary =>
     ...overrides
   }) as TaskSummary
 
-function sdkRows(tasks: TaskSummary[], width: number, clock = now) {
+function sdkRows(
+  tasks: TaskSummary[],
+  width: number,
+  clock = now,
+  options: { appearance?: string; raw?: boolean; onTheme?: (theme: Theme) => void } = {}
+) {
   const tui = new TuiMainScreen({
     columns: width,
     rows: 40,
@@ -37,7 +42,7 @@ function sdkRows(tasks: TaskSummary[], width: number, clock = now) {
     showCursor() {},
     stop() {}
   })
-  initTheme('dark', false)
+  initTheme(options.appearance ?? 'dark', false)
   const host = Object.create(InteractiveMode.prototype)
   Object.assign(host, {
     ui: tui,
@@ -47,8 +52,14 @@ function sdkRows(tasks: TaskSummary[], width: number, clock = now) {
     widgetContainerBelow: new Container()
   })
   try {
-    host.setExtensionWidget('task-agents', (_tui, theme) => taskWidget(tasks, 0, theme, clock))
-    return host.widgetContainerAbove.render(width).slice(1).map(stripTerminalSequences)
+    host.setExtensionWidget('task-agents', (_tui, theme) => {
+      options.onTheme?.(theme)
+      return taskWidget(tasks, 0, theme, clock)
+    })
+    return host.widgetContainerAbove
+      .render(width)
+      .slice(1)
+      .map((line) => (options.raw ? line : stripTerminalSequences(line)))
   } finally {
     tui.stop()
   }
@@ -58,6 +69,9 @@ test('hidden task hint never displays an incomplete command', () => {
   const widget = taskWidget([], 12, { fg: (_color, text) => text } as never, now)
   assert.deepEqual(widget.render(20), ['12 more /tasks list'])
   assert.deepEqual(widget.render(14), ['12 more'])
+  for (const width of [40, 60, 80, 120]) {
+    assert.deepEqual(widget.render(width), ['12 more tasks · /tasks list'])
+  }
 })
 
 const profile = {
@@ -137,14 +151,21 @@ test('SDK adaptive rows retain state and identity before role, goal and volatile
     sampleTask(),
     sampleTask({ task_id: '6c25c96e-rest', agent_name: 'worker', status: 'queued' }),
     sampleTask({ task_id: '7d36da7f-rest', status: 'stopping', activity: 'bash: running' }),
-    sampleTask({ task_id: '8e47eb80-rest', description: '复核另一条同角色任务目标' })
+    sampleTask({ task_id: '8e47eb80-rest', description: '复核另一条同角色任务目标' }),
+    ...(['failed', 'lost', 'canceled'] as const).map((status, index) =>
+      sampleTask({ task_id: `${index}f58fc91-rest`, status, activity: undefined })
+    )
   ]
   const original = JSON.stringify(tasks)
-  for (const width of [20, 40, 80]) {
+  for (const width of [20, 40, 60, 80, 120]) {
     const rows = sdkRows(tasks, width)
     assert.equal(rows.length, tasks.length, `${width}: one physical row per task`)
     for (const [index, task] of tasks.entries()) {
-      assert.ok(rows[index].startsWith(task.status), `${width}: explicit status`)
+      if (task.status === 'running') {
+        assert.ok(!rows[index].startsWith('running'), `${width}: omit redundant task running`)
+      } else {
+        assert.ok(rows[index].startsWith(task.status), `${width}: explicit non-running status`)
+      }
       assert.ok(rows[index].includes(task.task_id.slice(0, 8)), `${width}: short ID`)
       assert.ok(visibleWidth(rows[index]) <= width)
       if (width >= 40) {
@@ -154,48 +175,305 @@ test('SDK adaptive rows retain state and identity before role, goal and volatile
           rows[index].indexOf(task.agent_name) < rows[index].indexOf(task.task_id.slice(0, 8))
         )
       }
-      if (width === 80) {
+      if (width >= 80) {
         assert.ok(rows[index].includes(task.description), `${width}: full goal`)
-        assert.match(rows[index], /2m 5s/)
+        assert.match(rows[index], task.activity ? /(?:codemode: done|bash: running)$/ : /2m 5s/)
       }
     }
     assert.notEqual(rows[0], rows[3], `${width}: same-role tasks remain distinguishable`)
   }
-  assert.deepEqual(sdkRows([tasks[0]], 20), ['running · 5b14b85d'])
+  assert.deepEqual(sdkRows([tasks[0]], 20), ['5b14b85d · 复核观察…'])
   assert.equal(JSON.stringify(tasks), original, 'full queryable summaries are untouched')
 })
 
-test('SDK activity completion is not task completion and never displaces a long goal', () => {
+test('SDK long goals share common widths with current or recent activity, not task completion', () => {
   const task = sampleTask({ description: '复核👩‍🚒é🇨🇳观察目标'.repeat(20) })
-  for (const width of [20, 40, 80]) {
+  for (const width of [20, 40, 60, 80, 120]) {
     const done = sdkRows([task], width)
-    const active = sdkRows([{ ...task, activity: `bash: running ${'output '.repeat(100)}` }], width)
-    assert.deepEqual(active, done, `${width}: long goal outranks volatile tool text`)
-    if (width >= 40) {
-      assert.match(done[0], /复核/)
+    const active = sdkRows([{ ...task, activity: 'bash: running' }], width)
+    const next = sdkRows([{ ...task, activity: 'read: running' }], width)
+    for (const row of [done[0], active[0], next[0]]) {
+      assert.doesNotMatch(row, /^(?:running|succeeded|failed|Completed) · /)
+      assert.match(row, /5b14b85d/)
+      assert.ok(visibleWidth(row) <= width)
+      assert.doesNotMatch(row, /(?:last|activity):/)
+      if (width >= 40) {
+        assert.match(row, /verifier.*复核/)
+      }
     }
-    if (width === 80) {
-      assert.match(done[0], /2m 5s$/, 'elapsed time still has room beside a long goal')
+    if (width >= 60) {
+      assert.notDeepEqual(active, done, 'tool completion stays visible beside a long goal')
+      assert.notDeepEqual(active, next, 'a new tool stays visible beside a long goal')
+      assert.match(done[0], /codemode: done$/)
+      assert.match(active[0], /bash: running$/)
+      assert.match(next[0], /read: running$/)
+      assert.doesNotMatch(done[0], /2m 5s/, 'activity outranks the clock for long goals')
+    } else {
+      assert.deepEqual(active, done, 'narrow rows retain identity and goal before activity')
     }
   }
   const rows = sdkRows([sampleTask()], 120)
-  assert.match(
-    rows[0],
-    /^running · verifier · 5b14b85d · 复核观察截断优先级 · 2m 5s · last: codemode: done$/
-  )
+  assert.match(rows[0], /^verifier · 5b14b85d · 复核观察截断优先级 · 2m 5s · codemode: done$/)
   assert.match(
     sdkRows([sampleTask({ activity: 'bash: failed' })], 120)[0],
-    /^running.*last: bash: failed$/
+    /^verifier · 5b14b85d.* · bash: failed$/
   )
   assert.match(
     sdkRows([sampleTask({ activity: 'bash: running' })], 120)[0],
-    /^running.*activity: bash: running$/
+    /^verifier · 5b14b85d.* · bash: running$/
   )
   assert.match(
     sdkRows([sampleTask({ status: 'succeeded' })], 120)[0],
-    /^succeeded.*last: codemode: done$/
+    /^succeeded.* · codemode: done$/
   )
   assert.match(sdkRows([sampleTask()], 120, now + 1000)[0], /2m 6s/)
+})
+
+test(
+  'real SDK completion activity cannot masquerade as a task terminal state',
+  { timeout: 10000 },
+  async (t) => {
+    const {
+      fixture,
+      deferred,
+      profile: childProfile
+    } = await import('./pi-backend-test-helpers.ts')
+    const { TaskEngine } = await import('../src/engine.ts')
+    const { join } = await import('node:path')
+    const f = await fixture(t)
+    const finished = deferred()
+    const pending: TaskSummary[] = []
+    const engine = new TaskEngine({
+      rootDir: join(f.root, 'engine'),
+      parentId: 'completion-widget',
+      cwd: f.cwd,
+      createChild: f.create,
+      onChange(task) {
+        if (task.status === 'running' && task.activity === 'Completed') {
+          pending.push(task)
+        }
+        if (task.status === 'succeeded') {
+          finished.resolve()
+        }
+      }
+    })
+    try {
+      await engine.init()
+      const started = await engine.start(
+        {
+          agent_name: 'worker',
+          description: 'Offline completion handoff',
+          prompt: 'Finish offline',
+          run_in_background: true
+        },
+        childProfile
+      )
+      await finished.promise
+      assert.ok(pending.length > 0, 'the real backend reports Completed before the engine finishes')
+      for (const width of [20, 40, 80, 120]) {
+        for (const task of pending) {
+          const [row] = sdkRows([task], width)
+          assert.doesNotMatch(row, /Completed|succeeded|(?:last|activity):/)
+          assert.ok(row.includes(task.task_id.slice(0, 8)))
+          assert.ok(visibleWidth(row) <= width)
+          assert.equal(task.activity, 'Completed', 'presentation does not alter the runtime fact')
+        }
+      }
+      const terminal = await engine.query({ task_id: started.task_id })
+      assert.equal(terminal.status, 'succeeded')
+      assert.match(sdkRows([terminal], 120)[0], /^succeeded · /)
+    } finally {
+      await engine.close()
+    }
+  }
+)
+
+test('SDK tool state words use semantic theme colors, not the goal or tool name', () => {
+  for (const appearance of ['dark', 'light']) {
+    for (const width of [20, 40, 80, 120]) {
+      const colors = new Set<string>()
+      for (const [state, token] of [
+        ['running', 'accent'],
+        ['done', 'success'],
+        ['failed', 'error']
+      ] as const) {
+        let expected = ''
+        let coloredGoal = ''
+        let coloredTool = ''
+        const [row] = sdkRows(
+          [sampleTask({ description: '复核👩‍🚒é🇨🇳观察目标'.repeat(20), activity: `bash: ${state}` })],
+          width,
+          now,
+          {
+            appearance,
+            raw: true,
+            onTheme(theme) {
+              expected = theme.fg(token, state)
+              coloredGoal = theme.fg(token, '复核')
+              coloredTool = theme.fg(token, 'bash')
+            }
+          }
+        )
+        colors.add(expected.replace(state, 'state'))
+        const plain = stripTerminalSequences(row)
+        assert.ok(visibleWidth(row) <= width)
+        assert.doesNotMatch(plain, /(?:last|activity):/)
+        assert.doesNotMatch(plain, /^(?:running|failed|succeeded) · /)
+        assert.equal(row.includes(expected), width >= 80, `${appearance}/${width}/${state}`)
+        assert.equal(row.includes(coloredGoal), false)
+        assert.equal(row.includes(coloredTool), false)
+        if (width >= 80) {
+          assert.ok(plain.endsWith(`bash: ${state}`))
+        }
+      }
+      assert.equal(colors.size, 3, `${appearance}: distinct semantic state colors`)
+    }
+  }
+})
+
+test('SDK NO_COLOR keeps task and tool states readable without ANSI', () => {
+  const previous = process.env.NO_COLOR
+  process.env.NO_COLOR = '1'
+  try {
+    for (const width of [20, 40, 80, 120]) {
+      for (const state of ['running', 'done', 'failed']) {
+        const [row] = sdkRows(
+          [sampleTask({ description: '复核'.repeat(50), activity: `bash: ${state}` })],
+          width,
+          now,
+          { raw: true }
+        )
+        assert.equal(row, stripTerminalSequences(row))
+        assert.ok(visibleWidth(row) <= width)
+        if (width >= 80) {
+          assert.ok(row.endsWith(`bash: ${state}`))
+        }
+      }
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NO_COLOR
+    } else {
+      process.env.NO_COLOR = previous
+    }
+  }
+})
+
+test('SDK tool state changes keep goal and tool-name prefixes stable', () => {
+  for (const width of [60, 80, 120]) {
+    for (const name of ['bash', 'mcp__' + '工具👩‍🚒é🇨🇳'.repeat(20)]) {
+      const rows = ['running', 'done', 'failed'].map(
+        (state) =>
+          sdkRows(
+            [
+              sampleTask({
+                description: '复核👩‍🚒é🇨🇳观察目标'.repeat(20),
+                activity: `${name}: ${state}`
+              })
+            ],
+            width
+          )[0]
+      )
+      const stable = rows.map((row) => row.replace(/: (running|done|failed)$/, ': state'))
+      assert.equal(new Set(stable).size, 1, `${width}: avoid shifting fields on tool completion`)
+    }
+  }
+})
+
+test('SDK truncates tool names, never their running/done/failed suffix', () => {
+  for (const description of ['复核', '复核👩‍🚒é🇨🇳观察目标'.repeat(20)]) {
+    for (const state of ['running', 'done', 'failed']) {
+      const task = sampleTask({
+        description,
+        activity: `mcp__completed_${'工具👩‍🚒é🇨🇳'.repeat(20)}: ${state}`
+      })
+      for (const width of [20, 40, 60, 80, 120]) {
+        const [row] = sdkRows([task], width)
+        assert.ok(visibleWidth(row) <= width)
+        assert.equal(row.isWellFormed(), true)
+        assert.doesNotMatch(row, /^(?:running|succeeded|failed|Completed) · /)
+        assert.doesNotMatch(row, /(?:activity|last):/)
+        if (width >= 80 || row.includes(':')) {
+          assert.match(row, new RegExp(` · m.*…: ${state}$`))
+        }
+      }
+    }
+  }
+})
+
+test('SDK clocks are omitted rather than clipped into noisy partial durations', () => {
+  assert.deepEqual(sdkRows([sampleTask({ description: '复核', activity: undefined })], 20), [
+    '5b14b85d · 复核'
+  ])
+  for (const width of [20, 40, 60, 80, 120]) {
+    const [row] = sdkRows(
+      [
+        sampleTask({
+          agent_name: 'worker',
+          status: 'lost',
+          error: 'Connection lost',
+          description: '检查连接',
+          activity: undefined
+        })
+      ],
+      width
+    )
+    assert.doesNotMatch(row, / · 2(?:…|m …)$/)
+  }
+})
+
+test('SDK absent goals do not repeat the task ID as a description', () => {
+  const task = sampleTask({ description: undefined, activity: undefined })
+  for (const width of [20, 40, 60, 80, 120]) {
+    const [row] = sdkRows([task], width)
+    assert.equal(row.split('5b14b85d').length - 1, 1)
+    assert.doesNotMatch(row, /-rest/)
+    assert.ok(visibleWidth(row) <= width)
+    if (width >= 40) {
+      assert.match(row, /verifier.*2m 5s/)
+    }
+  }
+})
+
+test('SDK running exceptions keep explicit state while ordinary rows keep identity', () => {
+  for (const width of [20, 40, 60, 80, 120]) {
+    const [ordinary] = sdkRows([sampleTask({ activity: undefined })], width)
+    assert.match(ordinary, /5b14b85d/)
+    assert.doesNotMatch(ordinary, /running/)
+    if (width >= 40) {
+      assert.match(ordinary, /^verifier · 5b14b85d.*复核/)
+    }
+    for (const exception of [{ error: 'Permission denied' }, { cleanup_pending: true }]) {
+      const rows = sdkRows([sampleTask(exception)], width)
+      assert.match(rows[0], /^running · /)
+      assert.match(rows.join('\n'), /5b14b85d/)
+      if ('cleanup_pending' in exception) {
+        assert.match(rows.join('\n'), /cleanup pending/)
+      }
+      assert.ok(rows.every((row) => visibleWidth(row) <= width))
+    }
+  }
+})
+
+test('SDK narrow cleanup diagnostics never leave a partially displayed tool state', () => {
+  const task = sampleTask({ status: 'failed', cleanup_pending: true, description: 'x' })
+  const rows = sdkRows([task], 30)
+  assert.equal(rows.length, 2)
+  assert.match(rows[0], /^failed.*5b14b85d/)
+  assert.match(rows[1], /^cleanup pending/)
+  assert.doesNotMatch(rows.join('\n'), /codemode:/, 'cleanup diagnostics outrank activity')
+})
+
+test('SDK errors outrank long goals and tool activity even without a cleanup hold', () => {
+  const task = sampleTask({
+    status: 'failed',
+    error: 'Permission denied',
+    description: '复核'.repeat(100),
+    activity: 'bash: done'
+  })
+  const [row] = sdkRows([task], 80)
+  assert.match(row, /^failed · verifier · 5b14b85d · Permission denied/)
+  assert.doesNotMatch(row, /bash: done/)
 })
 
 test('SDK cleanup warnings retain priority, short IDs and bounded rows with long diagnostics', () => {
@@ -209,7 +487,7 @@ test('SDK cleanup warnings retain priority, short IDs and bounded rows with long
       activity: 'codemode: done '.repeat(100)
     })
   )
-  for (const width of [20, 40, 80]) {
+  for (const width of [20, 40, 60, 80, 120]) {
     const rows = sdkRows(tasks, width)
     const perTask = width === 20 ? 2 : 1
     assert.equal(rows.length, tasks.length * perTask)
@@ -218,7 +496,7 @@ test('SDK cleanup warnings retain priority, short IDs and bounded rows with long
       assert.ok(text.includes(task.status))
       assert.ok(text.includes(task.task_id.slice(0, 8)))
       assert.match(text, /cleanup pending/)
-      if (width === 80) {
+      if (width >= 80) {
         assert.match(text, /Cannot confirm cleanup/)
       }
     }

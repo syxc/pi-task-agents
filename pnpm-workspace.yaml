@@ -1,0 +1,7 @@
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false
+minimumReleaseAgeExclude:
+  - markdownlint@0.42.1
+overrides:
+  'markdownlint-cli2>markdownlint': 0.42.1

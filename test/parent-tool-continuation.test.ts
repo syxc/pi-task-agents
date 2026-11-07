@@ -217,7 +217,7 @@ for (const cancel of [false, true]) {
 }
 
 test(
-  'queued retained-child continuation restores its own admission binding after a background task frees capacity',
+  'direct queued retained-child continuation restores its own admission binding after a background task frees capacity',
   { timeout: 4000 },
   async (t) => {
     const f = await setup(t, false, 1)
@@ -238,10 +238,12 @@ test(
     await backgroundEntered.promise
     const background = [...f.controller.engine.runtimes.values()][0]
     let childCalls = 0
-    const running = f.run(tool('owned_sender', {}), () =>
-      ++childCalls === 1
-        ? tool('write', { path: 'queued-continuation.txt', content: 'continued' })
-        : answer('QUEUED_CHILD_DONE')
+    const running = f.run(
+      tool('task_send', { task_id: f.target, content: 'RESUME_OWNED_CHILD' }),
+      () =>
+        ++childCalls === 1
+          ? tool('write', { path: 'queued-continuation.txt', content: 'continued' })
+          : answer('QUEUED_CHILD_DONE')
     )
     assert.equal(
       await f.controller.engine.waitUntil(
