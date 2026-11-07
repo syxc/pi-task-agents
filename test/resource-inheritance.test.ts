@@ -11,7 +11,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 const server = fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url));
 
-test('default controller gives every role the main session Skills, extensions and MCP', { timeout: 30000 }, async t => {
+test('default controller inherits Skills and verified MCP but keeps extension tools parent-only', { timeout: 30000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'pi-inherit-'));
   const agentDir = join(root, 'agent'), cwd = join(root, 'workspace');
   const extensions = join(agentDir, 'extensions'), skillDir = join(agentDir, 'skills', 'owned-inherited-skill');
@@ -64,7 +64,12 @@ test('default controller gives every role the main session Skills, extensions an
           ] });
         }
         assert.match(text, /OWNED_SKILL_BODY/);
-        assert.match(text, /OWNED_EXTENSION_RESULT/);
+        if (role === 'main') assert.match(text, /OWNED_EXTENSION_RESULT/);
+        else {
+          const result = (context as any).messages.find(message => message.role === 'toolResult' && message.toolName === 'owned_extension');
+          assert.equal(result?.isError, true);
+          assert.doesNotMatch(text, /OWNED_EXTENSION_RESULT/);
+        }
         assert.match(text, new RegExp(`OWNED_MCP_ECHO:file:[0-9]+:${role}`));
         assert.match(text, new RegExp(`OWNED_MCP_ECHO:extension:[0-9]+:${role}`));
         completed.push(role);
@@ -82,9 +87,9 @@ test('default controller gives every role the main session Skills, extensions an
     const { loadMcpConfig } = await import(new URL('./extensions/mcp/config.js', import.meta.resolve('@earendil-works/pi-coding-agent')).href);
     const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
       noContextFiles: true, noPromptTemplates: true, noThemes: true,
-      extensionFactories: [sdk.createCodemodeExtension({ mode: 'on', models: false }), sdk.createMcpExtension({ startupWaitMs: 10000,
+      extensionFactories: [sdk.createCodemodeExtension({ mode: 'on', models: false }), { name: 'mcp', builtin: true, factory: sdk.createMcpExtension({ startupWaitMs: 10000,
         loadConfig: () => loadMcpConfig({ cwd, agentDir, projectTrusted: false }), logPath: join(root, 'parent-mcp.log'),
-      }), (pi) => {
+      }) }, (pi) => {
         controller = registerTaskAgents(pi, { agentDir });
         pi.on('session_start', (_event, context) => { ctx = context; });
       }],

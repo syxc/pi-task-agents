@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import test from 'node:test';
 import * as sdk from '@earendil-works/pi-coding-agent';
-import { answer, fixture, tool } from './pi-backend-test-helpers.ts';
+import { answer, deferred, fixture, tool } from './pi-backend-test-helpers.ts';
 
 test('official parent tool context runs hooks but is not a durable background delegation handle', async t => {
   const f = await fixture(t);
@@ -140,6 +140,67 @@ test('background proxy calls can reuse IDs after the parent agent settles', asyn
     assert.ok(result && result.role === 'toolResult');
     assert.notEqual(result.nestedCalls?.calls.length, outcomes.length, 'Post-admission calls need their own child-side audit trail');
   } finally {
+    await session.dispose();
+  }
+});
+
+for (const afterEnd of [false, true]) test('official SDK serial boundary probe: nested call ' +
+  (afterEnd ? 'stays queued across agent_end despite abort' : 'completes before agent_end'), { timeout: 4000 }, async t => {
+  // Use only the public SDK. The pending branch is evidence of a blocker,
+  // not a successful cancellation or a claim that the operation drained.
+  const f = await fixture(t);
+  const entered = deferred(), release = deferred(), nestedStarted = deferred();
+  const cancellation = new AbortController();
+  let effects = 0, hooks = 0, settled = false, background: Promise<unknown> | undefined;
+  const settings = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } },
+    { projectTrusted: false });
+  const loader = new sdk.DefaultResourceLoader({ cwd: f.cwd, agentDir: f.agentDir, settingsManager: settings,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+    extensionFactories: [pi => {
+      pi.on('tool_call', event => { if (event.toolName === 'owned_inner') hooks++; });
+      pi.on('tool_execution_start', event => { if (event.toolName === 'owned_inner') nestedStarted.resolve(); });
+      pi.registerTool({ name: 'owned_inner', label: 'Inner', description: 'Memory-only counter',
+        executionMode: 'sequential', parameters: { type: 'object', properties: {} },
+        execute: async () => { effects++; return { content: [], details: {} }; } });
+      // Deliberately omit reachesTools: its absence cannot prove a tool is a leaf.
+      pi.registerTool({ name: 'owned_serial', label: 'Serial', description: 'Hold serial ancestry',
+        executionMode: 'sequential', parameters: { type: 'object', properties: {} },
+        execute: async (_id, _args, _signal, _update, ctx) => {
+          entered.resolve(); await release.promise;
+          const nested = await ctx.executeTool('owned_inner', {}, { signal: new AbortController().signal });
+          return nested.result;
+        } });
+      pi.registerTool({ name: 'owned_background', label: 'Background', description: 'Start a detached SDK call',
+        parameters: { type: 'object', properties: {} }, execute: async (_id, _args, _signal, _update, ctx) => {
+          background = ctx.executeTool('owned_serial', {}, { signal: cancellation.signal });
+          void background.then(() => { settled = true; });
+          return { content: [], details: {} };
+        } });
+    }] });
+  await loader.reload();
+  assert.deepEqual(loader.getExtensions().errors, []);
+  f.script(async step => {
+    if (step === 1) return tool('owned_background', {});
+    await entered.promise;
+    if (!afterEnd) { release.resolve(); await background; }
+    return answer('PARENT_FINISHED');
+  });
+  const { session } = await sdk.createAgentSession({ cwd: f.cwd, agentDir: f.agentDir, resourceLoader: loader,
+    settingsManager: settings, model: f.model as any, modelRuntime: f.runtime as any,
+    sessionManager: sdk.SessionManager.inMemory(f.cwd), tools: ['owned_background', 'owned_serial', 'owned_inner'] });
+  try {
+    await session.bindExtensions({ mode: 'json', onError: error => { throw new Error(error.error); }, abortHandler() {}, shutdownHandler() {} });
+    await session.prompt('Probe the memory-only SDK serial boundary.');
+    release.resolve();
+    await nestedStarted.promise;
+    cancellation.abort();
+    if (!afterEnd) await background;
+    else await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(hooks, afterEnd ? 0 : 1, 'The deadlocked call never reaches tool_call, so a denial there is too late');
+    assert.equal(effects, afterEnd ? 0 : 1);
+    assert.equal(settled, !afterEnd, 'Aborting the outer call does not drain the queued independent-signal call');
+  } finally {
+    // Disposing a session does not resolve this memory-only pending nested call.
     await session.dispose();
   }
 });

@@ -8,6 +8,7 @@ import { appendTask } from './engine-append.ts';
 import { admittedFacts, recordChildFacts, recordChildFailure, resolvedProfile } from './engine-facts.ts';
 import { appendTerminalOutput, exceptionOutcome, runnerOutcome, type TaskTerminalOutcome } from './engine-terminal.ts';
 import { SessionSafety } from './engine-session-safety.ts';
+import { captureTaskExecutionContext, runWithoutTaskExecutionContext } from './task-execution-context.ts';
 import { aborted, clone, freeze, normalizeTaskInput, trimmedContent, waitForChange } from './engine-helpers.ts';
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts';
 import { ACTIVE_TASK_STATUSES } from './vendor/mcode-background-task/status.ts';
@@ -55,6 +56,7 @@ export class TaskEngine {
   private readonly domain: TaskDomain;
   private readonly admission = new TaskAdmissions();
   private readonly safety = new SessionSafety();
+  private readonly executionContexts = new Map<string, ReturnType<typeof captureTaskExecutionContext>>();
   private readonly outputReads: TaskOutputReads;
   private closed = false;
   private closing?: Promise<void>;
@@ -188,6 +190,7 @@ export class TaskEngine {
   }
 
   async enqueue(input: TaskInput, profile: AgentProfile, previous?: TaskRecord, key?: string): Promise<TaskSummary> {
+    const execute = captureTaskExecutionContext();
     this.assertDispatch();
     if (previous) profile = this.safety.continuation(previous);
     const id = this.domain.createId();
@@ -203,7 +206,15 @@ export class TaskEngine {
       notify_completion: input.run_in_background === true,
       ...(previous ? { mode: 'activated', accepted: true } as const : {}),
     };
-    await this.admission.commit(this.getState(), task, key, () => this.persist(), (error) => { this.storageError = error; });
+    // commit releases its pending reservation before this await resumes, so
+    // another pump must already be able to find the task's own binding.
+    this.executionContexts.set(id, execute);
+    try {
+      await this.admission.commit(this.getState(), task, key, () => this.persist(), (error) => { this.storageError = error; });
+    } catch (error) {
+      this.executionContexts.delete(id);
+      throw error;
+    }
     this.changed(task);
     const result = this.summary(task);
     this.pump();
@@ -255,7 +266,9 @@ export class TaskEngine {
         backgroundRunner: task.input.run_in_background === true
           && this.getState().tasks.find((item) => item.session_id === task.session_id) === task };
       this.runtimes.set(task.task_id, runtime);
-      runtime.done = this.run(task, runtime);
+      const execute = this.executionContexts.get(task.task_id) ?? runWithoutTaskExecutionContext;
+      this.executionContexts.delete(task.task_id);
+      runtime.done = execute(() => this.run(task, runtime));
     }
   }
 
@@ -372,6 +385,7 @@ export class TaskEngine {
       return this.summary(task);
     }
     if (!runtime) {
+      this.executionContexts.delete(task.task_id);
       this.domain.transition(task, status);
       task.finished_at = new Date().toISOString();
       task.cancel_reason = reason;

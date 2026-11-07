@@ -119,8 +119,8 @@ test('Pi loads the plugin and child MCP with host-provided peers and no package 
   const { loadMcpConfig } = await import(pathToFileURL(join(sdk.getPackageDir(), 'dist/extensions/mcp/config.js')).href);
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
     noContextFiles: true, noPromptTemplates: true, noThemes: true,
-    extensionFactories: [sdk.createMcpExtension({ startupWaitMs: 5000, logPath: join(root, 'parent-mcp.log'),
-      loadConfig: () => loadMcpConfig({ cwd, agentDir, projectTrusted: false }) })] });
+    extensionFactories: [{ name: 'mcp', builtin: true, factory: sdk.createMcpExtension({ startupWaitMs: 5000, logPath: join(root, 'parent-mcp.log'),
+      loadConfig: () => loadMcpConfig({ cwd, agentDir, projectTrusted: false }) }) }] });
   let parent: sdk.AgentSession | undefined;
   const errors: unknown[] = [];
   try {
