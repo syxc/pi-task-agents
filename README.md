@@ -37,7 +37,7 @@ pi install git:github.com/syxc/pi-task-agents
 - 父会话须用 `task_output` 读取持久结果再整合回复，`details` 等元数据不能代替读取；不按长度筛选必要信息或截取报告摘要。
 - `task_output` 默认返回完整验证文本及覆盖整个报告的确定性 SHA-256 fingerprint。读过报告后，可用 `known_verification_fingerprint` 回传该值；仅匹配当前报告时省略验证详情文本，缺失或不匹配时返回当前完整报告。省略时仍有 fingerprint、说明和恢复方法，实际输出、状态、错误、游标、截断标志及 `details.verification` 不变。任意有效 `offset`、重试或原父会话恢复后，省略该参数即可重读完整报告；不依赖投递历史。
 
-通知与结果分离：运行期间的完成通知通过 `followUp` 排队并唤醒空闲主会话，不模拟用户提交；启动时仍有待投递通知时，TUI 同样唤醒，print/json/RPC 模式改用 `nextTurn` 排队，避免宿主即将提交首个提示时抢占运行槽。`display:false` 只隐藏 TUI 展示，仍进入模型上下文、唤醒空闲主会话，不等于减少 token。`task_output` 不是 Bash 日志流，取消读取不会停止任务。
+通知与结果分离：运行期间的完成通知通过 `followUp` 排队并唤醒空闲主会话，不模拟用户提交；启动时仍有待投递通知时，TUI 同样唤醒，print/json/RPC 模式改用 `nextTurn` 排队，避免宿主即将提交首个提示时抢占运行槽。同一投递窗口内的多个终态任务合并为一条通知（最多 32 个任务、8 KiB），避免并发完成时连续唤醒；未取得落盘回执时按 1/2/5 秒快速重试，之后从 60 秒起按指数冷却、最长 300 秒持续重试，直到确认、暂停或会话关闭。`display:false` 只隐藏 TUI 展示，仍进入模型上下文、唤醒空闲主会话，不等于减少 token。`task_output` 不是 Bash 日志流，取消读取不会停止任务。
 
 ### 续接与查看状态
 
@@ -45,7 +45,7 @@ pi install git:github.com/syxc/pi-task-agents
 
 - 查看：`/tasks list`、`/tasks roles`、`/tasks show <id>`。状态栏显示运行数和排队数；任务区域优先显示状态和任务身份，空间允许时显示目标、耗时及活动。
 - 停止：`/tasks stop <id>`、`/tasks stop-all`。
-- 恢复通知：`/tasks resume`，不重启任务。
+- 恢复通知：`/tasks resume`，清除暂停和重试冷却，不重启任务。
 
 任务超时包含子会话初始化。调用子会话工厂前，插件先持久化初始化所有权标记，落盘失败则不调用工厂。标记沿用已有快照的内部字段 `ownedCommandCleanupPending`。正常初始化完成并交接给 active 任务后，先持久化清除标记再派发提示；这不表示会话已无存活资源，后续仍沿用现有 active 任务和原生命令清理契约。取消中的初始化只在原工厂确证清理后清除标记，不因变为 `lost` 而确认清理。
 

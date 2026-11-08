@@ -6,6 +6,15 @@ import test from 'node:test'
 import { answer, tool } from './pi-backend-test-helpers.ts'
 import { busy, input, setup, waitFor } from './nested-foreground-test-helpers.ts'
 
+function notifiedTaskIds(f) {
+  return f.notifications.flatMap(([message]) => {
+    if (Array.isArray(message.details.task_ids)) {
+      return message.details.task_ids
+    }
+    return typeof message.details.task_id === 'string' ? [message.details.task_id] : []
+  })
+}
+
 for (const mode of ['sequential', 'parallel']) {
   for (const name of ['task', 'task_send']) {
     test(
@@ -33,7 +42,7 @@ for (const mode of ['sequential', 'parallel']) {
         assert.equal(f.counts.get('CHILD_RETRY'), undefined)
         holder.release()
         await f.drain()
-        assert.equal(f.notifications.length, 4)
+        assert.equal(notifiedTaskIds(f).length, 4)
         const result = await f.nested(name, params, 'retry-root')
         assert.equal(result.result.details.status, 'succeeded')
         assert.equal(f.controller.engine.state.tasks.length, 6)
@@ -57,7 +66,7 @@ for (const mode of ['sequential', 'parallel']) {
         replayHolder.release()
         await f.drain()
         assert.equal(
-          f.notifications.length,
+          notifiedTaskIds(f).length,
           8,
           'Neither foreground completion nor replay emits a background notice'
         )
@@ -82,7 +91,7 @@ for (const mode of ['sequential', 'parallel']) {
       const result = await running
       assert.equal(result.result.details.status, 'succeeded')
       await f.drain()
-      assert.equal(f.notifications.length, 4)
+      assert.equal(notifiedTaskIds(f).length, 4)
     }
   )
 
@@ -105,8 +114,8 @@ for (const mode of ['sequential', 'parallel']) {
       holder.release()
       await f.drain()
       assert.equal(f.counts.get('CHILD_EXTRA'), 2)
-      assert.equal(f.notifications.length, 5)
-      assert.equal(new Set(f.notifications.map(([message]) => message.details.task_id)).size, 5)
+      assert.equal(notifiedTaskIds(f).length, 5)
+      assert.equal(new Set(notifiedTaskIds(f)).size, 5)
     }
   )
 
@@ -140,7 +149,7 @@ for (const mode of ['sequential', 'parallel']) {
       f.controller.resume()
       await f.controller.flush()
       await f.controller.flush()
-      assert.equal(f.notifications.length, 4)
+      assert.equal(notifiedTaskIds(f).length, 4)
     }
   )
 
