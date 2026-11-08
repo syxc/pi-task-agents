@@ -157,6 +157,122 @@ test(
 )
 
 test(
+  'a successful terminal read consumes the settle notice even when unread bytes remain',
+  { timeout: 10000 },
+  async (t) => {
+    const f = await fixture(t),
+      child = await f.child({ name: 'worker', tools: ['bash'] })
+    const size = 9000,
+      command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write('x'.repeat(${size}))`)}`
+    let id = '',
+      calls = 0
+    const previous = () => {
+      const message = f
+        .session()
+        .messages.findLast(
+          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
+        )
+      assert.ok(message && message.role === 'toolResult')
+      return JSON.parse(
+        message.content
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text)
+          .join('')
+      )
+    }
+    f.script((step, context) => {
+      calls++
+      if (step === 1) {
+        return tool('bash_task', { action: 'start', command })
+      }
+      if (step === 2) {
+        id = previous().command_id
+        return tool('bash', { command: 'sleep 0.3' })
+      }
+      if (step === 3) {
+        assert.match(JSON.stringify(context), /sleep 0\.3/)
+        return tool('bash_task', { action: 'output', command_id: id })
+      }
+      if (step === 4) {
+        const value = previous()
+        assert.equal(value.status, 'succeeded')
+        assert.equal(value.truncated, true)
+        assert.equal(Buffer.byteLength(value.output), 8192)
+        return answer('PARTIAL_TERMINAL_READ_ACKNOWLEDGED')
+      }
+      return answer('UNEXPECTED_SETTLE_NOTICE')
+    })
+    const result = await child.prompt(
+      'Read one terminal output chunk, then report without waiting for the rest.'
+    )
+    assert.equal(result.text, 'PARTIAL_TERMINAL_READ_ACKNOWLEDGED')
+    assert.equal(calls, 4)
+  }
+)
+
+test(
+  'a terminal read suppresses only its own command from the settle notice',
+  { timeout: 10000 },
+  async (t) => {
+    const f = await fixture(t),
+      child = await f.child({ name: 'worker', tools: ['bash'] })
+    const large = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.stdout.write('a'.repeat(9000))")}`,
+      small = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.stdout.write('UNREAD_PEER')")}`
+    let readId = '',
+      unreadId = '',
+      calls = 0
+    const previous = () => {
+      const message = f
+        .session()
+        .messages.findLast(
+          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
+        )
+      assert.ok(message && message.role === 'toolResult')
+      return JSON.parse(
+        message.content
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text)
+          .join('')
+      )
+    }
+    f.script((step, context) => {
+      calls++
+      if (step === 1) {
+        return tool('bash_task', { action: 'start', command: large })
+      }
+      if (step === 2) {
+        readId = previous().command_id
+        return tool('bash_task', { action: 'start', command: small })
+      }
+      if (step === 3) {
+        unreadId = previous().command_id
+        return tool('bash', { command: 'sleep 0.3' })
+      }
+      if (step === 4) {
+        return tool('bash_task', { action: 'output', command_id: readId })
+      }
+      if (step === 5) {
+        assert.equal(previous().status, 'succeeded')
+        return answer('PARTIAL_READ_WITH_UNREAD_PEER')
+      }
+      assert.equal(step, 6)
+      const notice = (context.messages as unknown[])
+        .map((message) => JSON.stringify(message))
+        .findLast((message) => message.includes('Owned background Bash commands finished'))
+      assert.ok(notice)
+      assert.ok(notice.includes(unreadId), 'the unread command must remain deliverable')
+      assert.equal(notice.includes(readId), false, 'the read command is already consumed')
+      return answer('UNREAD_PEER_NOTICE_OK')
+    })
+    const result = await child.prompt(
+      'Read one finished command, leave its peer unread, and report.'
+    )
+    assert.equal(result.text, 'UNREAD_PEER_NOTICE_OK')
+    assert.equal(calls, 6)
+  }
+)
+
+test(
   'owned commands permit independent foreground work, incremental wait/read and an acknowledged stop without a duplicate wake',
   { timeout: 10000 },
   async (t) => {
@@ -215,6 +331,55 @@ test(
     )
     assert.equal(result.text, 'STOP_ACKNOWLEDGED')
     assert.equal(calls, 6)
+  }
+)
+
+test(
+  'a silent command stopped before producing output does not persist an internal abort error',
+  { timeout: 10000 },
+  async (t) => {
+    const f = await fixture(t),
+      child = await f.child({ name: 'worker', tools: ['bash'] })
+    let id = ''
+    const previous = () => {
+      const message = f
+        .session()
+        .messages.findLast(
+          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
+        )
+      assert.ok(message && message.role === 'toolResult')
+      return JSON.parse(
+        message.content
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text)
+          .join('')
+      )
+    }
+    f.script((step) => {
+      if (step === 1) {
+        id = ''
+        return tool('bash_task', {
+          action: 'start',
+          command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify('setInterval(()=>{},1000)')}`
+        })
+      }
+      if (step === 2) {
+        id = previous().command_id
+        return tool('bash_task', { action: 'stop', command_id: id })
+      }
+      if (step === 3) {
+        return tool('bash_task', { action: 'output', command_id: id, offset: 0 })
+      }
+      assert.equal(step, 4)
+      const value = previous()
+      assert.equal(value.status, 'canceled')
+      assert.doesNotMatch(value.output, /Parent tool admission canceled/)
+      return answer('SILENT_STOP_ACKNOWLEDGED')
+    })
+    const result = await child.prompt('Stop a silent owned command before it writes output.')
+    assert.equal(result.text, 'SILENT_STOP_ACKNOWLEDGED')
+    const log = join(f.session().sessionFile! + '.commands', id + '.log')
+    assert.equal(await readFile(log, 'utf8'), '', 'cancellation must not become command output')
   }
 )
 

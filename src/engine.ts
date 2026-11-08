@@ -254,7 +254,10 @@ export class TaskEngine {
   task(id: string): TaskRecord {
     const task = this.getState().tasks.find((item) => item.task_id === id)
     if (!task || task.parent_id !== this.parentId) {
-      throw new Error('Unknown task for this parent')
+      throw Object.assign(new Error(`Local background task not found: ${id}`), {
+        code: 'TASK_NOT_FOUND',
+        status: 404
+      })
     }
     return task
   }
@@ -327,7 +330,9 @@ export class TaskEngine {
         await cancellation
         // Keep execution facts intact, but do not acknowledge an unconfirmed terminal snapshot.
         if (this.uncommittedTerminals.has(task.task_id)) {
-          throw this.storageError
+          // A failed queued cancellation is retryable and does not latch a storage error,
+          // so the waiter still needs a defined rejection instead of throwing undefined.
+          throw this.storageError ?? new Error('Task stop persistence is unconfirmed')
         }
         return { ...this.summary(task), mode: result.mode, accepted: result.accepted }
       })()
@@ -1013,16 +1018,25 @@ export class TaskEngine {
     this.assertOpen()
     aborted(signal)
     if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0)) {
-      throw new Error('Invalid output offset')
+      throw Object.assign(new Error('Invalid output offset'), {
+        code: 'TASK_OUTPUT_INVALID',
+        status: 400
+      })
     }
     if (!Number.isSafeInteger(limitBytes) || limitBytes < 1) {
-      throw new Error('Invalid output limit')
+      throw Object.assign(new Error('Invalid output limit'), {
+        code: 'TASK_OUTPUT_INVALID',
+        status: 400
+      })
     }
     const task = this.task(taskId)
     const waitMs = Math.max(0, Math.min(30000, Number(wait_ms) || 0))
     const read = async (requested: number): Promise<TaskOutput> => {
       if (requested > Buffer.byteLength(task.output)) {
-        throw new Error('Output offset exceeds available bytes')
+        throw Object.assign(new Error('Output offset exceeds available bytes'), {
+          code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+          status: 416
+        })
       }
       const changed =
         waitMs === 0 ||

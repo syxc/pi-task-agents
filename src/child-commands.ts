@@ -31,11 +31,8 @@ interface Execution {
 }
 interface Receipt {
   id: string
-  offset: number
   next: number
-  bytes: number
   terminal: boolean
-  complete: boolean
   automatic: boolean
   text: string
   release(): void
@@ -72,6 +69,9 @@ const parameters = Type.Object({
   offset: Type.Optional(Type.Integer({ minimum: 0 })),
   wait_ms: Type.Optional(Type.Integer({ minimum: 0 }))
 })
+// A child session can outlive many commands; keep automatic cursors for recent
+// commands only. An evicted command falls back to an explicit or full reread.
+const CURSOR_LIMIT = 1024
 const cleanupError = (cause: unknown): Error =>
   Object.assign(new Error('Owned command cleanup is unconfirmed', { cause }), {
     code: 'CHILD_CLEANUP_FAILED'
@@ -103,9 +103,26 @@ export async function createChildCommands(options: {
   const logs = new CommandLogs(options.sessionPath),
     running = new Map<string, Execution>()
   const receipts = new Map<string, Receipt>(),
-    cursors = new Map<string, number>(),
-    readEnd = new Map<string, number>()
+    cursors = new Map<string, number>()
   const readTails = new Map<string, Promise<unknown>>()
+  function cursor(id: string): number | undefined {
+    const value = cursors.get(id)
+    if (value !== undefined) {
+      cursors.delete(id)
+      cursors.set(id, value)
+    }
+    return value
+  }
+  function commitCursor(id: string, offset: number): void {
+    cursors.delete(id)
+    cursors.set(id, offset)
+    if (cursors.size > CURSOR_LIMIT) {
+      const oldest = cursors.keys().next().value
+      if (oldest !== undefined) {
+        cursors.delete(oldest)
+      }
+    }
+  }
   let group:
     | {
         id: string
@@ -171,7 +188,12 @@ export async function createChildCommands(options: {
       await cleanupDeadline(execution.done)
     } catch (error) {
       if (execution.settled) {
-        await execution.output.close()
+        try {
+          await execution.output.close()
+        } catch (closeError) {
+          execution.cleanupUnconfirmed = true
+          throw cleanupError(closeError)
+        }
         running.delete(id)
         journal.notify(id)
         return
@@ -273,7 +295,13 @@ export async function createChildCommands(options: {
         } finally {
           input.run.signal.removeEventListener('abort', onAbort)
           try {
-            await commandOutput.finish(result)
+            // An abort can surface as a tool error; that internal text is not command output.
+            // A stop that timed out keeps the late survivor's real result instead.
+            await commandOutput.finish(
+              failed && controller.signal.aborted && !execution.cleanupUnconfirmed
+                ? undefined
+                : result
+            )
           } catch (failure) {
             commandOutput.incomplete = true
             error ??= failure
@@ -368,7 +396,11 @@ export async function createChildCommands(options: {
         throw new Error(task.lastError?.message ?? 'Command admission failed')
       }
       await options.onStarted?.(run.id)
-      running.get(task.taskId)!.admit()
+      const admitted = running.get(task.taskId)
+      if (!admitted) {
+        throw new Error('Owned command stopped before execution could start')
+      }
+      admitted.admit()
       return reply({ command_id: task.taskId, status: task.status })
     } catch (error) {
       const execution = created ? running.get(created) : undefined
@@ -391,7 +423,7 @@ export async function createChildCommands(options: {
       if (signal?.aborted) {
         throw signal.reason ?? new Error('Output read aborted')
       }
-      const offset = input.offset ?? cursors.get(input.command_id) ?? 0,
+      const offset = input.offset ?? cursor(input.command_id) ?? 0,
         wait = Math.min(input.wait_ms ?? 0, 30000),
         deadline = Date.now() + wait
       let task = await owned(input.command_id, true)
@@ -444,11 +476,8 @@ export async function createChildCommands(options: {
       })
       receipts.set(toolCallId, {
         id: task.taskId,
-        offset,
         next: value.next_offset,
-        bytes: value.output_bytes,
-        terminal: isTerminalTaskStatus(task.status) && !cleanupPending,
-        complete: !value.truncated && !incomplete,
+        terminal: isTerminalTaskStatus(task.status),
         automatic,
         text: JSON.stringify(result.content),
         release
@@ -459,13 +488,17 @@ export async function createChildCommands(options: {
       ? (readTails.get(input.command_id) ?? Promise.resolve()).then(read)
       : read()
     if (automatic) {
-      readTails.set(
-        input.command_id,
-        operation.then(
-          () => committed,
-          () => {}
-        )
+      const tail = operation.then(
+        () => committed,
+        () => {}
       )
+      readTails.set(input.command_id, tail)
+      const cleanup = () => {
+        if (readTails.get(input.command_id) === tail) {
+          readTails.delete(input.command_id)
+        }
+      }
+      tail.then(cleanup, cleanup)
     }
     return operation
   }
@@ -556,17 +589,11 @@ export async function createChildCommands(options: {
       receipts.delete(event.toolCallId)
       if (!event.isError && JSON.stringify(event.content) === receipt.text) {
         if (receipt.automatic) {
-          cursors.set(receipt.id, receipt.next)
+          commitCursor(receipt.id, receipt.next)
         }
-        const previous = readEnd.get(receipt.id) ?? 0
-        if (receipt.offset <= previous) {
-          readEnd.set(receipt.id, Math.max(previous, receipt.next))
-        }
-        if (
-          receipt.terminal &&
-          receipt.complete &&
-          (readEnd.get(receipt.id) ?? 0) >= receipt.bytes
-        ) {
+        // Any successful terminal read consumes the completion notice, even when
+        // the caller still has unread bytes (upstream terminalTaskOutputReadIds).
+        if (receipt.terminal) {
           group?.read.add(receipt.id)
         }
       }

@@ -34,6 +34,21 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+export interface CodedFailure {
+  code: string
+  status: number
+  message: string
+}
+
+export function knownFailure(error: unknown): CodedFailure | undefined {
+  if (!(error instanceof Error) || !('code' in error) || !('status' in error)) {
+    return
+  }
+  return typeof error.code === 'string' && typeof error.status === 'number'
+    ? { code: error.code, status: error.status, message: error.message }
+    : undefined
+}
+
 export function notFound(
   toolName: string,
   taskId: string,

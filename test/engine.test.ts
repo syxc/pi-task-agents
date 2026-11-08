@@ -305,6 +305,18 @@ test('UTF-8 byte output, automatic cursor, waiting, failure output, notification
   assert.equal((await engine.output(a.task_id)).output, '')
   assert.equal((await engine.output(a.task_id, { offset: 0, limitBytes: 1 })).output, '中')
   assert.equal((await engine.output(a.task_id, { offset: 4, limitBytes: 1 })).output, 'x')
+  await assert.rejects(engine.output(a.task_id, { offset: 1000 }), {
+    code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+    status: 416
+  })
+  await assert.rejects(engine.output(a.task_id, { offset: -1 }), {
+    code: 'TASK_OUTPUT_INVALID',
+    status: 400
+  })
+  await assert.rejects(engine.output(a.task_id, { limitBytes: 0 }), {
+    code: 'TASK_OUTPUT_INVALID',
+    status: 400
+  })
   await waitFor(() => notifications.length === 1)
   assert.equal((await engine.output(a.task_id, { offset: 0 })).output, '中🙂x\n\n[failed] boom')
   assert.equal((await engine.query({ task_id: a.task_id })).status, 'failed')
@@ -345,7 +357,11 @@ test('parent lock, isolation and same-process owner changes preserve runtime cur
   await assert.rejects(competitor.init(), /active task owner/)
   const foreign = new TaskEngine({ rootDir, parentId: 'other', cwd: rootDir, createChild })
   await foreign.init()
-  await assert.rejects(foreign.query({ task_id: a.task_id }), /Unknown task/)
+  await assert.rejects(foreign.query({ task_id: a.task_id }), {
+    code: 'TASK_NOT_FOUND',
+    status: 404,
+    message: `Local background task not found: ${a.task_id}`
+  })
   await foreign.close()
   assert.equal((await stat(engine.store.file)).mode & 0o777, 0o600)
   assert.equal((await stat(engine.store.dir)).mode & 0o777, 0o700)
@@ -668,6 +684,36 @@ test('regression: queued cancel retries a failed terminal write without repeatin
   assert.equal(saved.tasks[1].output, '\n\n[aborted] first stop reason')
   assert.equal(saved.requests['start:queued-stop'], queued.task_id)
   assert.equal(children.length, 1)
+})
+
+test('regression: an unconfirmed queued cancellation rejects its foreground waiter with a defined error', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 1 })
+  await engine.start(input('blocker'), profile)
+  const foreground = engine.start(
+    { ...input('blocked foreground'), run_in_background: false },
+    profile
+  )
+  await waitFor(() => children[0]?.calls.length)
+  const queued = (await engine.query()).find((task) => task.status === 'queued')
+  assert.ok(queued)
+  const save = engine.store.save.bind(engine.store)
+  const fault = new Error('queued cancel write failed')
+  engine.store.save = async () => {
+    throw fault
+  }
+  const rejected = assert.rejects(foreground, (error) => {
+    assert.ok(
+      error instanceof Error,
+      'an unconfirmed terminal write must not reject with undefined'
+    )
+    assert.match(error.message, /unconfirmed/)
+    return true
+  })
+  await assert.rejects(engine.stop(queued.task_id, 'stop queued'), fault)
+  engine.changed(engine.task(queued.task_id))
+  await rejected
+  engine.store.save = save
+  await engine.close()
 })
 
 test('regression: close retries uncertain queued cancellations and retains ownership on another write failure', async (t) => {
@@ -1518,7 +1564,11 @@ test('regression: idle send has no background notification and replays before ch
   assert.deepEqual(children[0].steers, [])
   assert.equal((await engine.query({ task_id: background.task_id })).status, 'running')
   assert.equal(engine.waiters.size, 0)
-  await assert.rejects(engine.send('foreign-session', 'no'), /Unknown task/)
+  await assert.rejects(engine.send('foreign-session', 'no'), {
+    code: 'TASK_NOT_FOUND',
+    status: 404,
+    message: 'Local background task not found: foreign-session'
+  })
 })
 
 test('regression: send rejects busy queued and running sessions without mutating or canceling background work', async (t) => {

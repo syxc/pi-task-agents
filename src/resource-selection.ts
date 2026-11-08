@@ -4,6 +4,16 @@ import { fileURLToPath } from 'node:url'
 import type { AgentProfile } from './types.ts'
 
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url))
+
+/** An unresolvable path cannot name a file; it must neither authorize nor block one. */
+export function isUnavailablePath(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR' || error.code === 'ELOOP')
+  )
+}
 export const mcpResources = [
   'list_mcp_resources',
   'list_mcp_resource_templates',
@@ -57,7 +67,7 @@ export async function sameFile(first: string, second: string): Promise<boolean> 
     ])
     return left.dev === right.dev && left.ino === right.ino
   } catch (error) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+    if (isUnavailablePath(error)) {
       return false
     }
     throw error

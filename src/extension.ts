@@ -13,11 +13,23 @@ import {
   TERMINAL_TASK_STATUSES,
   isActiveTaskStatus
 } from './vendor/mcode-background-task/status.ts'
-import { isRecord, notFound, projectedResult, type TaskToolResult } from './tool-result-common.ts'
+import {
+  isRecord,
+  knownFailure,
+  notFound,
+  projectedResult,
+  type TaskToolResult
+} from './tool-result-common.ts'
 import { appendFailure, appendResult, knownAppendFailure, taskResult } from './tool-result-task.ts'
-import { OutputProjector, outputWait, queryResult, stopResult } from './tool-result-control.ts'
+import {
+  OutputProjector,
+  outputFailure,
+  outputWait,
+  queryResult,
+  stopResult
+} from './tool-result-control.ts'
 import { renderRoles, roleOverview } from './task-presentation.ts'
-import type { TaskSummary } from './types.ts'
+import type { TaskOutput, TaskSummary } from './types.ts'
 export type { TaskToolResult } from './tool-result-common.ts'
 
 const nonempty = () => Type.String({ minLength: 1 })
@@ -359,11 +371,21 @@ export function registerTaskAgents(
         outputProjector.reset()
         return notFound('task_output', params.task_id, { ...wait })
       }
-      const result = await engine.output(params.task_id, {
-        offset: params.offset,
-        wait_ms: wait.effective_wait_ms,
-        signal
-      })
+      let result: TaskOutput
+      try {
+        result = await engine.output(params.task_id, {
+          offset: params.offset,
+          wait_ms: wait.effective_wait_ms,
+          signal
+        })
+      } catch (error) {
+        const failure = knownFailure(error)
+        if (!failure?.code.startsWith('TASK_OUTPUT_')) {
+          throw error
+        }
+        outputProjector.reset()
+        return outputFailure(params.task_id, failure, wait)
+      }
       return outputProjector.result(
         result,
         wait,
@@ -408,15 +430,19 @@ export function registerTaskAgents(
     outputProjector.reset()
     try {
       await controller.ensure(ctx)
-      await controller.flush()
+      await controller.flush({ startup: true })
     } catch (error) {
       controller.warn(error)
     }
   })
   pi.on('session_shutdown', async (event) => {
-    // Drain delegated tools while the owner's native hooks and MCP connections still exist.
-    await controller.shutdown(event.reason)
-    parentTools.invalidate()
+    try {
+      // Drain delegated tools while the owner's native hooks and MCP connections still exist.
+      await controller.shutdown(event.reason)
+    } finally {
+      // A failed close must not keep stale runtime captures or dispatches alive.
+      parentTools.invalidate()
+    }
   })
   pi.on('before_agent_start', async (event, ctx) => {
     const epoch = controller.cancelEpoch
@@ -464,10 +490,25 @@ export function registerTaskAgents(
           content: [{ type: 'text', text: renderStopAll(tasks) }]
         })
         return
-      } else if (command === 'stop' && id) {
-        result = await engine.stop(id, 'User requested cancellation')
-      } else if (command === 'show' && id) {
-        result = await engine.output(id, { offset: 0, limitBytes: 65536 })
+      } else if ((command === 'stop' || command === 'show') && id) {
+        try {
+          result =
+            command === 'stop'
+              ? await engine.stop(id, 'User requested cancellation')
+              : await engine.output(id, { offset: 0, limitBytes: 65536 })
+        } catch (error) {
+          pi.sendMessage({
+            customType: 'pi-task-agents:status',
+            display: true,
+            content: [
+              {
+                type: 'text',
+                text: `Task ${command} failed: ${error instanceof Error ? error.message : String(error)}`
+              }
+            ]
+          })
+          return
+        }
       } else if (command === 'resume') {
         controller.resume()
         await controller.flush()

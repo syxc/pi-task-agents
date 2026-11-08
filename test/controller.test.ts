@@ -114,7 +114,7 @@ function fixture(entries = [], roles = {}) {
       return () => {}
     }
   })
-  return { controller, ctx, engines, sent, entries, pi, factories }
+  return { controller, ctx, engines, sent, entries, pi, factories, Engine }
 }
 test('codemode authority follows the attached native parent and is not captured from a stale owner', async () => {
   const f = fixture()
@@ -270,6 +270,36 @@ test('completion is sent once and stays pending until the persisted message rece
   await f.controller.flush()
   assert.equal(f.sent.length, 1)
   await f.controller.shutdown()
+})
+
+test('startup delivery queues outside TUI instead of starting a turn before the host prompt', async () => {
+  const f = fixture()
+  try {
+    f.ctx.mode = 'print'
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(complete())
+    await f.controller.flush({ startup: true })
+    assert.equal(f.sent.length, 1)
+    assert.deepEqual(f.sent[0][1], { deliverAs: 'nextTurn' })
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1, 'a queued startup notice must not be redelivered as a wake')
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('startup delivery still wakes an interactive TUI session', async () => {
+  const f = fixture()
+  try {
+    f.ctx.mode = 'tui'
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(complete())
+    await f.controller.flush({ startup: true })
+    assert.equal(f.sent.length, 1)
+    assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' })
+  } finally {
+    await f.controller.shutdown()
+  }
 })
 
 test('background completion delivers verifier facts without treating a failed verdict as execution failure', async () => {
@@ -625,6 +655,75 @@ test('receipt checks use disk even when Pi in-memory entries already contain the
   await f.controller.reconcile()
   assert.equal(f.engines[0].tasks[0].notification_pending, false)
   await f.controller.shutdown()
+})
+
+test('a malformed parent JSONL record does not block later durable receipts', async () => {
+  const { mkdir, mkdtemp, writeFile } = await import('node:fs/promises')
+  const root = new URL('../artifacts/controller-tests/', import.meta.url)
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const dir = await mkdtemp(new URL('receipt-torn-', root).pathname)
+  const file = dir + '/parent.jsonl'
+  const result = {
+    type: 'custom_message',
+    customType: RESULT_TYPE,
+    details: { task_id: 't1', parent_id: 'parent-a' }
+  }
+  await writeFile(file, '{"type":"torn"\n' + JSON.stringify(result) + '\n', { mode: 0o600 })
+  const f = fixture()
+  f.ctx.sessionManager.getSessionFile = () => file
+  await f.controller.ensure(f.ctx)
+  f.engines[0].tasks.push(complete())
+  await f.controller.reconcile()
+  assert.equal(
+    f.engines[0].tasks[0].notification_pending,
+    false,
+    'a crashed append must not hide the valid receipt that follows it'
+  )
+  await f.controller.shutdown()
+})
+
+test('a failed owner close is retried before a replacement controller reuses the store', async () => {
+  const f = fixture()
+  await f.controller.ensure(f.ctx)
+  const engine = f.engines[0]
+  engine.tasks.push({ task_id: 'background', status: 'running' })
+  const close = engine.close.bind(engine)
+  let blocked = true
+  engine.close = async () => {
+    if (blocked) {
+      throw new Error('CLOSE_UNCONFIRMED')
+    }
+    await close()
+  }
+  await assert.rejects(f.controller.shutdown(), /CLOSE_UNCONFIRMED/)
+  assert.equal(f.controller.engine, undefined)
+  await engine.options.notify()
+  assert.equal(f.sent.length, 0, 'a failed close must still detach the old parent callbacks')
+  let replacementFactories = 0
+  const replacement = new TaskController(f.pi, {
+    agentDir: '/agent',
+    Engine: f.Engine,
+    configLoader: async () => ({ maxConcurrency: 4, roles: {}, diagnostics: [] }),
+    childFactory: () => {
+      replacementFactories++
+      return () => {}
+    }
+  })
+  try {
+    await assert.rejects(replacement.ensure(f.ctx), /CLOSE_UNCONFIRMED/)
+    assert.equal(f.engines.length, 1, 'an unconfirmed close must not start a second engine')
+    assert.equal(replacement.engine, undefined)
+    blocked = false
+    await replacement.ensure(f.ctx)
+    assert.equal(engine.closed, true, 'the retained engine must be closed before replacement')
+    assert.equal(f.engines.length, 2)
+    assert.equal(replacement.engine, f.engines[1])
+    assert.equal(replacementFactories, 1)
+  } finally {
+    blocked = false
+    await replacement.shutdown()
+  }
+  assert.equal(f.engines[1].closed, true)
 })
 
 test('shutdown during initialization cannot leave a new task owner alive', async () => {
@@ -1081,6 +1180,25 @@ test('headless failure delivery creates no visual receipt and unavailable UI doe
     }
     await f.controller.flush()
     assert.equal(f.sent.length, 2)
+  } finally {
+    f.ctx.hasUI = false
+    await f.controller.shutdown()
+  }
+})
+
+test('warnings stay best-effort when the UI context is unavailable', async () => {
+  const f = fixture()
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget() {},
+    notify() {
+      throw new Error('UI unavailable')
+    }
+  }
+  try {
+    await f.controller.ensure(f.ctx)
+    assert.doesNotThrow(() => f.controller.warn(new Error('fixture warning')))
   } finally {
     f.ctx.hasUI = false
     await f.controller.shutdown()

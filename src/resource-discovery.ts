@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
-import { sameFile } from './resource-selection.ts'
+import { isUnavailablePath, sameFile } from './resource-selection.ts'
 
 type DiscoverySdk = {
   DefaultPackageManager?: typeof DefaultPackageManager
@@ -36,9 +36,7 @@ export async function discoverResourcePaths(
           try {
             text = readFileSync(scope === 'global' ? globalFile : projectFile, 'utf8')
           } catch (error) {
-            if (
-              !(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
-            ) {
+            if (!isUnavailablePath(error)) {
               throw error
             }
           }

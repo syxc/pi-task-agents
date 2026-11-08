@@ -9,7 +9,6 @@ type Window = {
 export interface ChildCommittedMessages {
   available: boolean
   text: string
-  assistantMessageId?: string
 }
 
 /** Use Pi's active branch and durable context edits, not message_end events,
@@ -68,7 +67,6 @@ export function createChildMessageWindow<T extends object>(manager: SessionManag
         }
       }
       const texts: string[] = []
-      let assistantMessageId: string | undefined
       for (const entry of branch.slice(root + 1)) {
         if (
           entry.type !== 'message' ||
@@ -94,13 +92,8 @@ export function createChildMessageWindow<T extends object>(manager: SessionManag
         if (text) {
           texts.push(text)
         }
-        assistantMessageId = entry.id
       }
-      return {
-        available: true,
-        text: texts.join('\n').trim(),
-        ...(assistantMessageId ? { assistantMessageId } : {})
-      }
+      return { available: true, text: texts.join('\n').trim() }
     } catch {
       return { available: false, text: '' }
     }

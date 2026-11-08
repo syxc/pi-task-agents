@@ -1,5 +1,11 @@
 import type { TaskInput, TaskSummary } from './types.ts'
-import { escapeAttribute, projectedResult, type TaskToolResult } from './tool-result-common.ts'
+import {
+  escapeAttribute,
+  knownFailure,
+  projectedResult,
+  type CodedFailure,
+  type TaskToolResult
+} from './tool-result-common.ts'
 import { verificationText } from './task-verification.ts'
 
 // Project persisted source facts only; legacy records may omit newer fields.
@@ -87,11 +93,7 @@ export function taskResult(
   )
 }
 
-export interface AppendFailure {
-  code: string
-  status: number
-  message: string
-}
+export type AppendFailure = CodedFailure
 
 export function appendFailure(taskId: string, error: AppendFailure): TaskToolResult {
   const text = `<task_append_error task_id="${escapeAttribute(taskId)}" code="${error.code}">${error.message}</task_append_error>`
@@ -109,14 +111,7 @@ export function appendFailure(taskId: string, error: AppendFailure): TaskToolRes
   )
 }
 
-export function knownAppendFailure(error: unknown): AppendFailure | undefined {
-  if (!(error instanceof Error) || !('code' in error) || !('status' in error)) {
-    return
-  }
-  return typeof error.code === 'string' && typeof error.status === 'number'
-    ? { code: error.code, status: error.status, message: error.message }
-    : undefined
-}
+export const knownAppendFailure = knownFailure
 
 export function appendResult(
   task: Pick<TaskSummary, 'task_id' | 'mode' | 'accepted'>

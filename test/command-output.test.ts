@@ -134,6 +134,21 @@ test('arbitrary output paths and file URIs never replace the already returned to
   assert.equal(await readFile(secret, 'utf8'), 'FORBIDDEN_PRIVATE_BYTES')
 })
 
+test('final text that contradicts the streamed prefix marks the log incomplete', async (t) => {
+  const f = await fixture(t)
+  f.output.update({
+    content: [{ type: 'text', text: 'streamed prefix' }],
+    details: {}
+  })
+  await f.output.finish({
+    content: [{ type: 'text', text: 'different final text' }],
+    details: {}
+  })
+  assert.equal(f.output.incomplete, true)
+  assert.equal(f.output.hasOpenResources, false)
+  assert.equal(await readFile(join(f.logs.root, f.id + '.log'), 'utf8'), 'streamed prefix')
+})
+
 test('native source replacement uses the pinned FileHandle with bounded-copy fallback, never the replacement bytes', async (t) => {
   const f = await fixture(t),
     bytes = Buffer.from('original native output\n'.repeat(10000))

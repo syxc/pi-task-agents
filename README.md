@@ -37,7 +37,7 @@ pi install git:github.com/syxc/pi-task-agents
 - 父会话须用 `task_output` 读取持久结果再整合回复，`details` 等元数据不能代替读取；不按长度筛选必要信息或截取报告摘要。
 - `task_output` 默认返回完整验证文本及覆盖整个报告的确定性 SHA-256 fingerprint。读过报告后，可用 `known_verification_fingerprint` 回传该值；仅匹配当前报告时省略验证详情文本，缺失或不匹配时返回当前完整报告。省略时仍有 fingerprint、说明和恢复方法，实际输出、状态、错误、游标、截断标志及 `details.verification` 不变。任意有效 `offset`、重试或原父会话恢复后，省略该参数即可重读完整报告；不依赖投递历史。
 
-通知与结果分离：Pi 原生扩展消息通过 `followUp` 排队，不模拟用户提交。`display:false` 只隐藏 TUI 展示，仍进入模型上下文、唤醒空闲主会话，不等于减少 token。`task_output` 不是 Bash 日志流，取消读取不会停止任务。
+通知与结果分离：运行期间的完成通知通过 `followUp` 排队并唤醒空闲主会话，不模拟用户提交；启动时仍有待投递通知时，TUI 同样唤醒，print/json/RPC 模式改用 `nextTurn` 排队，避免宿主即将提交首个提示时抢占运行槽。`display:false` 只隐藏 TUI 展示，仍进入模型上下文、唤醒空闲主会话，不等于减少 token。`task_output` 不是 Bash 日志流，取消读取不会停止任务。
 
 ### 续接与查看状态
 
@@ -149,7 +149,7 @@ PTC 类调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。父 Pi 
 工具、资源、超时和并发均非入门必填项。加载顺序为默认值 → `<agentDir>/task-agents.json` → 已信任项目的 `.pi/task-agents.json`；未信任项目配置不生效。指令逐层追加，其他字段替换，示例见 [examples/task-agents.json](examples/task-agents.json)。
 
 - 超时：`timeoutMs: 0` 表示不限时。
-- 角色名称：裸名配置可覆盖内置角色；自定义 `researcher` 可用 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。
+- 角色名称：裸名配置可覆盖内置角色；自定义 `researcher` 可用 `researcher` 或 `agent:researcher` 调用，`agent:worker` 与内置 `worker` 独立。配置键区分大小写，请求中的内置名按大小写不敏感匹配，因此配置 `"Worker"` 是独立的 `agent:Worker`，而请求 `Worker` 会选择内置 `worker`；自定义角色应使用与调用一致的大小写。
 - 兼容性：旧配置的显式模型、工具和空资源列表仍有优先权，不自动迁移；MCode 专有工具名或 effort 值须人工审阅后改用 Pi 能力。
 
 ### 资源选择与权限快照
@@ -189,7 +189,7 @@ PTC 类调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。父 Pi 
 
 - 父 turn abort 会取消前台等待并暂停自动通知，不自动停止已准入的后台任务。停止任务须使用 `task_stop` 或明确的 `/tasks stop-all`。
 - 切换、新建、fork、重载或退出父会话时，先取消并排空该 owner 的在途执行，再关闭工具桥。后台任务不跨父 runtime 替换继续运行，不转交新会话；本地任务状态、子历史和输出保留，回到原会话可续接。异常退出后不重放可能已有副作用的执行。
-- 清理失败保留资源占用并允许重试；插件不是跨进程任务守护服务。已有子历史不随父会话后来切换模型或思考设置而改变。父扩展生命周期仍由 Pi 管理，插件不接管扩展自行启动的外部进程。
+- 清理失败保留资源占用并允许重试；插件不是跨进程任务守护服务。父进程被 SIGKILL 或掉电时无法执行清理，宿主原生 Bash 子进程可能继续运行，需由操作系统或外部进程管理处理。已有子历史不随父会话后来切换模型或思考设置而改变。父扩展生命周期仍由 Pi 管理，插件不接管扩展自行启动的外部进程。
 - 取消不撤销已发生的本地或远端副作用；权限 hook 或服务未实际结束时，不能宣称清理完成。
 - 不提供自建 Bash/web_fetch、部署、SQLite 文件观测或 MCode TUI。若需要外部工具，通过 Pi 的可信资源配置接入。
 

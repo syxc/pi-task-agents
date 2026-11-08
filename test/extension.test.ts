@@ -69,6 +69,9 @@ function fixture() {
     }
     async output(id, options) {
       this.read = { id, options }
+      if (this.outputError) {
+        throw this.outputError
+      }
       return this.result
     }
     async stop(id, reason) {
@@ -411,6 +414,37 @@ test('output accepts overlong waits, reports the cap and passes cancellation to 
   }
 })
 
+test('output offset failures return structured task_output errors', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].outputError = Object.assign(new Error('Output offset exceeds available bytes'), {
+      code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+      status: 416
+    })
+    const reply = await f.execute('task_output', {
+      task_id: 't1',
+      offset: 999,
+      wait_ms: 60000
+    })
+    assert.equal(reply.isError, true)
+    assert.equal(
+      reply.text,
+      '<task_output_error task_id="t1" code="TASK_OUTPUT_OFFSET_OUT_OF_RANGE">Output offset exceeds available bytes</task_output_error>'
+    )
+    assert.deepEqual(reply.details, {
+      task_id: 't1',
+      code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+      status: 416,
+      effective_wait_ms: 30000,
+      wait_ms_clamped: true,
+      error_message: 'Output offset exceeds available bytes'
+    })
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('output verification schema and guidance preserve explicit opt-out and full rereads', async () => {
   const f = fixture()
   try {
@@ -628,6 +662,33 @@ test('task schema accepts raw effort and prepares blank optional model/effort wi
   }
 })
 
+test('tasks stop and show report lookup failures as status messages instead of extension errors', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    for (const command of ['stop', 'show']) {
+      const method = command === 'show' ? 'output' : 'stop'
+      f.engines[0][method] = async () => {
+        throw Object.assign(new Error('Local background task not found: missing'), {
+          code: 'TASK_NOT_FOUND',
+          status: 404
+        })
+      }
+      /* oxlint-disable-next-line no-await-in-loop -- Both commands mutate the shared fixture and assert the latest status message. */
+      await f.commands.get('tasks').handler(`${command} missing`, f.ctx)
+      const message = f.sent.at(-1)[0]
+      assert.equal(message.customType, 'pi-task-agents:status')
+      assert.equal(message.display, true)
+      assert.equal(
+        message.content[0].text,
+        `Task ${command} failed: Local background task not found: missing`
+      )
+    }
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('role discovery and slash roles are compact without leaking instructions or internal snapshots', async () => {
   const f = fixture()
   try {
@@ -815,7 +876,9 @@ test('real engine adapter waits by default, continues the same child and enforce
     for (const handle of [result.details.task_id, result.details.sub_session_id]) {
       const denied = await execute('task_send', { task_id: handle, content: 'intrusion' }, other)
       assert.equal(denied.isError, true)
-      assert.match(denied.details.error_message, /Unknown task|owner|parent/i)
+      assert.equal(denied.details.code, 'TASK_NOT_FOUND')
+      assert.equal(denied.details.status, 404)
+      assert.equal(denied.details.error_message, `Local background task not found: ${handle}`)
     }
     /* oxlint-enable no-await-in-loop */
     assert.deepEqual(children[0].prompts, ['first', 'second', 'third'])

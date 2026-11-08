@@ -86,7 +86,7 @@ export async function appendTask(
           (task) => task.task_id === taskId && task.parent_id === host.parentId
         )
         if (!original) {
-          throw failure('TASK_NOT_FOUND', 404, 'Unknown task for this parent')
+          throw failure('TASK_NOT_FOUND', 404, `Local background task not found: ${taskId}`)
         }
         const task = tasks.findLast((item) => item.session_id === original.session_id)!
         if (task.status === 'stopping') {

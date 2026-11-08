@@ -195,9 +195,21 @@ export function createPiChildFactory({
       }
     }
     checkCanceled()
-    const api = await (sdkPromise ??= Promise.resolve(
-      (sdk as PiSdk | undefined) ?? import('@earendil-works/pi-coding-agent')
-    ))
+    let load = sdkPromise
+    if (!load) {
+      const created = Promise.resolve(
+        (sdk as PiSdk | undefined) ?? import('@earendil-works/pi-coding-agent')
+      )
+      load = created
+      sdkPromise = created
+      // A transient module-load failure must not poison every later child.
+      void created.catch(() => {
+        if (sdkPromise === created) {
+          sdkPromise = undefined
+        }
+      })
+    }
+    const api = await load
     checkCanceled()
     const parentRuntime = getParentRuntime?.()
     const shared =
@@ -302,16 +314,28 @@ export function createPiChildFactory({
     ) {
       throw new Error('Invalid child model runtime')
     }
-    const runtime = await (runtimePromise ??= Promise.resolve(
-      modelRuntime == null
-        ? api.ModelRuntime.create({
-            authPath: resolve(configDir, 'auth.json'),
-            modelsPath: resolve(configDir, 'models.json'),
-            allowModelNetwork: false,
-            refreshOnCreate: false
-          })
-        : (modelRuntime as unknown as ModelRuntime)
-    ))
+    let pendingRuntime = runtimePromise
+    if (!pendingRuntime) {
+      const created = Promise.resolve(
+        modelRuntime == null
+          ? api.ModelRuntime.create({
+              authPath: resolve(configDir, 'auth.json'),
+              modelsPath: resolve(configDir, 'models.json'),
+              allowModelNetwork: false,
+              refreshOnCreate: false
+            })
+          : (modelRuntime as unknown as ModelRuntime)
+      )
+      pendingRuntime = created
+      runtimePromise = created
+      // Transient runtime setup failures are retryable on the next child.
+      void created.catch(() => {
+        if (runtimePromise === created) {
+          runtimePromise = undefined
+        }
+      })
+    }
+    const runtime = await pendingRuntime
     checkCanceled()
     const slash = profile.model?.indexOf('/') ?? -1
     const provider = profile.model?.slice(0, slash) ?? inheritedModel?.provider

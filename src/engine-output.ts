@@ -9,6 +9,27 @@ interface OutputRuntime {
 const key = Symbol.for('pi-task-agents.output-runtime.v1')
 const processState = globalThis as typeof globalThis & { [key: symbol]: OutputRuntime | undefined }
 const runtime = (processState[key] ??= { cursors: new Map(), reads: new Map() })
+// The registry is shared by every session in the process, so old tasks must not
+// retain cursors indefinitely. An evicted task restarts from explicit or full reads.
+const CURSOR_LIMIT = 4096
+function readCursor(cursorKey: string): number | undefined {
+  const value = runtime.cursors.get(cursorKey)
+  if (value !== undefined) {
+    runtime.cursors.delete(cursorKey)
+    runtime.cursors.set(cursorKey, value)
+  }
+  return value
+}
+function commitCursor(cursorKey: string, offset: number): void {
+  runtime.cursors.delete(cursorKey)
+  runtime.cursors.set(cursorKey, offset)
+  if (runtime.cursors.size > CURSOR_LIMIT) {
+    const oldest = runtime.cursors.keys().next().value
+    if (oldest !== undefined) {
+      runtime.cursors.delete(oldest)
+    }
+  }
+}
 
 export class TaskOutputReads {
   private readonly owner: string
@@ -29,10 +50,12 @@ export class TaskOutputReads {
       .catch(() => {})
       .then(async () => {
         aborted(signal)
-        const output = await read(runtime.cursors.get(cursorKey) ?? 0)
+        const output = await read(readCursor(cursorKey) ?? 0)
         aborted(signal)
-        // A committed cursor must be accompanied by a delivered result.
-        runtime.cursors.set(cursorKey, output.next_offset)
+        // Pi records an executed tool result even if the turn aborts afterwards,
+        // so committing before returning cannot strand the result (upstream
+        // readOutput commits at the same point).
+        commitCursor(cursorKey, output.next_offset)
         committed = true
         return output
       })

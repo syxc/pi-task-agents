@@ -105,7 +105,12 @@ test('native startup cancellation retains the controller owner and real leases u
     const rootDir = join(f.agentDir, 'task-agents', 'sessions')
     assert.equal(getOwner(rootDir, 'native-parent')?.engine, engine)
     await assert.rejects(bounded(controller.shutdown()), { code: 'CHILD_CLEANUP_FAILED' })
-    assert.equal(controller.engine, engine)
+    assert.equal(
+      controller.engine,
+      undefined,
+      'an unconfirmed close must detach the controller so a later attempt can attach'
+    )
+    assert.equal(getOwner(rootDir, 'native-parent')?.cleanupFailed, true)
     const other = new TaskEngine({
       rootDir,
       parentId: 'native-parent',

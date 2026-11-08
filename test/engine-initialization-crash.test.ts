@@ -158,7 +158,7 @@ for (const phase of [
         'the later fallback marker was not written'
       )
     }
-    const atCrash = await json(join(root, 'resource.json'))
+    const atCrash = await until(() => json(join(root, 'resource.json')), 'pre-crash snapshot')
     child.kill('SIGKILL')
     await until(() => exited, 'crash exit')
     if (phase.startsWith('cleanup-')) {
