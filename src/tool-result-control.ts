@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { TaskOutput, TaskSummary } from './types.ts'
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts'
 import {
+  escapeText,
   failureResult,
   projectedResult,
   type CodedFailure,
@@ -102,9 +103,10 @@ export function queryResult(tasks: TaskSummary | TaskSummary[]): TaskToolResult 
 }
 
 export function stopResult(task: TaskSummary, requestedId = task.task_id): TaskToolResult {
+  const id = escapeText(requestedId)
   const message = task.stopError
-    ? `Stop failed for ${requestedId}: ${task.stopError.message}. Process cleanup could not be confirmed.`
-    : `Task ${requestedId} is ${task.status}.`
+    ? `Stop failed for ${id}: ${task.stopError.message}. Process cleanup could not be confirmed.`
+    : `Task ${id} is ${task.status}.`
   return projectedResult(
     'task_stop',
     `<task_stop status="${task.status}">\n${message}\n</task_stop>`,
