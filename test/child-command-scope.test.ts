@@ -63,15 +63,13 @@ async function fixture(t: TestContext, nativeOutput?: string) {
     }
   }
   let calls = 0
+  const callAs = async (toolCallId: string, input: object) => {
+    const result = await definition.execute(toolCallId, input, controller.signal, undefined, ctx)
+    return { parsed: JSON.parse(result.content[0].text), content: result.content }
+  }
   const call = async (input: object) => {
-    const result = await definition.execute(
-      'owned-control-' + ++calls,
-      input,
-      controller.signal,
-      undefined,
-      ctx
-    )
-    return JSON.parse(result.content[0].text)
+    const result = await callAs('owned-control-' + ++calls, input)
+    return result.parsed
   }
   t.after(async () => {
     release?.()
@@ -81,6 +79,7 @@ async function fixture(t: TestContext, nativeOutput?: string) {
   return {
     commands,
     call,
+    callAs,
     started,
     listeners,
     signal: () => signal,
@@ -90,6 +89,42 @@ async function fixture(t: TestContext, nativeOutput?: string) {
     release: () => release()
   }
 }
+
+test('duplicate tool-call IDs keep one receipt per output read and do not strand cursors', async (t) => {
+  const f = await fixture(t)
+  const first = await f.call({ action: 'start', command: 'first command' })
+  f.release()
+  await f.commands.finish('turn-A', false)
+  const second = await f.call({ action: 'start', command: 'second command' })
+  f.release()
+  await f.commands.finish('turn-A', false)
+  const readFirst = await f.callAs('duplicate-call', {
+    action: 'output',
+    command_id: first.command_id
+  })
+  const readSecond = await f.callAs('duplicate-call', {
+    action: 'output',
+    command_id: second.command_id
+  })
+  const result = f.listeners.get('tool_result') as unknown as (event: {
+    toolCallId: string
+    content: unknown
+    isError: boolean
+  }) => void
+  assert.equal(typeof result, 'function')
+  result({ toolCallId: 'duplicate-call', content: readFirst.content, isError: false })
+  result({ toolCallId: 'duplicate-call', content: readSecond.content, isError: false })
+  // Each automatic read waits for its own receipt before the next read starts; a
+  // receipt replaced by the duplicate ID would block this read forever.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const next = await Promise.race([
+    f.call({ action: 'output', command_id: first.command_id }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('automatic output read stalled')), 1000)
+    })
+  ]).finally(() => clearTimeout(timer))
+  assert.equal((next as { status: string }).status, 'succeeded')
+})
 
 test('a live command is not controllable from another child turn or by a parent/foreign handle', async (t) => {
   const f = await fixture(t),
