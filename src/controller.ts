@@ -36,6 +36,8 @@ const FAILURE_NOTICE_TYPE = 'pi-task-agents:failure-notice'
 const DELIVERY_RETRY_DELAYS_MS = [1000, 2000, 5000] as const
 const DELIVERY_RECOVERY_INITIAL_MS = 60_000
 const DELIVERY_RECOVERY_MAX_MS = 300_000
+const DELIVERY_BURST_WINDOW_MS = 60_000
+const MAX_DELIVERY_TURNS_PER_WINDOW = 3
 const MAX_NOTIFICATION_BATCH_TASKS = 32
 const MAX_NOTIFICATION_BATCH_BYTES = 8 * 1024
 
@@ -115,12 +117,16 @@ export class TaskController {
   private readonly retryAt = new Map<string, number>()
   private readonly recoveryDelay = new Map<string, number>()
   private readonly admissions = new Set<AbortController>()
+  private burstStartedAt = 0
+  private burstDelivered = 0
   private generation = 0
   private initializing: Promise<unknown> = Promise.resolve()
   private delivery: Promise<void> = Promise.resolve()
   private receiptTimer?: ReturnType<typeof setTimeout>
   private retryTimer?: ReturnType<typeof setTimeout>
   private retryTimerAt?: number
+  private burstTimer?: ReturnType<typeof setTimeout>
+  private burstTimerAt?: number
   private uiTimer?: ReturnType<typeof setTimeout>
   private uiRevision = 0
   private uiActive = false
@@ -603,6 +609,7 @@ export class TaskController {
     const engine = this.engine
     const epoch = this.cancelEpoch
     if (!engine || !this.eligible(engine, epoch)) {
+      this.clearBurstTimer()
       this.clearRetryTimer()
       return
     }
@@ -612,10 +619,12 @@ export class TaskController {
     const wake = !options.startup || this.ctx?.mode === 'tui'
     const pending = await engine.pendingNotifications()
     if (!parentId || !this.eligible(engine, epoch)) {
+      this.clearBurstTimer()
       this.clearRetryTimer()
       return
     }
     if (pending.length === 0) {
+      this.clearBurstTimer()
       this.clearRetryTimer()
       return
     }
@@ -625,9 +634,18 @@ export class TaskController {
     )
     const batch = this.selectNotificationBatch(ready)
     if (batch.length === 0) {
+      this.clearBurstTimer()
       this.armRetryTimer(pending)
       return
     }
+    const burstEnd = this.deliveryBurstEnd(now)
+    if (burstEnd !== undefined) {
+      // Deferring keeps tasks pending so a later batch can merge newer terminals.
+      this.armBurstTimer(burstEnd)
+      this.armRetryTimer(pending)
+      return
+    }
+    this.clearBurstTimer()
     for (const task of batch) {
       this.notifyFailure(task)
       this.inFlight.set(task.task_id, now)
@@ -642,16 +660,21 @@ export class TaskController {
         this.retryAt.set(task.task_id, now + delay)
       }
     }
+    let delivered = false
     try {
       this.pi.sendMessage(
         this.notificationMessage(batch, parentId),
         wake ? { triggerTurn: true, deliverAs: 'followUp' } : { deliverAs: 'nextTurn' }
       )
+      delivered = true
     } catch (error) {
       for (const task of batch) {
         this.inFlight.delete(task.task_id)
       }
       this.warn(error)
+    }
+    if (delivered) {
+      this.burstDelivered++
     }
     // sendMessage returns void; a later disk/idle check also catches asynchronous failures.
     this.armRetryTimer(pending)
@@ -743,6 +766,43 @@ export class TaskController {
     this.retryTimerAt = undefined
   }
 
+  private deliveryBurstEnd(now: number): number | undefined {
+    if (now - this.burstStartedAt >= DELIVERY_BURST_WINDOW_MS) {
+      this.burstStartedAt = now
+      this.burstDelivered = 0
+    }
+    return this.burstDelivered < MAX_DELIVERY_TURNS_PER_WINDOW
+      ? undefined
+      : this.burstStartedAt + DELIVERY_BURST_WINDOW_MS + 1
+  }
+
+  private armBurstTimer(at: number): void {
+    if (this.closing || this.suppressed) {
+      this.clearBurstTimer()
+      return
+    }
+    if (this.burstTimer && this.burstTimerAt !== undefined && this.burstTimerAt <= at) {
+      return
+    }
+    this.clearBurstTimer()
+    this.burstTimerAt = at
+    this.burstTimer = setTimeout(
+      () => {
+        this.burstTimer = undefined
+        this.burstTimerAt = undefined
+        this.flush().catch((error: unknown) => this.warn(error))
+      },
+      Math.max(0, at - Date.now())
+    )
+    this.burstTimer.unref()
+  }
+
+  private clearBurstTimer(): void {
+    clearTimeout(this.burstTimer)
+    this.burstTimer = undefined
+    this.burstTimerAt = undefined
+  }
+
   private clearDeliveryState(taskId: string): void {
     this.inFlight.delete(taskId)
     this.attempts.delete(taskId)
@@ -829,6 +889,7 @@ export class TaskController {
     this.suppressed = true
     clearTimeout(this.receiptTimer)
     this.receiptTimer = undefined
+    this.clearBurstTimer()
     this.clearRetryTimer()
   }
 
@@ -871,6 +932,7 @@ export class TaskController {
     }
     clearTimeout(this.receiptTimer)
     this.receiptTimer = undefined
+    this.clearBurstTimer()
     this.clearRetryTimer()
     await this.delivery
     let released = false
@@ -898,6 +960,9 @@ export class TaskController {
       this.attempts.clear()
       this.retryAt.clear()
       this.recoveryDelay.clear()
+      this.burstStartedAt = 0
+      this.burstDelivered = 0
+      this.clearBurstTimer()
       this.clearRetryTimer()
       try {
         if (this.ctx?.hasUI) {

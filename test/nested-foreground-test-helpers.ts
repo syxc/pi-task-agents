@@ -201,6 +201,9 @@ export async function setup(t, mode, maxConcurrency = 4) {
     },
     async drain() {
       await waitFor(() => controller.engine.runtimes.size === 0)
+      // These run on real time and deliver several notices within a minute; reset
+      // the burst window so drain observes every terminal task without waiting.
+      controller.burstStartedAt = Date.now() - 60_000
       await controller.flush()
       await controller.flush()
     },
