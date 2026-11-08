@@ -23,28 +23,10 @@
       ]
     },
     {
-      "source": "packages/agent-modules/background-task/src/in-memory-output-store.ts",
-      "target": "src/vendor/mcode-background-task/in-memory-output-store.ts",
-      "sha256": "bb04ff042717a2f05c48b4d6412dbfdc99a30208fc3402281e2fcfca11f6f83e",
-      "adaptedSha256": "eb4e5d8cde1b4de337e1e07e46730e1cb08a162bef02c28e38a4a21e80c10a13",
-      "transforms": [
-        "relative-import-js-to-ts-v1"
-      ]
-    },
-    {
       "source": "packages/agent-modules/background-task/src/in-memory-store.ts",
       "target": "src/vendor/mcode-background-task/in-memory-store.ts",
       "sha256": "63d876021102a21c78fc5225c749f8181b66c1e9fe073994434dcd23217b8210",
       "adaptedSha256": "f62a7bf82d38be2614422b9cf84db23dec88d5231289f26bc07636a0b866cb3f",
-      "transforms": [
-        "relative-import-js-to-ts-v1"
-      ]
-    },
-    {
-      "source": "packages/agent-modules/background-task/src/index.ts",
-      "target": "src/vendor/mcode-background-task/index.ts",
-      "sha256": "608cb820ee1fad8ada833c4d05b7e18003ebff8ec552ae7e92e60541ee49badd",
-      "adaptedSha256": "ffeedfe46bd6b82275c20488bf0b6a2f50888af4fce2478f7a7e4b02c2189a95",
       "transforms": [
         "relative-import-js-to-ts-v1"
       ]

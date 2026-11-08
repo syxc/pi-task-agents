@@ -12,9 +12,7 @@ export const vendorRoot = 'src/vendor/mcode-background-task'
 export const modules = [
   'errors.ts',
   'id.ts',
-  'in-memory-output-store.ts',
   'in-memory-store.ts',
-  'index.ts',
   'manager.ts',
   'status.ts',
   'types.ts'

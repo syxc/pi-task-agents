@@ -119,7 +119,7 @@ Pi 适配使用原生 `codemode`，对应 MCode 的 `packages/agent-core/src/too
 
 ## 上游同步（C8）
 
-[upstream.lock.json](../upstream.lock.json) 记录 8 个任务领域模块、2 个 child-Bash 生命周期/等待模块的原始及适配哈希，由 `scripts/upstream.mjs` 核验可逆转换；复用源码、薄适配与同步记录分开维护，控制分叉规模。
+[upstream.lock.json](../upstream.lock.json) 记录 6 个任务领域模块、2 个 child-Bash 生命周期/等待模块的原始及适配哈希，由 `scripts/upstream.mjs` 核验可逆转换；复用源码、薄适配与同步记录分开维护，控制分叉规模。
 
 另监测 43 个核心参考文件，覆盖公开工具定义、准入/续接、停止/终态/恢复、角色及模板、模型装配、task-child 工具 surface、PTC、许可及文件观察生产者。其中 `LR/background-task/subagent-task-row.ts` 生成 queued 行和 owner/Turn/执行模式事实，`LR/turns/file-changes.ts` 提供目标提取参考。参考文件仅报警，不打包为宿主实现。
 

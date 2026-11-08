@@ -45,6 +45,28 @@ export function knownFailure(error: unknown): CodedFailure | undefined {
     : undefined
 }
 
+export function failureResult(
+  toolName: string,
+  tag: string,
+  taskId: string,
+  error: CodedFailure,
+  extra: Record<string, unknown> = {}
+): TaskToolResult {
+  const text = `<${tag} task_id="${escapeAttribute(taskId)}" code="${error.code}">${error.message}</${tag}>`
+  return projectedResult(
+    toolName,
+    text,
+    {
+      task_id: taskId,
+      code: error.code,
+      status: error.status,
+      ...extra,
+      error_message: error.message
+    },
+    true
+  )
+}
+
 export function notFound(
   toolName: string,
   taskId: string,

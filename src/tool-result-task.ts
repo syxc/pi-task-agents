@@ -1,6 +1,7 @@
 import type { AdmissionReceipt, TaskInput, TaskSummary } from './types.ts'
 import {
   escapeAttribute,
+  failureResult,
   knownFailure,
   projectedResult,
   type CodedFailure,
@@ -96,19 +97,7 @@ export function taskResult(
 export type AppendFailure = CodedFailure
 
 export function appendFailure(taskId: string, error: AppendFailure): TaskToolResult {
-  const text = `<task_append_error task_id="${escapeAttribute(taskId)}" code="${error.code}">${error.message}</task_append_error>`
-  return projectedResult(
-    'task_append',
-    text,
-    {
-      task_id: taskId,
-      code: error.code,
-      status: error.status,
-      accepted: false,
-      error_message: error.message
-    },
-    true
-  )
+  return failureResult('task_append', 'task_append_error', taskId, error, { accepted: false })
 }
 
 export const knownAppendFailure = knownFailure

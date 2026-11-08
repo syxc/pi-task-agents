@@ -6,7 +6,7 @@ Revision: 3c21163c85a9684030cb147bfef48c6284fa3c46
 Copyright (c) 2026 MiniMax Code
 License: MIT (included in LICENSE)
 
-src/vendor/mcode-background-task/ contains eight files from
+src/vendor/mcode-background-task/ contains six files from
 packages/agent-modules/background-task/src. Relative import suffixes change
 from .js to .ts. The error constructor uses an explicit field instead of a
 parameter property. These changes support native Node type stripping.
