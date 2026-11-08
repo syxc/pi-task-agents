@@ -534,6 +534,7 @@ test('resource loading rejects own plugin paths, symlink aliases, packages, miss
     ['skills', ['~/some-skill'], /explicit local paths/],
     ['extensions', ['./*.js'], /explicit local paths/],
     ['extensions', ['./missing.js'], /must exist/],
+    ['extensions', ['C:\\extensions\\demo.js'], /must exist/],
     ['extensions', [paths.agentDir], /explicit local JavaScript or TypeScript entry files/]
   ]
   /* oxlint-disable no-await-in-loop -- Cases overwrite the same config file; save, load and assert in order. */

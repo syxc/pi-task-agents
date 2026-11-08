@@ -93,7 +93,7 @@ export async function localPaths(
     if (
       typeof path !== 'string' ||
       !path ||
-      /^[A-Za-z][A-Za-z0-9+.-]*:/.test(path) ||
+      /^[A-Za-z][A-Za-z0-9+.-]+:/.test(path) ||
       path.startsWith('~') ||
       /[*?{}]/.test(path)
     ) {

@@ -199,7 +199,7 @@ async function resourcePaths(
         continue
       }
     }
-    if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path) || path.startsWith('~') || /[*?{}]/.test(path)) {
+    if (/^[A-Za-z][A-Za-z0-9+.-]+:/.test(path) || path.startsWith('~') || /[*?{}]/.test(path)) {
       fail(
         file + '.' + key,
         'resources require explicit local paths, not packages, URLs, or patterns'
