@@ -1,16 +1,14 @@
 # 官方 Pi 运行态适配
 
-插件支持未修改的官方 Pi 1.5.0，不替换安装、修改 SDK、包装全局 prototype 或另建宿主。本文说明默认父工具桥的机制与边界；操作见 [README](../README.md)，MCode 契约与验收见 [核心功能对照](mcode-parity.md)。
+插件支持未修改的官方 Pi 1.5.0，不替换安装、修改 SDK、包装全局 prototype 或另建宿主。本文说明默认父工具桥；操作见 [任务工具](../README.md#任务工具)，角色与资源配置见 [角色与权限](../README.md#角色与权限) 和 [资源与权限](../README.md#资源与权限)。
 
 ## 调度模型
 
-Pi SDK 提供子会话、模型、工具执行和消息队列；插件 Engine 负责调度、所有权、持久化及交付。前后台共用状态机：先保存准入记录，再执行独立子会话。前台等待结果，后台返回任务句柄；终态保存后通知原父会话读取，不回写已返回 Task 结果的 `nestedCalls`。父 Task 消息不是完整后台日志，结果以持久输出为准。
-
-运行中追加进入同一逻辑任务；闲置续接创建新任务 ID，保留子历史和权限上界。执行状态、Verifier 判定、输出及清理状态分开记录，崩溃后不自动重放。
+Pi SDK 提供子会话、模型、工具执行和消息队列；插件 Engine 负责调度、所有权、持久化及交付。前后台共用状态机，先保存准入记录，再执行独立子会话。结果与续接契约见 [结果与通知](../README.md#结果与通知) 和 [续接与查询](../README.md#续接与查询)。
 
 ## 来源审核与授权边界
 
-`src/parent-tools.ts` 从父运行态读取可调用工具及来源元数据，不重扫目录、不还原扩展工厂或 MCP 配置。转发范围限于已核验的官方 Pi 1.5.0 实现：
+[`src/parent-tools.ts`](../src/parent-tools.ts) 从父运行态读取可调用工具及来源元数据，不重扫目录、不还原扩展工厂或 MCP 配置。转发范围限于已核验的官方 Pi 1.5.0 实现：
 
 - `builtin:<tool>`：`read/write/edit/bash/powershell/grep/find/ls`。
 - `builtin:mcp`：MCP 工具及 `list_mcp_resources/list_mcp_resource_templates/read_mcp_resource`，复用父连接，不复制凭据或重启服务器。
@@ -51,14 +49,10 @@ Skills 来自 `before_agent_start` 的可变选项，在 `agent_start` 复制最
 
 ## 验证范围
 
-以下测试位于 `test/`，覆盖受控路径，不代表外部服务已验收：
+验收矩阵见 [核心功能对照](mcode-parity.md#核心契约对照)。工具桥的专项证据：
 
-| 测试 | 覆盖 |
-| --- | --- |
-| `official-tool-proxy.test.ts` | 复现跨 `agent_end` 串行队列问题；内存探针保留 pending，不宣称 abort 或 dispose 已排空 |
-| `parent-tools.test.ts` | 危险串行及独立 signal 扩展派发前被拒、零嵌套副作用；后续权限 hook 等待期间取消写入，零文件副作用且实际排空；四角色、前后台、父结果过滤与拒绝、ID 重用、过期 context、同名覆盖、续接及 MCP 准备和连接复用 |
-| `runtime-inheritance.test.ts`、`resource-inheritance.test.ts` | 动态及禁用 Skills、父扩展保留而子拒绝、内置 MCP 文件和运行态注册、Shell 设置、受管命令、codemode、模型与恢复上界 |
-| `child-parent-tools.test.ts` | 来源与历史清单、原始 server 名、聚合资源限制 |
-| `official-cli-task.test.ts`、`host-peer-sdk.test.ts` | 未修改 bundled CLI 的默认派工、父权限拒绝与宿主 peer 映射，使用脚本化本地模型 |
+- [`official-tool-proxy.test.ts`](../test/official-tool-proxy.test.ts)：复现跨 `agent_end` 串行队列问题；内存探针保留 pending，不证明 abort 或 dispose 已排空。
+- [`parent-tools.test.ts`](../test/parent-tools.test.ts)：危险串行及独立 signal 扩展在派发前被拒、零嵌套副作用；后续权限 hook 等待期间取消写入，零文件副作用且实际排空。
+- [`official-cli-task.test.ts`](../test/official-cli-task.test.ts)、[`host-peer-sdk.test.ts`](../test/host-peer-sdk.test.ts)：使用脚本化本地模型验证未修改 bundled CLI 的派工、父权限拒绝及宿主 peer 映射。
 
 离线测试和本地 stdio MCP 不覆盖真实模型、第三方业务 MCP、其他 SDK 版本或平台；这些边界仍须相应验收。

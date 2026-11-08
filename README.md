@@ -38,12 +38,12 @@ pi install git:github.com/syxc/pi-task-agents
 - 后台回执只表示获准执行，不代表成功。终态结果先持久化，再通知原父会话；父会话须用 `task_output` 读取持久结果后整合回复。
 - `details` 等元数据不能代替读取；`task_output` 不是 Bash 日志流，取消读取不会停止任务。
 - 省略 `offset` 使用当前运行时会话的自动游标；显式 `offset` 不推进游标，`offset:0` 可重读。`wait_ms` 超过 30000 时会被截断，并在结果中报告实际等待时间。
-- 验证报告默认完整返回，并附带覆盖该报告的确定性 SHA-256 fingerprint。读过完整报告后，可将 `known_verification_fingerprint` 回传；仅精确匹配当前报告时省略验证文本，缺失或不匹配时返回完整报告。省略时仍返回 fingerprint 和恢复说明。任意有效 `offset`、重试或会话恢复后省略该参数即可重读完整报告；实际输出、状态、错误、游标、截断标志及 `details.verification` 不变。
+- 验证报告默认完整返回，并带确定性 SHA-256 fingerprint。读完后可回传 `known_verification_fingerprint`；仅与当前报告精确匹配时省略验证文本，并保留 fingerprint 和恢复说明。省略该参数即可在任意有效 `offset`、重试或会话恢复后重读完整报告；实际输出、状态、错误、游标、截断标志及 `details.verification` 不变。
 
 ### 完成通知
 
 - 运行期间的完成通知通过 `followUp` 排队并唤醒空闲父会话，不模拟用户提交。启动时仍有待投递通知时，TUI 直接唤醒，print/json/RPC 模式改用 `nextTurn` 排队，避免抢占宿主首个提示的运行槽。
-- 同一投递窗口（60 秒）内的多个终态任务合并为一条通知，最多 32 个任务、8 KiB，避免并发完成时连续唤醒。每 60 秒最多 3 次投递 Turn，超出后延后到窗口结束并重新合并。
+- 同一 60 秒窗口内的终态任务合并通知，每条最多 32 个任务、8 KiB，每窗最多 3 次投递 Turn；超出后延至窗口结束重新合并，避免并发完成时连续唤醒。
 - 未确认写入父会话记录时，按 1、2、5 秒快速重试；之后从 60 秒起按指数冷却，最长 300 秒，直到确认、暂停或会话关闭。`/tasks resume` 可清除暂停和重试冷却，不重启任务。
 - `display:false` 只隐藏 TUI 展示，通知仍进入模型上下文并唤醒空闲父会话，不等于减少 token。
 
@@ -95,15 +95,13 @@ TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任�
 - 上限：工作区单次扫描 20,000 个目录项，循环预算 1 秒；每次工具捕获最多 64 个目标，每轮最多 256 个不同目标。返回最多 200 条去重后的变化路径，优先保留直接观察到差异的工具目标，再以工作区变化补足，选取后按路径排序；目录变化也计入，列表被截断时保留 `changed_files_truncated`。
 - 解释：采集失败报告 `recording_failed`，不伪造空的已确认变化列表，也不改判模型执行失败。`no_observed_change` 仅表示范围内未见元数据差异，不证明没有瞬时写入或内容变化；并发变化不归因于某个子 Agent。
 
-验收与待完成项见[核心功能对照](docs/mcode-parity.md)。
-
 ## 配置
 
 通常无需配置。全局配置为 `<agentDir>/task-agents.json`；已信任项目可覆盖为 `.pi/task-agents.json`。加载顺序为默认值 → 全局 → 已信任项目；未信任项目配置不生效。指令逐层追加，其他字段替换。配置是严格 JSON：未知键和无效值会直接报错。示例见 [examples/task-agents.json](examples/task-agents.json)。
 
 ### 模型与思考级别
 
-未填写的角色继承当前对话。要覆盖模型或思考级别，将对应角色写入配置：
+为角色覆盖模型或思考级别：
 
 ```json
 {
@@ -120,15 +118,7 @@ TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任�
 
 ### 并发
 
-默认并发为 4，无需配置文件。在全局或已信任项目的配置中设置 `maxConcurrency`：
-
-```json
-{
-  "maxConcurrency": 4
-}
-```
-
-值必须是 1 至 10 的安全整数；10 是防止误配置大量并发的保护上限。全局值被已信任项目的显式值覆盖；项目省略时继承全局值，两层都省略时为 4。配置加载与直接构造 `TaskEngine` 使用相同默认值和校验。
+`maxConcurrency` 接受 1 至 10 的安全整数，默认 4；10 是防止误配置大量并发的保护上限。沿用上述配置加载顺序，直接构造 `TaskEngine` 时使用相同默认值和校验。
 
 名额按当前父会话 owner 计数，所有角色共用，不是每角色 4 个，也不是跨父会话或跨进程的总限额。超过上限的任务排队，运行或停止清理占位释放后才继续；清理失败仍占位。
 
@@ -191,8 +181,6 @@ TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任�
 - 输出：使用私有 `0600` 文件和有界 UTF-8 分段读取；省略 `offset` 使用已提交游标，`offset:0` 可重读，`wait_ms` 最多 30 秒。`truncated` 表示仍有未读字节，不表示命令已结束；`output_incomplete` 表示输出不完整。
 - 清理：`cleanup_pending` 表示清理未确认，保留容量与租约。崩溃后不重放命令，不将未知状态当作已清理。
 
-验收和适配边界见[核心功能对照](docs/mcode-parity.md)。
-
 ### 程序化工具调用
 
 PTC 类调用使用 Pi 原生 codemode，不另建 MCode PTC 运行时。父 Pi 的实际启用状态是唯一总开关：父关闭时子也关闭，角色 tools 或 MCP 不能开启；父开启后可批量组合获准工具、筛选结果，简单操作仍直接调用。关闭 MCP 不影响原生组合。
@@ -224,22 +212,18 @@ pnpm test
 pnpm run pack
 ```
 
-开发使用 Node >= 22.19.0、pnpm 11.15.1 和 TypeScript 7.0.2；`packageManager` 固定 pnpm 版本。开发依赖的 Pi SDK 与 `pi-ai` 同版锁定为 1.5.0；工具链及 typebox、Node 类型的固定版本见 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml)。[pnpm-workspace.yaml](pnpm-workspace.yaml) 将 `markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
+开发工具和 Pi 依赖版本见 [package.json](package.json) 与 [pnpm-lock.yaml](pnpm-lock.yaml)，其中 `packageManager` 固定 pnpm 版本，Pi SDK 与 `pi-ai` 同版锁定。[pnpm-workspace.yaml](pnpm-workspace.yaml) 将 `markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
 
 - `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `pnpm run lint`、`pnpm run lint:type-aware`、`pnpm run lint:markdown`、`pnpm run format:check`；`pnpm run format` 仅格式化自有代码与配置，不改上游锁定源码。
-- `test`：直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试。`typescript-fixture` 固定为 `npm:typescript@5.9.3`，仅用于动态编译上游原文 fixture；项目 `tsc` 和类型检查仍使用 7.0.2。默认离线，不包含 `test/e2e`。
-- `test:e2e`：真实模型端到端回归，默认不随 `test` 运行。运行 `pnpm test:e2e`，或追加文件名片段只跑部分场景（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-sol` 和 `gpt-6-luna`，在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；设置 `PI_E2E_KEEP=1` 可保留现场。每次运行消耗真实额度。场景覆盖前台写入与查询、后台完成通知、并行后台、`task_append`、`task_send`、父会话重启续接、输出等待与 30 秒上限、停止、explore/verifier、skill 继承、错误边界和模型继承；每个场景检查父/子 token、费用、消息数与耗时预算，阈值可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整。MCP 与第三方 provider 不在真实模型覆盖范围内。
+- `test`：默认离线，不包含 `test/e2e`。直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试；固定版本的 `typescript-fixture` 仅用于动态编译上游原文 fixture，不替代项目类型检查。
+- `test:e2e`：运行 `pnpm test:e2e`，或追加文件名片段选择[真实模型场景](test/e2e/)（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-sol` 和 `gpt-6-luna`，每次消耗真实额度。在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；`PI_E2E_KEEP=1` 可保留现场。每个场景检查父/子 token、费用、消息数与耗时预算，可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整阈值。MCP 与第三方 provider 不在真实模型覆盖范围内。
 - `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证。内部使用 Node 随附的 `npm pack --ignore-scripts`，避免 pnpm 打包时移除清单末尾换行而导致提取包格式检查失败；npm 不用于依赖安装。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
 
 离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收。真实模型和第三方业务验收须另行授权；`pnpm test:e2e` 以及 `scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度。
 
 ### 上游维护
 
-- 复用源码：`src/vendor/mcode-background-task/` 和 `src/vendor/mcode-child-bash/` 保留 MIT 模块，同步脚本核验哈希与可逆导入适配。
-- 单独适配：`src/vendor/mcode-adapters/task-turn-id.ts` 保留上游逐字原文，`file-write-targets.ts` 保留上游 helper 及窄路径适配；由固定快照和源码一致性测试核验，不受上述同步脚本管理。原始快照在 `test/fixtures/`；混合自有逻辑的 `src/task-verification.ts` 不在 vendor 目录。
-- 持续检查：`upstream.lock.json` 监测核心参考文件；每周或手动运行 `pnpm run upstream:check`，只报告变化，不自动移植。契约变化须人工适配并回归。范围、命令及更新步骤见[核心功能对照](docs/mcode-parity.md)。
-
-哈希或离线测试不证明整个 MCode 宿主等价；逐项实现、测试和 Pi 适配边界见[核心功能对照](docs/mcode-parity.md)，许可见 [NOTICE](NOTICE)。
+`upstream.lock.json` 监测核心参考文件；每周或手动运行 `pnpm run upstream:check`，只报告变化，不自动移植。复用范围、固定快照、同步命令及更新保护见[核心功能对照](docs/mcode-parity.md)，许可见 [NOTICE](NOTICE)。
 
 ## 文档
 
