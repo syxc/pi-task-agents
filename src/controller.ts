@@ -267,9 +267,14 @@ export class TaskController {
   }
 
   warn(error: unknown): void {
-    if (this.ctx?.hasUI) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.ctx.ui.notify(`Task agents: ${message}`, 'warning')
+    try {
+      if (this.ctx?.hasUI) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.ctx.ui.notify(`Task agents: ${message}`, 'warning')
+      }
+    } catch {
+      // This runs as a rejection handler; invalidated SDK contexts must not
+      // surface as an unhandled rejection during reload or shutdown.
     }
   }
 

@@ -1186,6 +1186,25 @@ test('headless failure delivery creates no visual receipt and unavailable UI doe
   }
 })
 
+test('warnings stay best-effort when the UI context is unavailable', async () => {
+  const f = fixture()
+  f.ctx.hasUI = true
+  f.ctx.ui = {
+    setStatus() {},
+    setWidget() {},
+    notify() {
+      throw new Error('UI unavailable')
+    }
+  }
+  try {
+    await f.controller.ensure(f.ctx)
+    assert.doesNotThrow(() => f.controller.warn(new Error('fixture warning')))
+  } finally {
+    f.ctx.hasUI = false
+    await f.controller.shutdown()
+  }
+})
+
 test('failure text excludes diagnostics and escapes untrusted IDs, and receipt write failure cannot block delivery', async () => {
   const f = fixture()
   const notices = []
