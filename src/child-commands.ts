@@ -31,11 +31,8 @@ interface Execution {
 }
 interface Receipt {
   id: string
-  offset: number
   next: number
-  bytes: number
   terminal: boolean
-  complete: boolean
   automatic: boolean
   text: string
   release(): void
@@ -103,8 +100,7 @@ export async function createChildCommands(options: {
   const logs = new CommandLogs(options.sessionPath),
     running = new Map<string, Execution>()
   const receipts = new Map<string, Receipt>(),
-    cursors = new Map<string, number>(),
-    readEnd = new Map<string, number>()
+    cursors = new Map<string, number>()
   const readTails = new Map<string, Promise<unknown>>()
   let group:
     | {
@@ -459,11 +455,8 @@ export async function createChildCommands(options: {
       })
       receipts.set(toolCallId, {
         id: task.taskId,
-        offset,
         next: value.next_offset,
-        bytes: value.output_bytes,
-        terminal: isTerminalTaskStatus(task.status) && !cleanupPending,
-        complete: !value.truncated && !incomplete,
+        terminal: isTerminalTaskStatus(task.status),
         automatic,
         text: JSON.stringify(result.content),
         release
@@ -573,15 +566,9 @@ export async function createChildCommands(options: {
         if (receipt.automatic) {
           cursors.set(receipt.id, receipt.next)
         }
-        const previous = readEnd.get(receipt.id) ?? 0
-        if (receipt.offset <= previous) {
-          readEnd.set(receipt.id, Math.max(previous, receipt.next))
-        }
-        if (
-          receipt.terminal &&
-          receipt.complete &&
-          (readEnd.get(receipt.id) ?? 0) >= receipt.bytes
-        ) {
+        // Any successful terminal read consumes the completion notice, even when
+        // the caller still has unread bytes (upstream terminalTaskOutputReadIds).
+        if (receipt.terminal) {
           group?.read.add(receipt.id)
         }
       }
