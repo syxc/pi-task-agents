@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { SessionManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { createChildCommands } from '../src/child-commands.ts'
+import { CommandOutput } from '../src/command-output.ts'
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, nativeOutput?: string) {
   const root = await mkdtemp(join(tmpdir(), 'owned-command-scope-'))
   const controller = new AbortController()
   let turn = 'turn-A',
@@ -53,7 +55,10 @@ async function fixture(t: TestContext) {
       })
       return {
         isError: signal.aborted,
-        result: { content: [{ type: 'text', text: 'saved bytes' }] }
+        result: {
+          content: [{ type: 'text', text: 'saved bytes' }],
+          ...(nativeOutput ? { details: { fullOutputPath: nativeOutput } } : {})
+        }
       }
     }
   }
@@ -105,6 +110,50 @@ test('a live command is not controllable from another child turn or by a parent/
   assert.equal(historical.status, 'succeeded')
   assert.equal(historical.output, 'saved bytes')
 })
+
+test(
+  'a settled stop that cannot close output keeps cleanup unconfirmed',
+  { timeout: 15000 },
+  async (t) => {
+    // Adopt a native source so the writer handle stays open when finalization fails.
+    const native = join(tmpdir(), `pi-bash-${randomBytes(8).toString('hex')}.log`)
+    await writeFile(native, 'saved bytes', { mode: 0o600 })
+    t.after(() => unlink(native).catch(() => {}))
+    const f = await fixture(t, native),
+      row = await f.call({ action: 'start', command: 'held native execution' })
+    await f.started
+    const close = CommandOutput.prototype.close
+    CommandOutput.prototype.close = async () => {
+      throw new Error('injected close failure')
+    }
+    try {
+      f.release()
+      let quarantined = false
+      /* oxlint-disable no-await-in-loop -- Poll the observable cleanup state until finalization settles. */
+      for (let attempt = 0; attempt < 200; attempt++) {
+        try {
+          await f.commands.ready()
+        } catch (error) {
+          assert.equal(error.code, 'CHILD_CLEANUP_FAILED')
+          quarantined = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      /* oxlint-enable no-await-in-loop */
+      assert.equal(quarantined, true)
+      // Let the rejected finalization settle before retrying the stop.
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      await assert.rejects(f.call({ action: 'stop', command_id: row.command_id }), {
+        code: 'CHILD_CLEANUP_FAILED'
+      })
+      await assert.rejects(f.commands.ready(), { code: 'CHILD_CLEANUP_FAILED' })
+      assert.equal(f.listeners.get('tool_call')({ toolName: 'write', input: {} }).block, true)
+    } finally {
+      CommandOutput.prototype.close = close
+    }
+  }
+)
 
 test(
   'a stop deadline preserves a live execution, reports cleanup uncertainty and blocks new effects until cleanup is known',

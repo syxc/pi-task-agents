@@ -171,7 +171,12 @@ export async function createChildCommands(options: {
       await cleanupDeadline(execution.done)
     } catch (error) {
       if (execution.settled) {
-        await execution.output.close()
+        try {
+          await execution.output.close()
+        } catch (closeError) {
+          execution.cleanupUnconfirmed = true
+          throw cleanupError(closeError)
+        }
         running.delete(id)
         journal.notify(id)
         return
