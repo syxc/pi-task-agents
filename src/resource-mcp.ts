@@ -118,19 +118,29 @@ export async function childMcpFactory(
   const allowed = childToolPolicy(profile, profile.tools ?? [], undefined, serverFor)
   async function snapshot(pi: ExtensionAPI): Promise<void> {
     visible = []
-    if (inherited) {
-      return
-    }
-    for (const entry of pi.getMcpServers()) {
-      if (!serverAllowed(entry.name) || shadowed.has(namespace(entry.name))) {
-        continue
-      }
-      for (const file of extensionFiles) {
-        // oxlint-disable-next-line no-await-in-loop -- Preserve ordered provenance checks and first-match selection.
-        if (await sameFile(file, resolve(cwd, entry.extensionPath))) {
-          visible.push({ ...entry, config: constrain(entry.name, entry.config) })
-          break
+    if (!inherited) {
+      for (const entry of pi.getMcpServers()) {
+        if (!serverAllowed(entry.name) || shadowed.has(namespace(entry.name))) {
+          continue
         }
+        for (const file of extensionFiles) {
+          // oxlint-disable-next-line no-await-in-loop -- Preserve ordered provenance checks and first-match selection.
+          if (await sameFile(file, resolve(cwd, entry.extensionPath))) {
+            visible.push({ ...entry, config: constrain(entry.name, entry.config) })
+            break
+          }
+        }
+      }
+    }
+    // A server that disappeared must not keep authorizing the tools it used to own.
+    const live = new Set(
+      [...files, ...visible]
+        .filter((entry) => entry.config.enabled !== false)
+        .map((entry) => entry.name)
+    )
+    for (const [tool, server] of owners) {
+      if (!live.has(server)) {
+        owners.delete(tool)
       }
     }
   }
