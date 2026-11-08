@@ -85,29 +85,39 @@ test('a native file URL outside the workspace remains out of observation scope',
   assert.deepEqual(result.verification?.changedFiles, [])
 })
 
-test('literal Bash paths with edge spaces preserve observed writes without a false clean result', async (t) => {
-  const f = await fixture(t)
-  f.script((step) =>
-    step === 1 ? tool('bash', { command: "printf evidence > ' edge.txt '" }) : answer('done')
-  )
-  const child = await f.child({ name: 'worker', tools: ['bash'] })
-  const result = await child.prompt('Write only the assigned path, including its literal spaces.')
-  assert.equal(await readFile(join(f.cwd, ' edge.txt '), 'utf8'), 'evidence')
-  assert.equal(result.verification?.fileChange, 'change_observed')
-  assert.deepEqual(result.verification?.changedFiles, [' edge.txt '])
-})
-
-test('spaces in Bash payload do not make an exact plain target ambiguous', async (t) => {
-  const f = await fixture(t)
-  f.script((step) =>
-    step === 1 ? tool('bash', { command: "printf ' payload.txt ' > payload.txt" }) : answer('done')
-  )
-  const child = await f.child({ name: 'worker', tools: ['bash'] })
-  const result = await child.prompt('Write only payload.txt.')
-  assert.equal(await readFile(join(f.cwd, 'payload.txt'), 'utf8'), ' payload.txt ')
-  assert.equal(result.verification?.fileChange, 'change_observed')
-  assert.deepEqual(result.verification?.changedFiles, ['payload.txt'])
-})
+for (const { name, command, file, content, prompt } of [
+  {
+    name: 'literal Bash paths with edge spaces preserve observed writes without a false clean result',
+    command: "printf evidence > ' edge.txt '",
+    file: ' edge.txt ',
+    content: 'evidence',
+    prompt: 'Write only the assigned path, including its literal spaces.'
+  },
+  {
+    name: 'spaces in Bash payload do not make an exact plain target ambiguous',
+    command: "printf ' payload.txt ' > payload.txt",
+    file: 'payload.txt',
+    content: ' payload.txt ',
+    prompt: 'Write only payload.txt.'
+  },
+  {
+    name: 'parent traversal in Bash payload does not make an exact write target ambiguous',
+    command: "printf 'alias/../owned.txt' > payload.txt",
+    file: 'payload.txt',
+    content: 'alias/../owned.txt',
+    prompt: 'Write only payload.txt.'
+  }
+]) {
+  test(name, async (t) => {
+    const f = await fixture(t)
+    f.script((step) => (step === 1 ? tool('bash', { command }) : answer('done')))
+    const child = await f.child({ name: 'worker', tools: ['bash'] })
+    const result = await child.prompt(prompt)
+    assert.equal(await readFile(join(f.cwd, file), 'utf8'), content)
+    assert.equal(result.verification?.fileChange, 'change_observed')
+    assert.deepEqual(result.verification?.changedFiles, [file])
+  })
+}
 
 for (const managed of [false, true]) {
   for (const outside of [false, true]) {
@@ -220,20 +230,6 @@ test('native file tools resolve parent traversal before filesystem access, unlik
   assert.equal(await readFile(join(f.cwd, 'owned.txt'), 'utf8'), 'native bytes')
   assert.equal(result.verification?.fileChange, 'change_observed')
   assert.deepEqual(result.verification?.changedFiles, ['owned.txt'])
-})
-
-test('parent traversal in Bash payload does not make an exact write target ambiguous', async (t) => {
-  const f = await fixture(t)
-  f.script((step) =>
-    step === 1
-      ? tool('bash', { command: "printf 'alias/../owned.txt' > payload.txt" })
-      : answer('done')
-  )
-  const child = await f.child({ name: 'worker', tools: ['bash'] })
-  const result = await child.prompt('Write only payload.txt.')
-  assert.equal(await readFile(join(f.cwd, 'payload.txt'), 'utf8'), 'alias/../owned.txt')
-  assert.equal(result.verification?.fileChange, 'change_observed')
-  assert.deepEqual(result.verification?.changedFiles, ['payload.txt'])
 })
 
 test('dynamic Bash targets preserve uncertainty while retaining observed changed paths', async (t) => {
