@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { TaskEngine } from './engine.ts'
 import {
@@ -330,27 +331,31 @@ export class TaskController {
     if (!file) {
       return ctx.sessionManager.getEntries()
     }
-    let text: string
+    const entries: unknown[] = []
+    const input = createReadStream(file, { encoding: 'utf8' })
+    const lines = createInterface({ input, crlfDelay: Infinity })
     try {
-      text = await readFile(file, 'utf8')
+      for await (const line of lines) {
+        // Session files also hold full tool results. Skip them without parsing,
+        // or every receipt check would deserialize the whole parent history.
+        if (!line.includes(RESULT_TYPE)) {
+          continue
+        }
+        try {
+          entries.push(JSON.parse(line) as unknown)
+        } catch {
+          // Pi skips torn or malformed JSONL records and repairs a missing final
+          // newline, so one crashed append must not block every later receipt.
+        }
+      }
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
         return []
       }
       throw error
-    }
-    const lines = text.split('\n')
-    const entries: unknown[] = []
-    for (const line of lines) {
-      if (!line.trim()) {
-        continue
-      }
-      try {
-        entries.push(JSON.parse(line) as unknown)
-      } catch {
-        // Pi skips torn or malformed JSONL records and repairs a missing final
-        // newline, so one crashed append must not block every later receipt.
-      }
+    } finally {
+      lines.close()
+      input.destroy()
     }
     return entries
   }
@@ -360,6 +365,14 @@ export class TaskController {
     const ctx = this.ctx
     const parentId = this.parentId
     if (!engine || !ctx) {
+      return
+    }
+    const pending = await engine.pendingNotifications()
+    if (engine !== this.engine) {
+      return
+    }
+    if (pending.length === 0) {
+      this.clearRetryTimer()
       return
     }
     // Pi emits message_end before its JSONL append. Only disk is a durable receipt.
@@ -373,7 +386,6 @@ export class TaskController {
       return
     }
     const canReclaim = reclaim && ctx.isIdle?.() === true && !ctx.hasPendingMessages?.()
-    const pending = await engine.pendingNotifications()
     for (const task of pending) {
       if (delivered.has(task.task_id)) {
         // oxlint-disable-next-line no-await-in-loop -- Persist each receipt before clearing its in-flight notification.

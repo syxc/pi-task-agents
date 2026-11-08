@@ -279,6 +279,19 @@ test('completion is sent once and stays pending until the persisted message rece
   await f.controller.shutdown()
 })
 
+test('reconcile skips the receipt scan when no notification is pending', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.ctx.sessionManager.getEntries = () => {
+      throw new Error('Receipts must not be scanned without a pending notification')
+    }
+    await f.controller.reconcile()
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('startup delivery queues outside TUI instead of starting a turn before the host prompt', async () => {
   const f = fixture()
   try {
