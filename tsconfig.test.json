@@ -4,6 +4,8 @@
     "allowJs": true
   },
   "include": ["test/**/*.ts", "scripts/**/*.mjs"],
+  // These integration tests mock partial SDK objects that strict test typechecking rejects.
+  // They still run under node --test; delete entries as their fixtures acquire complete types.
   "exclude": [
     "test/child-parent-tools.test.ts",
     "test/controller-rpc-widget.test.ts",
