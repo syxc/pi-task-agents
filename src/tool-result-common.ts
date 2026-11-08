@@ -30,10 +30,6 @@ export function escapeAttribute(value: string): string {
     .replaceAll("'", '&apos;')
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 export interface CodedFailure {
   code: string
   status: number

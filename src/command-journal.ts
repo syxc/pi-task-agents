@@ -19,35 +19,92 @@ import {
 import type {
   BackgroundTask,
   BackgroundTaskPatch,
-  TaskLifecycleEvent
+  TaskError,
+  TaskLifecycleEvent,
+  TaskOutputRef,
+  TaskUsage
 } from './vendor/mcode-background-task/types.ts'
 import { TaskWaiterRegistry } from './vendor/mcode-child-bash/task-waiter-registry.ts'
 import { utf8Output } from './utf8-output.ts'
+import { isRecord } from './guards.ts'
 
 export const COMMAND_ENTRY = 'pi-task-agents:command'
 export const commandId = (id: unknown): id is string =>
   typeof id === 'string' && /^bg_[a-f0-9-]{36}$/.test(id)
 
+const finite = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value)
+const optionalString = (value: unknown): boolean => value === undefined || typeof value === 'string'
+const optionalFinite = (value: unknown): boolean => value === undefined || finite(value)
+const outputKinds: readonly TaskOutputRef['kind'][] = [
+  'file',
+  'oss',
+  'sandbox_job',
+  'session_transcript',
+  'memory'
+]
+
+function outputRef(value: unknown): value is TaskOutputRef {
+  return (
+    isRecord(value) &&
+    commandId(value.taskId) &&
+    outputKinds.some((kind) => kind === value.kind) &&
+    typeof value.uri === 'string' &&
+    optionalFinite(value.offset) &&
+    optionalFinite(value.updatedAt) &&
+    (value.metadata === undefined || isRecord(value.metadata))
+  )
+}
+
+function taskError(value: unknown): value is TaskError {
+  return (
+    isRecord(value) &&
+    typeof value.message === 'string' &&
+    optionalString(value.code) &&
+    (value.details === undefined || isRecord(value.details))
+  )
+}
+
+function taskUsage(value: unknown): value is TaskUsage {
+  return (
+    isRecord(value) &&
+    ['inputTokens', 'outputTokens', 'totalTokens', 'costUsd'].every(
+      (key) => value[key] === undefined || finite(value[key])
+    ) &&
+    (value.metadata === undefined || isRecord(value.metadata))
+  )
+}
+
+// Journal rows were written by a previous process and are replayed as untrusted input.
 function valid(value: unknown, owner: string): value is BackgroundTask {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!isRecord(value)) {
     return false
   }
-  const row = value as Record<string, unknown>
   return (
-    commandId(row.taskId) &&
-    row.kind === 'bash' &&
-    row.ownerSessionId === owner &&
-    typeof row.status === 'string' &&
-    [...ACTIVE_TASK_STATUSES, ...TERMINAL_TASK_STATUSES].some((status) => status === row.status) &&
-    typeof row.createdAt === 'number' &&
-    Number.isFinite(row.createdAt) &&
-    typeof row.updatedAt === 'number' &&
-    Number.isFinite(row.updatedAt) &&
-    !!row.metadata &&
-    typeof row.metadata === 'object' &&
-    'parentTurnId' in row.metadata &&
-    typeof row.metadata.parentTurnId === 'string' &&
-    row.metadata.parentTurnId.trim().length > 0
+    commandId(value.taskId) &&
+    value.kind === 'bash' &&
+    value.ownerSessionId === owner &&
+    typeof value.status === 'string' &&
+    [...ACTIVE_TASK_STATUSES, ...TERMINAL_TASK_STATUSES].some(
+      (status) => status === value.status
+    ) &&
+    finite(value.createdAt) &&
+    finite(value.updatedAt) &&
+    optionalString(value.description) &&
+    optionalString(value.toolCallId) &&
+    optionalString(value.parentMessageId) &&
+    (value.parentTaskId === undefined ||
+      value.parentTaskId === null ||
+      typeof value.parentTaskId === 'string') &&
+    optionalFinite(value.startedAt) &&
+    optionalFinite(value.endedAt) &&
+    optionalFinite(value.deliveredAt) &&
+    (value.outputRef === undefined || outputRef(value.outputRef)) &&
+    (value.lastError === undefined || taskError(value.lastError)) &&
+    (value.usage === undefined || taskUsage(value.usage)) &&
+    isRecord(value.metadata) &&
+    typeof value.metadata.parentTurnId === 'string' &&
+    value.metadata.parentTurnId.trim().length > 0
   )
 }
 
@@ -70,7 +127,7 @@ export class CommandJournal extends InMemoryTaskStore {
       if (entry.type !== 'custom' || entry.customType !== COMMAND_ENTRY) {
         continue
       }
-      const data = entry.data as { version?: unknown; task?: unknown } | undefined
+      const data = isRecord(entry.data) ? entry.data : undefined
       if (data?.version !== 1 || !valid(data.task, this.owner)) {
         throw new Error(
           'Invalid owned-command history; inspect the child session before continuing'

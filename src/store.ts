@@ -17,31 +17,30 @@ import {
 } from './vendor/mcode-background-task/status.ts'
 import { isEventCount, isFactName, isTurnId } from './engine-facts.ts'
 import { isVerificationReport } from './task-verification.ts'
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === code
-}
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
+import { isThinkingLevel } from './thinking.ts'
+import { hasCode, isRecord } from './guards.ts'
 
 function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item: unknown) => typeof item === 'string')
 }
 
-function thinking(value: unknown): value is string {
-  // Model compatibility belongs to the backend; provider effort labels are not Pi enums.
+function nonempty(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function timeout(value: unknown): value is number {
+  return (
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 2147483647
+  )
 }
 
 function profile(value: unknown): value is AgentProfile {
   return (
-    object(value) &&
+    isRecord(value) &&
     typeof value.name === 'string' &&
     (value.model === undefined || typeof value.model === 'string') &&
-    (value.thinking === undefined || thinking(value.thinking)) &&
-    (value.effort === undefined || thinking(value.effort)) &&
+    (value.thinking === undefined || isThinkingLevel(value.thinking)) &&
+    (value.effort === undefined || nonempty(value.effort)) &&
     typeof value.instructions === 'string' &&
     strings(value.tools) &&
     [
@@ -55,25 +54,25 @@ function profile(value: unknown): value is AgentProfile {
       'disallowedTools'
     ].every((key) => value[key] === undefined || strings(value[key])) &&
     (value.mcp === undefined || typeof value.mcp === 'boolean') &&
-    typeof value.timeoutMs === 'number'
+    timeout(value.timeoutMs)
   )
 }
 
 function input(value: unknown): value is TaskInput {
   return (
-    object(value) &&
+    isRecord(value) &&
     typeof value.prompt === 'string' &&
     ['agent_name', 'description', 'model'].every(
       (key) => value[key] === undefined || typeof value[key] === 'string'
     ) &&
-    (value.effort === undefined || thinking(value.effort)) &&
+    (value.effort === undefined || nonempty(value.effort)) &&
     (value.run_in_background === undefined || typeof value.run_in_background === 'boolean')
   )
 }
 
 function legacyVerification(value: unknown): boolean {
   return (
-    object(value) &&
+    isRecord(value) &&
     Object.keys(value).every((key) => ['agentSettled', 'stopReason', 'toolErrors'].includes(key)) &&
     value.agentSettled === true &&
     typeof value.stopReason === 'string' &&
@@ -85,7 +84,7 @@ function legacyVerification(value: unknown): boolean {
 }
 
 function task(value: unknown): value is TaskRecord {
-  if (!object(value)) {
+  if (!isRecord(value)) {
     return false
   }
   const requiredStrings = [
@@ -131,23 +130,23 @@ function task(value: unknown): value is TaskRecord {
         ['activated', 'steered', 'duplicate'].includes(value.mode))) &&
     (value.accepted === undefined || typeof value.accepted === 'boolean') &&
     (value.stopError === undefined ||
-      (object(value.stopError) &&
+      (isRecord(value.stopError) &&
         typeof value.stopError.code === 'string' &&
         typeof value.stopError.message === 'string')) &&
     (value.usage === undefined ||
-      (object(value.usage) &&
+      (isRecord(value.usage) &&
         Object.values(value.usage).every((amount) => typeof amount === 'number')))
   )
 }
 
 function state(value: unknown): value is TaskState {
   return (
-    object(value) &&
+    isRecord(value) &&
     value.version === 1 &&
     typeof value.parentId === 'string' &&
     Array.isArray(value.tasks) &&
     value.tasks.every(task) &&
-    object(value.requests) &&
+    isRecord(value.requests) &&
     Object.values(value.requests).every((id) => typeof id === 'string') &&
     (value.cleanupConfirmed === undefined ||
       (strings(value.cleanupConfirmed) &&
@@ -231,15 +230,15 @@ export class TaskStore {
       }
       if (
         loaded &&
-        (!object(loaded) || loaded.parentId !== this.parentId || loaded.version !== 1)
+        (!isRecord(loaded) || loaded.parentId !== this.parentId || loaded.version !== 1)
       ) {
         throw new Error('Task store owner or version mismatch')
       }
       // The original plugin used this field for execution facts, not review verdicts.
-      if (object(loaded) && Array.isArray(loaded.tasks)) {
+      if (isRecord(loaded) && Array.isArray(loaded.tasks)) {
         for (const storedTask of loaded.tasks) {
           if (
-            object(storedTask) &&
+            isRecord(storedTask) &&
             storedTask.legacyVerification === undefined &&
             legacyVerification(storedTask.verification)
           ) {

@@ -236,11 +236,11 @@ export function createToolFileObservation(options: {
     ) {
       return
     }
-    if (!scope.calls.has(id)) {
+    const capture = scope.calls.get(id)
+    if (!capture) {
       scope.notes.add('tool_before_capture_unavailable')
       return
     }
-    const capture = scope.calls.get(id)!
     if (JSON.stringify(targets(name, object(input))) !== capture.targets) {
       scope.notes.add('tool_targets_changed')
     }

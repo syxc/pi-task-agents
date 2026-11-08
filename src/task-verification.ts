@@ -1,4 +1,5 @@
-import type { ModelVerdict, VerificationReport } from './types.ts'
+import { Check } from 'typebox/value'
+import { VerificationReportSchema, type ModelVerdict, type VerificationReport } from './types.ts'
 import { WORKSPACE_OBSERVATION_SCOPE, type WorkspaceSnapshot } from './workspace-observation.ts'
 
 export const FILE_CHANGE_OBSERVATION_NOTICE =
@@ -92,27 +93,7 @@ export function buildVerification(
 }
 
 export function isVerificationReport(value: unknown): value is VerificationReport {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false
-  }
-  const report = value as Record<string, unknown>
-  return (
-    Object.keys(report).every((key) =>
-      ['modelVerdict', 'fileChange', 'changedFiles', 'observationNotes'].includes(key)
-    ) &&
-    (report.modelVerdict === undefined ||
-      (typeof report.modelVerdict === 'string' &&
-        ['pass', 'fail', 'partial'].includes(report.modelVerdict))) &&
-    typeof report.fileChange === 'string' &&
-    ['no_observed_change', 'change_observed', 'uncertain', 'recording_failed'].includes(
-      report.fileChange
-    ) &&
-    (report.changedFiles === undefined ||
-      (Array.isArray(report.changedFiles) &&
-        report.changedFiles.every((path) => typeof path === 'string'))) &&
-    Array.isArray(report.observationNotes) &&
-    report.observationNotes.every((note) => typeof note === 'string')
-  )
+  return Check(VerificationReportSchema, value)
 }
 
 export function verificationText(report: VerificationReport): string {
