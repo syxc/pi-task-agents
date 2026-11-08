@@ -10,6 +10,10 @@ import {
 import { verificationText } from './task-verification.ts'
 import { taskElapsed } from './task-presentation.ts'
 
+// Upstream lists at most the newest 100 tasks per query; unbounded lists would
+// grow with every completed task and dominate the parent context.
+const MAX_TASK_LIST_RESULTS = 100
+
 function executionMode(task: TaskSummary): string | undefined {
   return (
     task.execution_mode ??
@@ -80,10 +84,20 @@ export function queryResult(tasks: TaskSummary | TaskSummary[]): TaskToolResult 
   if (!Array.isArray(tasks)) {
     return projectedResult('task_query', renderTask(tasks), { task: summarizeTask(tasks) })
   }
+  const ordered = [...tasks].sort(
+    (left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)
+  )
+  const visible = ordered.slice(0, MAX_TASK_LIST_RESULTS)
   return projectedResult(
     'task_query',
-    tasks.length ? tasks.map(renderTask).join('\n') : 'No local background tasks in this session.',
-    { count: tasks.length, tasks: tasks.map(summarizeTask) }
+    visible.length
+      ? visible.map(renderTask).join('\n')
+      : 'No local background tasks in this session.',
+    {
+      count: visible.length,
+      tasks: visible.map(summarizeTask),
+      ...(ordered.length > visible.length ? { next_cursor: String(visible.length) } : {})
+    }
   )
 }
 

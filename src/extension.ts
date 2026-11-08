@@ -335,7 +335,7 @@ export function registerTaskAgents(
 
   register(
     'task_query',
-    'List tasks owned by this parent, or inspect a specific task. A terminal status includes succeeded, failed, canceled or lost. Completion reports return automatically; do not poll.',
+    'List tasks owned by this parent (at most the 100 newest), or inspect a specific task. A terminal status includes succeeded, failed, canceled or lost. Completion reports return automatically; do not poll.',
     Type.Object({
       task_id: Type.Optional(Type.String()),
       status: Type.Optional(statusSchema)
