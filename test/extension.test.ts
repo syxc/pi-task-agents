@@ -628,6 +628,33 @@ test('task schema accepts raw effort and prepares blank optional model/effort wi
   }
 })
 
+test('tasks stop and show report lookup failures as status messages instead of extension errors', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    for (const command of ['stop', 'show']) {
+      const method = command === 'show' ? 'output' : 'stop'
+      f.engines[0][method] = async () => {
+        throw Object.assign(new Error('Local background task not found: missing'), {
+          code: 'TASK_NOT_FOUND',
+          status: 404
+        })
+      }
+      /* oxlint-disable-next-line no-await-in-loop -- Both commands mutate the shared fixture and assert the latest status message. */
+      await f.commands.get('tasks').handler(`${command} missing`, f.ctx)
+      const message = f.sent.at(-1)[0]
+      assert.equal(message.customType, 'pi-task-agents:status')
+      assert.equal(message.display, true)
+      assert.equal(
+        message.content[0].text,
+        `Task ${command} failed: Local background task not found: missing`
+      )
+    }
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('role discovery and slash roles are compact without leaking instructions or internal snapshots', async () => {
   const f = fixture()
   try {

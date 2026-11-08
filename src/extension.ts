@@ -468,10 +468,25 @@ export function registerTaskAgents(
           content: [{ type: 'text', text: renderStopAll(tasks) }]
         })
         return
-      } else if (command === 'stop' && id) {
-        result = await engine.stop(id, 'User requested cancellation')
-      } else if (command === 'show' && id) {
-        result = await engine.output(id, { offset: 0, limitBytes: 65536 })
+      } else if ((command === 'stop' || command === 'show') && id) {
+        try {
+          result =
+            command === 'stop'
+              ? await engine.stop(id, 'User requested cancellation')
+              : await engine.output(id, { offset: 0, limitBytes: 65536 })
+        } catch (error) {
+          pi.sendMessage({
+            customType: 'pi-task-agents:status',
+            display: true,
+            content: [
+              {
+                type: 'text',
+                text: `Task ${command} failed: ${error instanceof Error ? error.message : String(error)}`
+              }
+            ]
+          })
+          return
+        }
       } else if (command === 'resume') {
         controller.resume()
         await controller.flush()
