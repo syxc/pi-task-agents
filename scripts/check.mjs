@@ -34,4 +34,56 @@ for (const dir of ['src', 'scripts', 'test']) {
   }
 }
 JSON.parse(await readFile(join(root, 'examples/task-agents.json'), 'utf8'))
-console.log('Syntax, package manifest, declared resources and example JSON passed.')
+const patternRules = [
+  {
+    files: /^src\/.+\.ts$/,
+    exclude: /^src\/(?:vendor\/|engine-helpers\.ts$)/,
+    pattern: /JSON\.parse\(JSON\.stringify\(/,
+    message: 'use cloneJson from engine-helpers instead of ad-hoc JSON cloning'
+  },
+  {
+    files: /^(?:src|test)\/.+\.ts$/,
+    exclude: /^src\/vendor\//,
+    pattern: /\bas\s+NodeJS\.ErrnoException\b/,
+    message: 'use hasCode from guards instead of asserting NodeJS.ErrnoException'
+  },
+  {
+    files: /^test\/.+\.(?:ts|mjs|js)$/,
+    exclude: /^$/,
+    pattern: /['"`]\.\.\/artifacts\//,
+    message: 'write test artifacts under mkdtemp instead of the repository artifacts directory'
+  }
+]
+const patternFiles = (
+  await Promise.all(
+    ['src', 'test'].map(async (dir) => {
+      const entries = (await readdir(join(root, dir), { recursive: true })).filter((entry) =>
+        /\.(?:ts|mjs|js)$/.test(entry)
+      )
+      return Promise.all(
+        entries.map(async (entry) => ({
+          file: `${dir}/${entry.replaceAll('\\', '/')}`,
+          text: await readFile(join(root, dir, entry), 'utf8')
+        }))
+      )
+    })
+  )
+).flat()
+const failures = []
+for (const { file, text } of patternFiles) {
+  const lines = text.split('\n')
+  for (const rule of patternRules) {
+    if (!rule.files.test(file) || rule.exclude.test(file)) {
+      continue
+    }
+    for (const [index, line] of lines.entries()) {
+      if (rule.pattern.test(line)) {
+        failures.push(`${file}:${index + 1}: ${rule.message}`)
+      }
+    }
+  }
+}
+assert.equal(failures.length, 0, failures.join('\n'))
+console.log(
+  'Syntax, package manifest, declared resources, example JSON and source patterns passed.'
+)
