@@ -30,6 +30,7 @@ const proc = spawn(
 )
 let buffer = ''
 let taskId
+let childStatus
 let callback = false
 let commands = false
 let settled = false
@@ -77,6 +78,7 @@ proc.stdout.on('data', (data) => {
       event.message.customType === 'pi-task-agents:result'
     ) {
       callback = true
+      childStatus = event.message.details?.status
       events.push({ type: 'completion-received', task_id: event.message.details?.task_id })
     }
     if (event.type === 'message_end' && event.message?.role === 'assistant') {
@@ -108,7 +110,16 @@ send({ id: 'commands', type: 'get_commands' })
 try {
   await done
   assert.deepEqual(errors, [])
-  const report = { status: 'passed', commands, taskId, callback, parentResumed: settled, events }
+  assert.equal(childStatus, 'succeeded')
+  const report = {
+    status: 'passed',
+    commands,
+    taskId,
+    childStatus,
+    callback,
+    parentResumed: settled,
+    events
+  }
   await writeFile(join(run, 'report.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify({ ...report, report: join(run, 'report.json') }, null, 2))
 } finally {

@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import type { TaskOutput, TaskSummary } from './types.ts'
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts'
 import {
-  escapeAttribute,
+  escapeText,
+  failureResult,
   projectedResult,
   type CodedFailure,
   type TaskToolResult
@@ -102,9 +103,10 @@ export function queryResult(tasks: TaskSummary | TaskSummary[]): TaskToolResult 
 }
 
 export function stopResult(task: TaskSummary, requestedId = task.task_id): TaskToolResult {
+  const id = escapeText(requestedId)
   const message = task.stopError
-    ? `Stop failed for ${requestedId}: ${task.stopError.message}. Process cleanup could not be confirmed.`
-    : `Task ${requestedId} is ${task.status}.`
+    ? `Stop failed for ${id}: ${task.stopError.message}. Process cleanup could not be confirmed.`
+    : `Task ${id} is ${task.status}.`
   return projectedResult(
     'task_stop',
     `<task_stop status="${task.status}">\n${message}\n</task_stop>`,
@@ -135,19 +137,7 @@ export function outputFailure(
   error: CodedFailure,
   wait: OutputWait
 ): TaskToolResult {
-  const text = `<task_output_error task_id="${escapeAttribute(taskId)}" code="${error.code}">${error.message}</task_output_error>`
-  return projectedResult(
-    'task_output',
-    text,
-    {
-      task_id: taskId,
-      code: error.code,
-      status: error.status,
-      ...wait,
-      error_message: error.message
-    },
-    true
-  )
+  return failureResult('task_output', 'task_output_error', taskId, error, { ...wait })
 }
 
 export class OutputProjector {

@@ -114,12 +114,12 @@ Pi 适配使用原生 `codemode`，对应 MCode 的 `packages/agent-core/src/too
 - 准入、permission hooks 和工具门控不能阻止可信第三方扩展自行执行代码，也不是 OS 或网络沙箱。第三方工厂在 SDK 接管之前发生的副作用仍由该工厂负责回滚。
 - 命令输出以当前 Pi 原生 Bash 捕获的输出为边界。仅接收本次原生调用的受校验输出源，并固定 `FileHandle` 身份；历史句柄只读取子会话私有日志，不把任意 URI 当作文件授权。宿主输出格式变化导致无法取得完整输出，或记录、解码不完整时，须明确报告，不能静默返回截取内容并宣称完整。
 - 原生执行结束与外部副作用回滚不同。主动脱离原生工具生命周期的进程、容器或外部服务不由这些句柄接管，也不能因一个 Bash 执行结束就宣称它们已停止。
-- 正式验收仍需 C5/C6 的冻结验收、C7 的完整联动门禁，以及 C9 的项目检查、Node 22/24 回归和提取包验证。命令见 README 开发说明，矩阵见 [CI](../.github/workflows/ci.yml)；既有定向或早期完整门禁不能证明当前全部需求完成。
+- 正式验收仍需 C5/C6 的冻结验收、C7 的完整联动门禁，以及 C9 的项目检查与 Node 22/24 回归；提取包内容由 `pnpm run pack` 解包校验。命令见 README 开发说明，矩阵见 [CI](../.github/workflows/ci.yml)；既有定向或早期完整门禁不能证明当前全部需求完成。
 - 接缝探针不能代替生产链验收；离线 SDK、bundled CLI、安装和真实服务证据分别记录。真实模型探针仅证明当次角色、源码、资源和输入路径，资源元数据可见不证明任意 MCP 业务接口可用。未经授权不执行真实模型或第三方业务验收。
 
 ## 上游同步（C8）
 
-[upstream.lock.json](../upstream.lock.json) 记录 8 个任务领域模块、2 个 child-Bash 生命周期/等待模块的原始及适配哈希，由 `scripts/upstream.mjs` 核验可逆转换；复用源码、薄适配与同步记录分开维护，控制分叉规模。
+[upstream.lock.json](../upstream.lock.json) 记录 6 个任务领域模块、2 个 child-Bash 生命周期/等待模块的原始及适配哈希，由 `scripts/upstream.mjs` 核验可逆转换；复用源码、薄适配与同步记录分开维护，控制分叉规模。
 
 另监测 43 个核心参考文件，覆盖公开工具定义、准入/续接、停止/终态/恢复、角色及模板、模型装配、task-child 工具 surface、PTC、许可及文件观察生产者。其中 `LR/background-task/subagent-task-row.ts` 生成 queued 行和 owner/Turn/执行模式事实，`LR/turns/file-changes.ts` 提供目标提取参考。参考文件仅报警，不打包为宿主实现。
 

@@ -22,12 +22,11 @@ export function projectedResult(
 }
 
 export function escapeAttribute(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;')
+  return escapeText(value).replaceAll('"', '&quot;').replaceAll("'", '&apos;')
+}
+
+export function escapeText(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
 export interface CodedFailure {
@@ -45,6 +44,28 @@ export function knownFailure(error: unknown): CodedFailure | undefined {
     : undefined
 }
 
+export function failureResult(
+  toolName: string,
+  tag: string,
+  taskId: string,
+  error: CodedFailure,
+  extra: Record<string, unknown> = {}
+): TaskToolResult {
+  const text = `<${tag} task_id="${escapeAttribute(taskId)}" code="${escapeAttribute(error.code)}">${error.message}</${tag}>`
+  return projectedResult(
+    toolName,
+    text,
+    {
+      task_id: taskId,
+      code: error.code,
+      status: error.status,
+      ...extra,
+      error_message: error.message
+    },
+    true
+  )
+}
+
 export function notFound(
   toolName: string,
   taskId: string,
@@ -52,7 +73,7 @@ export function notFound(
 ): TaskToolResult {
   return projectedResult(
     toolName,
-    `<task_error>Local background task not found: ${taskId}</task_error>`,
+    `<task_error>Local background task not found: ${escapeText(taskId)}</task_error>`,
     { task_id: taskId, status: 'not_found', ...extra },
     true
   )

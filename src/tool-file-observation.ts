@@ -96,7 +96,11 @@ export function createToolFileObservation(options: {
         : args
     )
   }
-  async function snapshot(observation: Observation, file: string): Promise<string | undefined> {
+  async function snapshot(
+    observation: Observation,
+    file: string,
+    deadline = performance.now() + 1000
+  ): Promise<string | undefined> {
     const absolute = resolve(root, file)
     if (
       isAbsolute(file) ||
@@ -112,7 +116,6 @@ export function createToolFileObservation(options: {
       observation.notes.add('target_excluded_or_too_deep')
       return
     }
-    const deadline = performance.now() + 1000
     try {
       const canonical = await (canonicalRoot ??= realpath(root))
       if ((await realpath(root)) !== canonical) {
@@ -300,10 +303,12 @@ export function createToolFileObservation(options: {
       }
       if (scope.calls.size) {
         scope.notes.add('unfinished_tool_capture')
+        // One deadline for the whole late capture so completion cannot stall per file.
+        const deadline = performance.now() + 1000
         for (const capture of scope.calls.values()) {
           for (const file of capture.paths) {
             // oxlint-disable-next-line no-await-in-loop -- Keep bounded metadata checks ordered and preserve early termination.
-            const value = await snapshot(scope, file)
+            const value = await snapshot(scope, file, deadline)
             if (value !== undefined) {
               scope.after.set(file, value)
             }

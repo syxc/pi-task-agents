@@ -2,3 +2,6 @@ node_modules/
 artifacts/
 *.tgz
 .upstream-*
+.DS_Store
+.codegraph/
+.zvec-grep/

@@ -120,6 +120,22 @@ test('an undecodable native UTF-8 tail is retained on disk and explicitly marked
   assert.equal(tail.truncated, true)
 })
 
+test('a lossy native prefix keeps reads on the decoded log and marks the stream incomplete', async (t) => {
+  const f = await fixture(t),
+    source = await f.native(Buffer.from([0xe4]))
+  f.output.update({
+    content: [{ type: 'text', text: '\uFFFD' }],
+    details: { fullOutputPath: source }
+  })
+  await (f.output as unknown as { opening?: Promise<void> }).opening
+  await writeFile(source, Buffer.from([0xe4, 0x61, 0x62]))
+  const first = f.output.read(0)
+  assert.equal(first.output, '\uFFFD')
+  assert.equal(first.next_offset, 3)
+  assert.equal(f.output.incomplete, true)
+  assert.equal(f.output.read(first.next_offset).output, '')
+})
+
 test('arbitrary output paths and file URIs never replace the already returned tool bytes', async (t) => {
   const f = await fixture(t),
     secret = join(f.root, 'unrelated-private.txt')
