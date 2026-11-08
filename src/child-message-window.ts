@@ -50,6 +50,10 @@ export function createChildMessageWindow<T extends object>(manager: SessionManag
     try {
       const raw = new Map(manager.getEntries().map((entry) => [entry.id, entry]))
       const branch = manager.getBranch()
+      if (window.rootUser === undefined) {
+        // No user message was observed, so this turn committed no readable root.
+        return { available: true, text: '' }
+      }
       const root = branch.findIndex(
         (entry) =>
           entry.type === 'message' &&
@@ -58,7 +62,9 @@ export function createChildMessageWindow<T extends object>(manager: SessionManag
           raw.get(entry.id)?.type === 'message'
       )
       if (root < 0) {
-        return { available: true, text: '' }
+        // An observed root that the active branch no longer contains means the
+        // authoritative window is gone; empty text would be a false success.
+        return { available: false, text: '' }
       }
       const edits = new Map<string, ContextEditEntry>()
       for (const entry of branch) {

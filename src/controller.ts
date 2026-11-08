@@ -1,8 +1,10 @@
-import { readFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { TaskEngine } from './engine.ts'
 import {
+  taskCompletionBatchNotice,
   taskCompletionNotice,
   taskProgress,
   taskWidget,
@@ -32,6 +34,13 @@ import type {
 
 export const RESULT_TYPE = 'pi-task-agents:result'
 const FAILURE_NOTICE_TYPE = 'pi-task-agents:failure-notice'
+const DELIVERY_RETRY_DELAYS_MS = [1000, 2000, 5000] as const
+const DELIVERY_RECOVERY_INITIAL_MS = 60_000
+const DELIVERY_RECOVERY_MAX_MS = 300_000
+const DELIVERY_BURST_WINDOW_MS = 60_000
+const MAX_DELIVERY_TURNS_PER_WINDOW = 3
+const MAX_NOTIFICATION_BATCH_TASKS = 32
+const MAX_NOTIFICATION_BATCH_BYTES = 8 * 1024
 
 type ParentAPI = Pick<ExtensionAPI, 'sendMessage' | 'appendEntry' | 'getThinkingLevel'> &
   Partial<Pick<ExtensionAPI, 'getActiveTools'>> &
@@ -53,8 +62,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function receiptTaskIds(entry: unknown, parentId: string | undefined): string[] {
+  if (
+    !isRecord(entry) ||
+    entry.type !== 'custom_message' ||
+    entry.customType !== RESULT_TYPE ||
+    !isRecord(entry.details) ||
+    entry.details.parent_id !== parentId
+  ) {
+    return []
+  }
+  const ids: string[] = []
+  if (typeof entry.details.task_id === 'string') {
+    ids.push(entry.details.task_id)
+  }
+  if (Array.isArray(entry.details.task_ids)) {
+    for (const id of entry.details.task_ids) {
+      if (typeof id === 'string') {
+        ids.push(id)
+      }
+    }
+  }
+  return ids
+}
+
 function canceled(): Error {
   return Object.assign(new Error('Parent operation canceled'), { name: 'AbortError' })
+}
+
+function nextRecoveryDelayMs(previous: number | undefined): number {
+  return Math.min(
+    previous === undefined ? DELIVERY_RECOVERY_INITIAL_MS : previous * 2,
+    DELIVERY_RECOVERY_MAX_MS
+  )
 }
 
 function rpcTaskWidget(tasks: readonly TaskSummary[], hidden: number): string[] {
@@ -75,11 +115,19 @@ export class TaskController {
   private owner?: ControllerOwner
   private readonly inFlight = new Map<string, number>()
   private readonly attempts = new Map<string, number>()
+  private readonly retryAt = new Map<string, number>()
+  private readonly recoveryDelay = new Map<string, number>()
   private readonly admissions = new Set<AbortController>()
+  private burstStartedAt = 0
+  private burstDelivered = 0
   private generation = 0
   private initializing: Promise<unknown> = Promise.resolve()
   private delivery: Promise<void> = Promise.resolve()
   private receiptTimer?: ReturnType<typeof setTimeout>
+  private retryTimer?: ReturnType<typeof setTimeout>
+  private retryTimerAt?: number
+  private burstTimer?: ReturnType<typeof setTimeout>
+  private burstTimerAt?: number
   private uiTimer?: ReturnType<typeof setTimeout>
   private uiRevision = 0
   private uiActive = false
@@ -283,27 +331,31 @@ export class TaskController {
     if (!file) {
       return ctx.sessionManager.getEntries()
     }
-    let text: string
+    const entries: unknown[] = []
+    const input = createReadStream(file, { encoding: 'utf8' })
+    const lines = createInterface({ input, crlfDelay: Infinity })
     try {
-      text = await readFile(file, 'utf8')
+      for await (const line of lines) {
+        // Session files also hold full tool results. Skip them without parsing,
+        // or every receipt check would deserialize the whole parent history.
+        if (!line.includes(RESULT_TYPE)) {
+          continue
+        }
+        try {
+          entries.push(JSON.parse(line) as unknown)
+        } catch {
+          // Pi skips torn or malformed JSONL records and repairs a missing final
+          // newline, so one crashed append must not block every later receipt.
+        }
+      }
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
         return []
       }
       throw error
-    }
-    const lines = text.split('\n')
-    const entries: unknown[] = []
-    for (const line of lines) {
-      if (!line.trim()) {
-        continue
-      }
-      try {
-        entries.push(JSON.parse(line) as unknown)
-      } catch {
-        // Pi skips torn or malformed JSONL records and repairs a missing final
-        // newline, so one crashed append must not block every later receipt.
-      }
+    } finally {
+      lines.close()
+      input.destroy()
     }
     return entries
   }
@@ -315,33 +367,36 @@ export class TaskController {
     if (!engine || !ctx) {
       return
     }
+    const pending = await engine.pendingNotifications()
+    if (engine !== this.engine) {
+      return
+    }
+    if (pending.length === 0) {
+      this.clearRetryTimer()
+      return
+    }
     // Pi emits message_end before its JSONL append. Only disk is a durable receipt.
     const delivered = new Set<string>()
     for (const entry of await this.receiptEntries(ctx)) {
-      if (
-        isRecord(entry) &&
-        entry.type === 'custom_message' &&
-        entry.customType === RESULT_TYPE &&
-        isRecord(entry.details) &&
-        entry.details.parent_id === parentId &&
-        typeof entry.details.task_id === 'string'
-      ) {
-        delivered.add(entry.details.task_id)
+      for (const taskId of receiptTaskIds(entry, parentId)) {
+        delivered.add(taskId)
       }
     }
     if (engine !== this.engine) {
       return
     }
     const canReclaim = reclaim && ctx.isIdle?.() === true && !ctx.hasPendingMessages?.()
-    for (const task of await engine.pendingNotifications()) {
+    for (const task of pending) {
       if (delivered.has(task.task_id)) {
         // oxlint-disable-next-line no-await-in-loop -- Persist each receipt before clearing its in-flight notification.
         await engine.ackNotification(task.task_id)
-        this.inFlight.delete(task.task_id)
-        this.attempts.delete(task.task_id)
+        this.clearDeliveryState(task.task_id)
       } else if (canReclaim && Date.now() - (this.inFlight.get(task.task_id) ?? Infinity) >= 1000) {
         this.inFlight.delete(task.task_id)
       }
+    }
+    if (pending.every((task) => delivered.has(task.task_id))) {
+      this.clearRetryTimer()
     }
   }
 
@@ -566,39 +621,205 @@ export class TaskController {
     const engine = this.engine
     const epoch = this.cancelEpoch
     if (!engine || !this.eligible(engine, epoch)) {
+      this.clearBurstTimer()
+      this.clearRetryTimer()
       return
     }
     const parentId = this.parentId
     // A startup notification must not claim the host's run slot before its first
     // prompt: print/json/RPC sessions submit that prompt immediately after start.
     const wake = !options.startup || this.ctx?.mode === 'tui'
-    for (const task of await engine.pendingNotifications()) {
-      if (!this.eligible(engine, epoch)) {
-        return
-      }
-      if (this.inFlight.has(task.task_id) || (this.attempts.get(task.task_id) ?? 0) >= 3) {
-        continue
-      }
-      this.notifyFailure(task)
-      this.inFlight.set(task.task_id, Date.now())
-      this.attempts.set(task.task_id, (this.attempts.get(task.task_id) ?? 0) + 1)
-      try {
-        this.pi.sendMessage(
-          {
-            customType: RESULT_TYPE,
-            display: false,
-            content: taskCompletionNotice(task),
-            details: { task_id: task.task_id, parent_id: parentId, status: task.status }
-          },
-          wake ? { triggerTurn: true, deliverAs: 'followUp' } : { deliverAs: 'nextTurn' }
-        )
-      } catch (error) {
-        this.inFlight.delete(task.task_id)
-        this.warn(error)
-      }
-      // sendMessage returns void; a later disk/idle check also catches asynchronous failures.
-      this.scheduleCheck(1000)
+    const pending = await engine.pendingNotifications()
+    if (!parentId || !this.eligible(engine, epoch)) {
+      this.clearBurstTimer()
+      this.clearRetryTimer()
+      return
     }
+    if (pending.length === 0) {
+      this.clearBurstTimer()
+      this.clearRetryTimer()
+      return
+    }
+    const now = Date.now()
+    const ready = pending.filter(
+      (task) => !this.inFlight.has(task.task_id) && (this.retryAt.get(task.task_id) ?? 0) <= now
+    )
+    const batch = this.selectNotificationBatch(ready)
+    if (batch.length === 0) {
+      this.clearBurstTimer()
+      this.armRetryTimer(pending)
+      return
+    }
+    const burstEnd = this.deliveryBurstEnd(now)
+    if (burstEnd !== undefined) {
+      // Deferring keeps tasks pending so a later batch can merge newer terminals.
+      this.armBurstTimer(burstEnd)
+      this.armRetryTimer(pending)
+      return
+    }
+    this.clearBurstTimer()
+    for (const task of batch) {
+      this.notifyFailure(task)
+      this.inFlight.set(task.task_id, now)
+      const attempts = (this.attempts.get(task.task_id) ?? 0) + 1
+      this.attempts.set(task.task_id, attempts)
+      if (attempts <= DELIVERY_RETRY_DELAYS_MS.length) {
+        this.recoveryDelay.delete(task.task_id)
+        this.retryAt.set(task.task_id, now + DELIVERY_RETRY_DELAYS_MS[attempts - 1])
+      } else {
+        const delay = nextRecoveryDelayMs(this.recoveryDelay.get(task.task_id))
+        this.recoveryDelay.set(task.task_id, delay)
+        this.retryAt.set(task.task_id, now + delay)
+      }
+    }
+    let delivered = false
+    try {
+      this.pi.sendMessage(
+        this.notificationMessage(batch, parentId),
+        wake ? { triggerTurn: true, deliverAs: 'followUp' } : { deliverAs: 'nextTurn' }
+      )
+      delivered = true
+    } catch (error) {
+      for (const task of batch) {
+        this.inFlight.delete(task.task_id)
+      }
+      this.warn(error)
+    }
+    if (delivered) {
+      this.burstDelivered++
+    }
+    // sendMessage returns void; a later disk/idle check also catches asynchronous failures.
+    this.armRetryTimer(pending)
+    this.scheduleCheck(1000)
+  }
+
+  private notificationMessage(
+    tasks: readonly TaskSummary[],
+    parentId: string
+  ): {
+    customType: string
+    display: boolean
+    content: string
+    details: {
+      parent_id: string
+      task_id?: string
+      task_ids?: string[]
+      status?: TaskSummary['status']
+    }
+  } {
+    const [single] = tasks
+    if (tasks.length === 1 && single) {
+      return {
+        customType: RESULT_TYPE,
+        display: false,
+        content: taskCompletionNotice(single),
+        details: { task_id: single.task_id, parent_id: parentId, status: single.status }
+      }
+    }
+    return {
+      customType: RESULT_TYPE,
+      display: false,
+      content: taskCompletionBatchNotice(tasks),
+      details: { task_ids: tasks.map((entry) => entry.task_id), parent_id: parentId }
+    }
+  }
+
+  private selectNotificationBatch(tasks: readonly TaskSummary[]): TaskSummary[] {
+    const selected: TaskSummary[] = []
+    for (const task of tasks) {
+      if (selected.length >= MAX_NOTIFICATION_BATCH_TASKS) {
+        break
+      }
+      if (
+        selected.length > 0 &&
+        Buffer.byteLength(taskCompletionBatchNotice([...selected, task])) >
+          MAX_NOTIFICATION_BATCH_BYTES
+      ) {
+        break
+      }
+      selected.push(task)
+    }
+    return selected
+  }
+
+  private armRetryTimer(tasks: readonly TaskSummary[]): void {
+    if (this.closing || this.suppressed) {
+      this.clearRetryTimer()
+      return
+    }
+    const now = Date.now()
+    let earliest: number | undefined
+    for (const task of tasks) {
+      const at = this.retryAt.get(task.task_id)
+      if (at !== undefined && at > now && (earliest === undefined || at < earliest)) {
+        earliest = at
+      }
+    }
+    if (earliest === undefined) {
+      this.clearRetryTimer()
+      return
+    }
+    if (this.retryTimer && this.retryTimerAt !== undefined && this.retryTimerAt <= earliest) {
+      return
+    }
+    this.clearRetryTimer()
+    this.retryTimerAt = earliest
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined
+      this.retryTimerAt = undefined
+      this.flush().catch((error: unknown) => this.warn(error))
+    }, earliest - now)
+    this.retryTimer.unref()
+  }
+
+  private clearRetryTimer(): void {
+    clearTimeout(this.retryTimer)
+    this.retryTimer = undefined
+    this.retryTimerAt = undefined
+  }
+
+  private deliveryBurstEnd(now: number): number | undefined {
+    if (now - this.burstStartedAt >= DELIVERY_BURST_WINDOW_MS) {
+      this.burstStartedAt = now
+      this.burstDelivered = 0
+    }
+    return this.burstDelivered < MAX_DELIVERY_TURNS_PER_WINDOW
+      ? undefined
+      : this.burstStartedAt + DELIVERY_BURST_WINDOW_MS + 1
+  }
+
+  private armBurstTimer(at: number): void {
+    if (this.closing || this.suppressed) {
+      this.clearBurstTimer()
+      return
+    }
+    if (this.burstTimer && this.burstTimerAt !== undefined && this.burstTimerAt <= at) {
+      return
+    }
+    this.clearBurstTimer()
+    this.burstTimerAt = at
+    this.burstTimer = setTimeout(
+      () => {
+        this.burstTimer = undefined
+        this.burstTimerAt = undefined
+        this.flush().catch((error: unknown) => this.warn(error))
+      },
+      Math.max(0, at - Date.now())
+    )
+    this.burstTimer.unref()
+  }
+
+  private clearBurstTimer(): void {
+    clearTimeout(this.burstTimer)
+    this.burstTimer = undefined
+    this.burstTimerAt = undefined
+  }
+
+  private clearDeliveryState(taskId: string): void {
+    this.inFlight.delete(taskId)
+    this.attempts.delete(taskId)
+    this.retryAt.delete(taskId)
+    this.recoveryDelay.delete(taskId)
   }
 
   private notifyFailure(task: TaskSummary): void {
@@ -666,6 +887,9 @@ export class TaskController {
       this.pi.appendEntry('pi-task-agents:paused', { paused: false })
     }
     this.attempts.clear()
+    this.retryAt.clear()
+    this.recoveryDelay.clear()
+    this.clearRetryTimer()
     this.suppressed = false
   }
 
@@ -677,6 +901,8 @@ export class TaskController {
     this.suppressed = true
     clearTimeout(this.receiptTimer)
     this.receiptTimer = undefined
+    this.clearBurstTimer()
+    this.clearRetryTimer()
   }
 
   async stopAll(reason = 'Parent canceled'): Promise<TaskSummary[]> {
@@ -718,6 +944,8 @@ export class TaskController {
     }
     clearTimeout(this.receiptTimer)
     this.receiptTimer = undefined
+    this.clearBurstTimer()
+    this.clearRetryTimer()
     await this.delivery
     let released = false
     try {
@@ -742,6 +970,12 @@ export class TaskController {
       this.engine = undefined
       this.inFlight.clear()
       this.attempts.clear()
+      this.retryAt.clear()
+      this.recoveryDelay.clear()
+      this.burstStartedAt = 0
+      this.burstDelivered = 0
+      this.clearBurstTimer()
+      this.clearRetryTimer()
       try {
         if (this.ctx?.hasUI) {
           this.ctx.ui.setStatus('task-agents', undefined)

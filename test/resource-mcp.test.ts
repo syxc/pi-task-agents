@@ -70,6 +70,63 @@ test('MCP config selection preserves explicit false/empty/server/tool deny witho
   /* oxlint-enable no-await-in-loop */
 })
 
+test('tool owners follow the visible MCP set instead of retaining a removed server', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-mcp-owners-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const extensionPath = join(root, 'fixture-extension.mjs')
+  await writeFile(extensionPath, 'export default () => {}\n')
+  let visible: sdk.RegisteredMcpServer[] = [
+    {
+      name: 'alpha',
+      extensionPath,
+      config: { command: process.execPath, exposure: 'direct' }
+    }
+  ]
+  let proxy: sdk.ExtensionAPI | undefined,
+    changed: ((event: unknown, ctx: unknown) => unknown) | undefined
+  const pi = {
+    getMcpServers: () => visible,
+    on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+      if (event === 'mcp_servers_change') {
+        changed = handler
+      }
+      return () => {}
+    },
+    registerTool: () => {}
+  } as unknown as sdk.ExtensionAPI
+  const adapter = await childMcpFactory(
+    {
+      loadMcpConfig: () => ({ servers: [], errors: [] }),
+      createMcpExtension() {
+        return (host: sdk.ExtensionAPI) => {
+          proxy = host
+          host.on('mcp_servers_change', () => {})
+        }
+      }
+    },
+    { ...profile, extensions: [extensionPath] },
+    root,
+    root,
+    false,
+    join(root, 'session.jsonl'),
+    100
+  )
+  await adapter.extension.factory(pi)
+  assert.ok(proxy && changed)
+  proxy.registerTool({
+    name: 'mcp__alpha__echo',
+    label: 'echo',
+    description: 'ownership fixture',
+    namespace: { name: 'mcp__alpha' },
+    parameters: { type: 'object', properties: {} },
+    execute: async () => ({ content: [{ type: 'text', text: 'echo' }] })
+  })
+  assert.equal(adapter.serverFor('mcp__alpha__echo'), 'alpha')
+  visible = []
+  await changed({}, {})
+  assert.equal(adapter.serverFor('mcp__alpha__echo'), undefined)
+})
+
 test(
   'real SDK selected stdio tools obey deny policy and SDK shutdown cleans up the process',
   { timeout: 15000 },

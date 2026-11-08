@@ -102,7 +102,7 @@ export async function createChildCommands(options: {
   await journal.restore()
   const logs = new CommandLogs(options.sessionPath),
     running = new Map<string, Execution>()
-  const receipts = new Map<string, Receipt>(),
+  const receipts = new Map<string, Receipt[]>(),
     cursors = new Map<string, number>()
   const readTails = new Map<string, Promise<unknown>>()
   function cursor(id: string): number | undefined {
@@ -474,14 +474,22 @@ export async function createChildCommands(options: {
         effective_wait_ms: wait,
         wait_ms_clamped: (input.wait_ms ?? 0) > wait
       })
-      receipts.set(toolCallId, {
+      const receipt: Receipt = {
         id: task.taskId,
         next: value.next_offset,
         terminal: isTerminalTaskStatus(task.status),
         automatic,
         text: JSON.stringify(result.content),
         release
-      })
+      }
+      // Pi permits duplicate tool-call IDs, so one ID can own several receipts until
+      // their results are observed; replacing the ID would strand an earlier read.
+      const pending = receipts.get(toolCallId)
+      if (pending) {
+        pending.push(receipt)
+      } else {
+        receipts.set(toolCallId, [receipt])
+      }
       return result
     }
     const operation = automatic
@@ -582,12 +590,20 @@ export async function createChildCommands(options: {
       }
     })
     pi.on('tool_result', (event) => {
-      const receipt = receipts.get(event.toolCallId)
-      if (!receipt) {
+      const pending = receipts.get(event.toolCallId)
+      if (!pending?.length) {
         return
       }
-      receipts.delete(event.toolCallId)
-      if (!event.isError && JSON.stringify(event.content) === receipt.text) {
+      // Duplicate IDs are resolved by the returned content; without a match the
+      // oldest receipt is the call whose result most likely arrived first.
+      const index = event.isError
+        ? -1
+        : pending.findIndex((receipt) => JSON.stringify(event.content) === receipt.text)
+      const [receipt] = pending.splice(index < 0 ? 0 : index, 1)
+      if (!pending.length) {
+        receipts.delete(event.toolCallId)
+      }
+      if (index >= 0) {
         if (receipt.automatic) {
           commitCursor(receipt.id, receipt.next)
         }
@@ -647,8 +663,10 @@ export async function createChildCommands(options: {
     })
   }
   async function abort(): Promise<void> {
-    for (const receipt of receipts.values()) {
-      receipt.release()
+    for (const pending of receipts.values()) {
+      for (const receipt of pending) {
+        receipt.release()
+      }
     }
     receipts.clear()
     const results = await Promise.allSettled([...running.keys()].map(stopExecution))

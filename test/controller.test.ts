@@ -253,6 +253,13 @@ const complete = (id = 't1') => ({
   notification_pending: true
 })
 
+function makeRetryDue(f, ...taskIds) {
+  for (const taskId of taskIds) {
+    f.controller.inFlight.delete(taskId)
+    f.controller.retryAt.set(taskId, Date.now() - 1)
+  }
+}
+
 test('completion is sent once and stays pending until the persisted message receipt', async () => {
   const f = fixture()
   await f.controller.ensure(f.ctx)
@@ -270,6 +277,19 @@ test('completion is sent once and stays pending until the persisted message rece
   await f.controller.flush()
   assert.equal(f.sent.length, 1)
   await f.controller.shutdown()
+})
+
+test('reconcile skips the receipt scan when no notification is pending', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.ctx.sessionManager.getEntries = () => {
+      throw new Error('Receipts must not be scanned without a pending notification')
+    }
+    await f.controller.reconcile()
+  } finally {
+    await f.controller.shutdown()
+  }
 })
 
 test('startup delivery queues outside TUI instead of starting a turn before the host prompt', async () => {
@@ -619,6 +639,7 @@ test('async send loss and cleared queues can retry without duplicating queued re
   f.ctx.hasPendingMessages = () => queued
   await f.controller.flush()
   f.controller.inFlight.set('t1', Date.now() - 2000)
+  f.controller.retryAt.set('t1', Date.now() - 1)
   await f.controller.flush()
   assert.equal(f.sent.length, 1)
   queued = false
@@ -1156,7 +1177,7 @@ test('restored result receipts, foreground failures and ordinary terminal states
     )
     await f.controller.flush()
     assert.equal(notices.length, 0)
-    assert.equal(f.sent.length, 2)
+    assert.equal(f.sent.length, 1, 'both unread terminal tasks share one notice')
     assert.equal(f.entries.length, 1)
   } finally {
     await f.controller.shutdown()
@@ -1171,7 +1192,7 @@ test('headless failure delivery creates no visual receipt and unavailable UI doe
     await f.controller.flush()
     assert.equal(f.entries.length, 0)
     assert.equal(f.sent.length, 1)
-    f.controller.inFlight.clear()
+    makeRetryDue(f, 't1')
     f.ctx.hasUI = true
     f.ctx.ui = {
       notify() {
@@ -1226,16 +1247,16 @@ test('failure text excludes diagnostics and escapes untrusted IDs, and receipt w
     assert.equal(f.sent.length, 1)
     assert.equal(notices.length, 0)
     f.pi.appendEntry = append
-    f.controller.inFlight.clear()
+    makeRetryDue(f, f.engines[0].tasks[0].task_id)
     await f.controller.flush()
     assert.equal(notices.length, 1)
     assert.match(notices[0][0], /failed task task\?\?31m\?\?-id/)
     assert.doesNotMatch(notices[0][0], /PRIVATE_/)
     assert.ok(['\u001B', '\n', '\u202E'].every((character) => !notices[0][0].includes(character)))
-    f.controller.inFlight.clear()
+    makeRetryDue(f, f.engines[0].tasks[0].task_id)
     await f.controller.flush()
     assert.equal(notices.length, 1)
-    assert.equal(f.sent.length, 3, 'only existing native retry semantics apply')
+    assert.equal(f.sent.length, 3, 'an unreceipted notice remains retryable')
   } finally {
     await f.controller.shutdown()
   }
@@ -1825,23 +1846,172 @@ test('owner factory reuse rejects trust changes until explicit reload', async ()
   }
 })
 
-test('delivery retries stop at three attempts and can be explicitly resumed', async () => {
+test('co-terminal notifications merge into one model-visible message and one receipt', async () => {
   const f = fixture()
-  await f.controller.ensure(f.ctx)
-  f.engines[0].tasks.push(complete())
-  f.ctx.isIdle = () => true
-  f.ctx.hasPendingMessages = () => false
-  /* oxlint-disable no-await-in-loop -- Cases observe or mutate shared fixture state; retain the ordered execution contract. */
-  for (let attempt = 0; attempt < 10; attempt++) {
-    f.controller.inFlight.set('t1', Date.now() - 2000)
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(complete('t1'), complete('t2'))
     await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    const [message, options] = f.sent[0]
+    assert.match(message.content, /Child tasks finished \(2\)/)
+    assert.match(message.content, /t1 \(worker\) succeeded/)
+    assert.match(message.content, /t2 \(worker\) succeeded/)
+    assert.match(message.content, /Use task_output/)
+    assert.deepEqual(message.details, { task_ids: ['t1', 't2'], parent_id: 'parent-a' })
+    assert.deepEqual(options, { triggerTurn: true, deliverAs: 'followUp' })
+    f.entries.push({ type: 'custom_message', ...message })
+    await f.controller.reconcile()
+    assert.equal(
+      f.engines[0].tasks.some((task) => task.notification_pending),
+      false
+    )
+  } finally {
+    await f.controller.shutdown()
   }
-  /* oxlint-enable no-await-in-loop */
-  assert.equal(f.sent.length, 3)
-  assert.equal(f.engines[0].tasks[0].notification_pending, true)
-  f.controller.resume()
-  f.controller.inFlight.set('t1', Date.now() - 2000)
-  await f.controller.flush()
-  assert.equal(f.sent.length, 4)
-  await f.controller.shutdown()
+})
+
+test('notification batches stay bounded while every terminal task is delivered', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    const tasks = Array.from({ length: 33 }, (_, index) =>
+      complete(`t${index.toString().padStart(2, '0')}`)
+    )
+    f.engines[0].tasks.push(...tasks)
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.sent[0][0].details.task_ids.length, 32)
+    await f.controller.flush()
+    assert.equal(f.sent.length, 2)
+    assert.equal(f.sent[1][0].details.task_id, 't32')
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('unsent notices retry at 1/2/5 seconds, cool down to a cap, and stop at the persisted receipt', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.ctx.isIdle = () => true
+    f.ctx.hasPendingMessages = () => false
+    f.engines[0].tasks.push(complete())
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.controller.retryAt.get('t1'), 1000)
+
+    const advance = async (ms) => {
+      t.mock.timers.tick(ms)
+      await f.controller.flush()
+    }
+    await advance(1000)
+    assert.equal(f.sent.length, 2)
+    assert.equal(f.controller.retryAt.get('t1'), 3000)
+    await advance(1000)
+    assert.equal(f.sent.length, 2)
+    await advance(1000)
+    assert.equal(f.sent.length, 3)
+    assert.equal(f.controller.retryAt.get('t1'), 8000)
+    await advance(5000)
+    assert.equal(f.sent.length, 3, 'the fourth turn waits for the delivery window')
+    assert.equal(f.controller.retryAt.get('t1'), 8000)
+    await advance(52001)
+    assert.equal(f.sent.length, 4)
+    assert.equal(f.controller.retryAt.get('t1'), 120001)
+    await advance(60000)
+    assert.equal(f.sent.length, 5)
+    assert.equal(f.controller.retryAt.get('t1'), 240001)
+    await advance(120000)
+    assert.equal(f.sent.length, 6)
+    assert.equal(f.controller.retryAt.get('t1'), 480001)
+    await advance(240000)
+    assert.equal(f.sent.length, 7)
+    assert.equal(f.controller.retryAt.get('t1'), 780001)
+    await advance(300000)
+    assert.equal(f.sent.length, 8)
+    assert.equal(f.controller.retryAt.get('t1'), 1080001)
+
+    f.entries.push({ type: 'custom_message', ...f.sent.at(-1)[0] })
+    await f.controller.reconcile()
+    assert.equal(f.engines[0].tasks[0].notification_pending, false)
+    await advance(300000)
+    assert.equal(f.sent.length, 8)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('resume clears a long cooldown and pause disarms its timer', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.ctx.isIdle = () => true
+    f.ctx.hasPendingMessages = () => false
+    f.engines[0].tasks.push(complete())
+    await f.controller.flush()
+    /* oxlint-disable no-await-in-loop -- Fast retries must advance through their timers in order. */
+    for (const delay of [1000, 2000, 5000]) {
+      t.mock.timers.tick(delay)
+      await f.controller.flush()
+    }
+    /* oxlint-enable no-await-in-loop */
+    assert.equal(f.sent.length, 3)
+    assert.equal(f.controller.retryAt.get('t1'), 8000)
+    f.controller.pause()
+    assert.equal(f.controller.retryTimer, undefined)
+    assert.equal(f.controller.burstTimer, undefined)
+    assert.equal(f.engines[0].tasks[0].notification_pending, true)
+    f.controller.resume()
+    assert.equal(f.controller.retryAt.has('t1'), false)
+    makeRetryDue(f, 't1')
+    await f.controller.flush()
+    assert.equal(f.sent.length, 3, 'resume does not bypass the delivery window')
+    t.mock.timers.tick(52001)
+    await f.controller.flush()
+    assert.equal(f.sent.length, 4)
+    assert.equal(f.controller.attempts.get('t1'), 1)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('delivery turns are capped per minute and deferred terminals merge into the next window', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    const deliver = async (id) => {
+      f.engines[0].tasks.push(complete(id))
+      await f.controller.flush()
+      f.entries.push({ type: 'custom_message', ...f.sent.at(-1)[0] })
+      await f.controller.reconcile()
+    }
+    await deliver('t1')
+    await deliver('t2')
+    await deliver('t3')
+    assert.equal(f.sent.length, 3)
+    f.engines[0].tasks.push(complete('t4'))
+    await f.controller.flush()
+    assert.equal(f.sent.length, 3, 'the fourth delivery turn waits for the window')
+    assert.notEqual(f.controller.burstTimer, undefined)
+    assert.equal(f.engines[0].tasks[3].notification_pending, true)
+
+    f.engines[0].tasks.push(complete('t5'))
+    t.mock.timers.tick(60001)
+    await f.controller.flush()
+    assert.equal(f.sent.length, 4)
+    assert.deepEqual(f.sent[3][0].details.task_ids, ['t4', 't5'])
+    assert.equal(f.controller.burstDelivered, 1)
+
+    f.entries.push({ type: 'custom_message', ...f.sent[3][0] })
+    await f.controller.reconcile()
+    f.engines[0].tasks.push(complete('t6'))
+    await f.controller.flush()
+    assert.equal(f.sent.length, 5, 'a fresh window allows another delivery turn')
+  } finally {
+    await f.controller.shutdown()
+  }
 })

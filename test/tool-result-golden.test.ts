@@ -154,6 +154,22 @@ test('query singleton/list/empty goldens expose only upstream summary fields', (
   exact(queryResult([]), 'No local background tasks in this session.', { count: 0, tasks: [] })
 })
 
+test('task lists show newest first and stay bounded with a cursor', () => {
+  const tasks = Array.from({ length: 101 }, (_, index) => ({
+    ...base,
+    task_id: `t${index + 1}`,
+    created_at: new Date(Date.UTC(2025, 0, 1, 0, 0, index)).toISOString()
+  }))
+  const result = queryResult(tasks)
+  const lines = result.text.split('\n')
+  assert.equal(lines.length, 100)
+  assert.match(lines[0], /^- t101 /)
+  assert.match(lines[99], /^- t2 /)
+  assert.equal(result.details.count, 100)
+  assert.equal(result.details.tasks.length, 100)
+  assert.equal(result.details.next_cursor, '100')
+})
+
 test('control not-found goldens use not_found instead of a generic error envelope', () => {
   for (const name of ['task_query', 'task_output', 'task_stop']) {
     const extra = name === 'task_output' ? outputWait(90000) : {}
