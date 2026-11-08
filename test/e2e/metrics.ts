@@ -225,8 +225,10 @@ export async function finishScenario(
     durationMs <= budget.maxDurationMs,
     `${name}: ${durationMs}ms exceeded budget ${budget.maxDurationMs}ms`
   )
+  assert.ok(parent.usage.totalTokens > 0, `${name}: parent reported no token usage`)
   if (options.requiresChildSession !== false) {
     assert.ok(child.sessionFiles > 0, `${name}: no child session was recorded`)
+    assert.ok(child.usage.totalTokens > 0, `${name}: child session reported no token usage`)
   }
   const report: ScenarioMetrics = {
     name,
