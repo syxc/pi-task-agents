@@ -1018,16 +1018,25 @@ export class TaskEngine {
     this.assertOpen()
     aborted(signal)
     if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0)) {
-      throw new Error('Invalid output offset')
+      throw Object.assign(new Error('Invalid output offset'), {
+        code: 'TASK_OUTPUT_INVALID',
+        status: 400
+      })
     }
     if (!Number.isSafeInteger(limitBytes) || limitBytes < 1) {
-      throw new Error('Invalid output limit')
+      throw Object.assign(new Error('Invalid output limit'), {
+        code: 'TASK_OUTPUT_INVALID',
+        status: 400
+      })
     }
     const task = this.task(taskId)
     const waitMs = Math.max(0, Math.min(30000, Number(wait_ms) || 0))
     const read = async (requested: number): Promise<TaskOutput> => {
       if (requested > Buffer.byteLength(task.output)) {
-        throw new Error('Output offset exceeds available bytes')
+        throw Object.assign(new Error('Output offset exceeds available bytes'), {
+          code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+          status: 416
+        })
       }
       const changed =
         waitMs === 0 ||

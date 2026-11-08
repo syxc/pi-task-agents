@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
 import type { TaskOutput, TaskSummary } from './types.ts'
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts'
-import { projectedResult, type TaskToolResult } from './tool-result-common.ts'
+import {
+  escapeAttribute,
+  projectedResult,
+  type CodedFailure,
+  type TaskToolResult
+} from './tool-result-common.ts'
 import { verificationText } from './task-verification.ts'
 import { taskElapsed } from './task-presentation.ts'
 
@@ -109,6 +114,26 @@ export interface OutputWait {
 
 export function outputWait(requested = 0): OutputWait {
   return { effective_wait_ms: Math.min(requested, 30000), wait_ms_clamped: requested > 30000 }
+}
+
+export function outputFailure(
+  taskId: string,
+  error: CodedFailure,
+  wait: OutputWait
+): TaskToolResult {
+  const text = `<task_output_error task_id="${escapeAttribute(taskId)}" code="${error.code}">${error.message}</task_output_error>`
+  return projectedResult(
+    'task_output',
+    text,
+    {
+      task_id: taskId,
+      code: error.code,
+      status: error.status,
+      ...wait,
+      error_message: error.message
+    },
+    true
+  )
 }
 
 export class OutputProjector {

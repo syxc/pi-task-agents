@@ -305,6 +305,18 @@ test('UTF-8 byte output, automatic cursor, waiting, failure output, notification
   assert.equal((await engine.output(a.task_id)).output, '')
   assert.equal((await engine.output(a.task_id, { offset: 0, limitBytes: 1 })).output, '中')
   assert.equal((await engine.output(a.task_id, { offset: 4, limitBytes: 1 })).output, 'x')
+  await assert.rejects(engine.output(a.task_id, { offset: 1000 }), {
+    code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+    status: 416
+  })
+  await assert.rejects(engine.output(a.task_id, { offset: -1 }), {
+    code: 'TASK_OUTPUT_INVALID',
+    status: 400
+  })
+  await assert.rejects(engine.output(a.task_id, { limitBytes: 0 }), {
+    code: 'TASK_OUTPUT_INVALID',
+    status: 400
+  })
   await waitFor(() => notifications.length === 1)
   assert.equal((await engine.output(a.task_id, { offset: 0 })).output, '中🙂x\n\n[failed] boom')
   assert.equal((await engine.query({ task_id: a.task_id })).status, 'failed')

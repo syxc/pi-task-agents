@@ -13,11 +13,23 @@ import {
   TERMINAL_TASK_STATUSES,
   isActiveTaskStatus
 } from './vendor/mcode-background-task/status.ts'
-import { isRecord, notFound, projectedResult, type TaskToolResult } from './tool-result-common.ts'
+import {
+  isRecord,
+  knownFailure,
+  notFound,
+  projectedResult,
+  type TaskToolResult
+} from './tool-result-common.ts'
 import { appendFailure, appendResult, knownAppendFailure, taskResult } from './tool-result-task.ts'
-import { OutputProjector, outputWait, queryResult, stopResult } from './tool-result-control.ts'
+import {
+  OutputProjector,
+  outputFailure,
+  outputWait,
+  queryResult,
+  stopResult
+} from './tool-result-control.ts'
 import { renderRoles, roleOverview } from './task-presentation.ts'
-import type { TaskSummary } from './types.ts'
+import type { TaskOutput, TaskSummary } from './types.ts'
 export type { TaskToolResult } from './tool-result-common.ts'
 
 const nonempty = () => Type.String({ minLength: 1 })
@@ -359,11 +371,21 @@ export function registerTaskAgents(
         outputProjector.reset()
         return notFound('task_output', params.task_id, { ...wait })
       }
-      const result = await engine.output(params.task_id, {
-        offset: params.offset,
-        wait_ms: wait.effective_wait_ms,
-        signal
-      })
+      let result: TaskOutput
+      try {
+        result = await engine.output(params.task_id, {
+          offset: params.offset,
+          wait_ms: wait.effective_wait_ms,
+          signal
+        })
+      } catch (error) {
+        const failure = knownFailure(error)
+        if (!failure?.code.startsWith('TASK_OUTPUT_')) {
+          throw error
+        }
+        outputProjector.reset()
+        return outputFailure(params.task_id, failure, wait)
+      }
       return outputProjector.result(
         result,
         wait,

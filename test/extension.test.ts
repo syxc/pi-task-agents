@@ -69,6 +69,9 @@ function fixture() {
     }
     async output(id, options) {
       this.read = { id, options }
+      if (this.outputError) {
+        throw this.outputError
+      }
       return this.result
     }
     async stop(id, reason) {
@@ -406,6 +409,37 @@ test('output accepts overlong waits, reports the cap and passes cancellation to 
     )
     assert.match(reply.content[0].text, /partial\n<\/task_output>$/)
     assert.equal(reply.details.output, undefined)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('output offset failures return structured task_output errors', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.engines[0].outputError = Object.assign(new Error('Output offset exceeds available bytes'), {
+      code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+      status: 416
+    })
+    const reply = await f.execute('task_output', {
+      task_id: 't1',
+      offset: 999,
+      wait_ms: 60000
+    })
+    assert.equal(reply.isError, true)
+    assert.equal(
+      reply.text,
+      '<task_output_error task_id="t1" code="TASK_OUTPUT_OFFSET_OUT_OF_RANGE">Output offset exceeds available bytes</task_output_error>'
+    )
+    assert.deepEqual(reply.details, {
+      task_id: 't1',
+      code: 'TASK_OUTPUT_OFFSET_OUT_OF_RANGE',
+      status: 416,
+      effective_wait_ms: 30000,
+      wait_ms_clamped: true,
+      error_message: 'Output offset exceeds available bytes'
+    })
   } finally {
     await f.controller.shutdown()
   }
