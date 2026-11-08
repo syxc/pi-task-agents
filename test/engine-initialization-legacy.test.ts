@@ -53,7 +53,10 @@ for (const status of ['running', 'stopping', 'lost'] as const) {
         assert.deepEqual(actual.extensions, [])
         return {
           sessionPath,
-          prompt: async () => ({ text: 'explicit continuation' }),
+          prompt: async () => ({
+            text: 'explicit continuation',
+            outcome: { kind: 'returned', status: 'succeeded' }
+          }),
           steer: async () => {},
           abort: async () => {},
           dispose: async () => {}

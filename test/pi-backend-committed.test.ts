@@ -26,13 +26,15 @@ const answer = (text: string, extra: Record<string, unknown> = {}) => ({
   },
   ...extra
 })
-const textOf = (message: { content: string | { type: string; text?: string }[] }) =>
-  typeof message.content === 'string'
-    ? message.content
-    : message.content
+function textOf(message: unknown): string {
+  const content = (message as { content?: string | { type: string; text?: string }[] }).content
+  return typeof content === 'string'
+    ? content
+    : (content ?? [])
         .filter((part) => part.type === 'text')
         .map((part) => part.text)
         .join('')
+}
 const firstRead = (text: string) =>
   answer(text, {
     stopReason: 'toolUse',
@@ -117,6 +119,7 @@ async function fixture(t: TestContext, retry = false) {
     name: 'verifier',
     model: 'offline/model',
     thinking: 'off',
+    instructions: 'Verify the committed turn through the real session manager.',
     timeoutMs: 0,
     tools: ['read'],
     skills: [],

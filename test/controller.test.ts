@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { TaskController, RESULT_TYPE } from '../src/controller.ts'
 import { taskWidget } from '../src/task-presentation.ts'
 import {
@@ -649,12 +651,11 @@ test('async send loss and cleared queues can retry without duplicating queued re
   await f.controller.shutdown()
 })
 
-test('receipt checks use disk even when Pi in-memory entries already contain the result', async () => {
-  const { mkdir, mkdtemp, writeFile } = await import('node:fs/promises')
-  const root = new URL('../artifacts/controller-tests/', import.meta.url)
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  const dir = await mkdtemp(new URL('receipt-', root).pathname)
-  const file = dir + '/parent.jsonl'
+test('receipt checks use disk even when Pi in-memory entries already contain the result', async (t) => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(join(tmpdir(), 'controller-receipt-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const file = join(dir, 'parent.jsonl')
   await writeFile(file, '', { mode: 0o600 })
   const f = fixture([
     {
@@ -678,12 +679,11 @@ test('receipt checks use disk even when Pi in-memory entries already contain the
   await f.controller.shutdown()
 })
 
-test('a malformed parent JSONL record does not block later durable receipts', async () => {
-  const { mkdir, mkdtemp, writeFile } = await import('node:fs/promises')
-  const root = new URL('../artifacts/controller-tests/', import.meta.url)
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  const dir = await mkdtemp(new URL('receipt-torn-', root).pathname)
-  const file = dir + '/parent.jsonl'
+test('a malformed parent JSONL record does not block later durable receipts', async (t) => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(join(tmpdir(), 'controller-receipt-torn-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const file = join(dir, 'parent.jsonl')
   const result = {
     type: 'custom_message',
     customType: RESULT_TYPE,
@@ -799,11 +799,10 @@ test('replacement extension instances reclaim detached engines without cross-ses
   assert.equal(engine.closed, true)
 })
 
-test('admission snapshots the current inherited model and thinking, and reload continuation does not drift', async () => {
-  const { mkdir, mkdtemp } = await import('node:fs/promises')
-  const root = new URL('../artifacts/controller-tests/', import.meta.url)
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  const agentDir = await mkdtemp(new URL('models-', root).pathname)
+test('admission snapshots the current inherited model and thinking, and reload continuation does not drift', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const agentDir = await mkdtemp(join(tmpdir(), 'controller-models-'))
+  t.after(() => rm(agentDir, { recursive: true, force: true }))
   let thinking = 'high'
   const dispatched = []
   let factoryCalls = 0
@@ -828,7 +827,7 @@ test('admission snapshots the current inherited model and thinking, and reload c
         return {
           sessionPath,
           async prompt() {
-            return { text: 'done' }
+            return { text: 'done', outcome: { kind: 'returned', status: 'succeeded' } }
           },
           async steer() {},
           async abort() {},
@@ -914,11 +913,10 @@ test('controller passes the public parent registry object into its one owner fac
 })
 
 test('default controller factory forwards extension provider registry before model selection without a custom factory', async (t) => {
-  const { mkdir, mkdtemp } = await import('node:fs/promises')
+  const { mkdtemp, rm } = await import('node:fs/promises')
   const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
-  const root = new URL('../artifacts/controller-tests/', import.meta.url)
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  const agentDir = await mkdtemp(new URL('provider-registry-', root).pathname)
+  const agentDir = await mkdtemp(join(tmpdir(), 'controller-provider-registry-'))
+  t.after(() => rm(agentDir, { recursive: true, force: true }))
   const calls = []
   const providerConfig = {
     api: 'openai-completions',
@@ -2013,5 +2011,68 @@ test('delivery turns are capped per minute and deferred terminals merge into the
     assert.equal(f.sent.length, 5, 'a fresh window allows another delivery turn')
   } finally {
     await f.controller.shutdown()
+  }
+})
+
+test('real TaskEngine lifecycle releases the store and reopens persisted tasks after shutdown', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const agentDir = await mkdtemp(join(tmpdir(), 'controller-real-lifecycle-'))
+  t.after(() => rm(agentDir, { recursive: true, force: true }))
+  const profile = { name: 'worker', instructions: '', tools: ['read'], timeoutMs: 0 }
+  let disposed = 0
+  const setup = () => {
+    const controller = new TaskController(
+      { ...runtimeAPI, getThinkingLevel: () => 'off', sendMessage() {}, appendEntry() {} },
+      {
+        agentDir,
+        configLoader: async () => ({
+          maxConcurrency: 2,
+          roles: { worker: profile },
+          diagnostics: []
+        }),
+        childFactory:
+          () =>
+          async ({ sessionPath }) => ({
+            sessionPath,
+            prompt: async () => ({
+              text: 'real lifecycle',
+              outcome: { kind: 'returned', status: 'succeeded' }
+            }),
+            steer: async () => {},
+            abort: async () => {},
+            dispose: async () => {
+              disposed++
+            }
+          })
+      }
+    )
+    const ctx = {
+      cwd: agentDir,
+      hasUI: false,
+      model: { provider: 'fake', id: 'parent' },
+      sessionManager: { getSessionId: () => 'real-parent', getEntries: () => [] }
+    }
+    return { controller, ctx }
+  }
+  const first = setup()
+  const task = await first.controller.start(
+    { agent_name: 'worker', description: 'real lifecycle', prompt: 'work' },
+    'real-lifecycle',
+    undefined,
+    first.ctx
+  )
+  assert.equal(task.status, 'succeeded')
+  await first.controller.shutdown()
+  assert.equal(disposed, 1)
+  const second = setup()
+  try {
+    await second.controller.ensure(second.ctx)
+    assert.equal(
+      (await second.controller.engine.query({ task_id: task.task_id })).status,
+      'succeeded'
+    )
+    assert.equal((await second.controller.engine.query()).length, 1)
+  } finally {
+    await second.controller.shutdown()
   }
 })

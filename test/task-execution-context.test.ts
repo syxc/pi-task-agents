@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { TaskEngine } from '../src/engine.ts'
 import { taskExecutionBinding, type ParentToolBinding } from '../src/task-execution-context.ts'
@@ -36,7 +36,7 @@ const binding = (id: string): ParentToolBinding => ({
   }
 })
 
-async function setup(t) {
+async function setup(t: TestContext) {
   const rootDir = await mkdtemp(join(tmpdir(), 'pi-execution-context-'))
   const observed: Array<ParentToolBinding | undefined> = []
   const engine = await new TaskEngine({
@@ -84,7 +84,7 @@ for (const missing of [false, true]) {
       let intercepted = false,
         registered = false,
         done: Promise<void> | undefined
-      t.mock.method(pending, 'delete', (id) => {
+      t.mock.method(pending, 'delete', (id: string) => {
         const removed = remove(id)
         if (!intercepted) {
           intercepted = true

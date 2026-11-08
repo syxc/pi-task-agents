@@ -8,6 +8,7 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { TaskEngine } from '../src/engine.ts'
+import { hasCode } from '../src/guards.ts'
 import type { TaskSummary } from '../src/types.ts'
 
 interface OwnerMessage {
@@ -34,7 +35,7 @@ const alive = (pid: number) => {
     process.kill(pid, 0)
     return true
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+    if (hasCode(error, 'ESRCH')) {
       return false
     }
     throw error
@@ -57,7 +58,7 @@ async function json(path: string) {
   try {
     return JSON.parse(await readFile(path, 'utf8'))
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) {
+    if (hasCode(error, 'ENOENT') || error instanceof SyntaxError) {
       return undefined
     }
     throw error
@@ -205,7 +206,10 @@ for (const phase of [
         factoryCalls++
         return {
           sessionPath,
-          prompt: async () => ({ text: 'offline' }),
+          prompt: async () => ({
+            text: 'offline',
+            outcome: { kind: 'returned' as const, status: 'succeeded' as const }
+          }),
           steer: async () => {},
           abort: async () => {},
           dispose: async () => {}
@@ -244,7 +248,10 @@ for (const phase of [
     restored.sessions.set(row.session_id, {
       child: {
         sessionPath: row.childSessionPath,
-        prompt: async () => ({ text: 'must not run' }),
+        prompt: async () => ({
+          text: 'must not run',
+          outcome: { kind: 'returned' as const, status: 'succeeded' as const }
+        }),
         steer: async () => {},
         abort: async () => {},
         dispose: async () => {

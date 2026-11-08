@@ -38,7 +38,8 @@ test('adapted verdict parser matches the pinned upstream parser', async () => {
   )
   const lock = JSON.parse(await readFile(new URL('../upstream.lock.json', import.meta.url), 'utf8'))
   const watched = lock.watch.find(
-    (entry) => entry.source === 'packages/agent-tools/src/desktop/task-verification.ts'
+    (entry: { source: string; sha256: string }) =>
+      entry.source === 'packages/agent-tools/src/desktop/task-verification.ts'
   )
   assert.equal(createHash('sha256').update(source).digest('hex'), watched.sha256)
   const compiled = ts.transpileModule(source, {

@@ -135,7 +135,10 @@ test(
         (message) => message.role === 'toolResult' && message.toolName === 'task_output'
       )
       assert.ok(saved && saved.role === 'toolResult')
-      assert.deepEqual(saved.details.verification, currentVerification)
+      assert.deepEqual(
+        (saved.details as { verification?: unknown } | null | undefined)?.verification,
+        currentVerification
+      )
       if (phase === 'paginate') {
         if (offset === 0) {
           firstPage = text
@@ -192,15 +195,22 @@ test(
               () =>
               async ({ sessionPath }) => ({
                 sessionPath,
-                prompt: async () => ({ text: report, verification }),
+                prompt: async () => ({
+                  text: report,
+                  verification,
+                  outcome: { kind: 'returned', status: 'succeeded' }
+                }),
                 steer: async () => {},
                 abort: async () => {},
                 dispose: async () => {}
               }),
             configLoader: async () => ({
+              cwd: f.cwd,
+              agentDir: f.agentDir,
               maxConcurrency: 1,
               roles: { worker: profile },
-              diagnostics: []
+              diagnostics: [],
+              sources: []
             })
           })
         }
@@ -261,7 +271,7 @@ test(
     } finally {
       await controller?.shutdown()
       if (parent) {
-        await parent.extensionRunner?.emit({ type: 'session_shutdown' })
+        await parent.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' })
         parent.dispose()
       }
     }

@@ -310,11 +310,16 @@ test('SDK constructor rejection awaits cleanup-only native shutdown with an untr
     assert.equal(error!.cleanupChild, undefined)
     assert.equal(f.state.stopped, true)
     assert.equal(timerDestroyed(f.state.interval), true)
-    for (const field of ['cwd', 'model', 'thinkingLevel']) {
+    const fields = [
+      'cwd',
+      'model',
+      'thinkingLevel'
+    ] as const satisfies readonly (keyof ExtensionContext)[]
+    for (const field of fields) {
       assert.throws(() => f.state.contexts[0][field], /stale/)
     }
     assert.throws(() => f.state.contexts[0].isProjectTrusted(), /stale/)
-    assert.throws(() => f.state.api.getThinkingLevel(), /stale/)
+    assert.throws(() => f.state.api!.getThinkingLevel(), /stale/)
     assert.equal(f.profiles(), 0)
     assert.equal(f.calls(), 0)
     await (await f.child()).dispose()
@@ -380,7 +385,7 @@ test('SDK constructor cleanup rejection retains a retryable cleanup-only child a
     assert.equal(f.state.shutdowns, 2, 'successful cleanup must be idempotent')
     assert.equal(f.state.stopped, true)
     assert.equal(timerDestroyed(f.state.interval), true)
-    assert.throws(() => f.state.api.getThinkingLevel(), /stale/)
+    assert.throws(() => f.state.api!.getThinkingLevel(), /stale/)
     assert.equal(f.profiles(), 0)
     assert.equal(f.calls(), 0)
     await (await f.child()).dispose()

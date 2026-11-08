@@ -107,7 +107,10 @@ test('steered and queued appends keep the admitted task lineage instead of inven
     sessionPath,
     async prompt() {
       await held
-      return { text: 'merged' }
+      return {
+        text: 'merged',
+        outcome: { kind: 'returned', status: 'succeeded' }
+      }
     },
     async steer() {},
     async abort() {

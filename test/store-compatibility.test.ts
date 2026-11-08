@@ -129,6 +129,28 @@ test('normal owner initialization and history queries recover legacy records wit
   }
 })
 
+test('profile boundary rejects non-enum thinking and unsafe timeout values', async (t) => {
+  const base = {
+    name: 'worker',
+    instructions: 'Work',
+    tools: [],
+    timeoutMs: 0
+  }
+  /* oxlint-disable no-await-in-loop -- Each invalid profile is an independent closed boundary case. */
+  for (const [profile, label] of [
+    [{ ...base, thinking: 'HIGH' }, 'uppercase thinking'],
+    [{ ...base, thinking: 'turbo' }, 'unknown thinking'],
+    [{ ...base, timeoutMs: Number.NaN }, 'NaN timeout'],
+    [{ ...base, timeoutMs: -1 }, 'negative timeout'],
+    [{ ...base, timeoutMs: Number.POSITIVE_INFINITY }, 'infinite timeout'],
+    [{ ...base, timeoutMs: 2_147_483_648 }, 'overflow timeout']
+  ] as const) {
+    const { store } = await fixture(t, legacy, { profile })
+    await assert.rejects(store.init(), /Invalid task store state/, label)
+  }
+  /* oxlint-enable no-await-in-loop */
+})
+
 test('unknown or ambiguous verification payloads still fail closed without changing stored bytes', async (t) => {
   /* oxlint-disable no-await-in-loop -- Cases observe or mutate shared fixture state; retain the ordered execution contract. */
   for (const verification of [

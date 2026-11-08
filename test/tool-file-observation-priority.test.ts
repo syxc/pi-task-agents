@@ -135,7 +135,10 @@ for (const confirmed of [false, true]) {
     const child = await f.child({ tools: ['bash', 'write'] })
     const result = await child.prompt('Write only the assigned owned fixture, if requested.')
     const report = result.verification
-    assert.equal(result.outcome?.status, 'succeeded')
+    assert.equal(
+      result.outcome?.kind === 'returned' ? result.outcome.status : undefined,
+      'succeeded'
+    )
     assert.equal(report?.fileChange, 'recording_failed')
     assert.ok(report.observationNotes.includes('workspace_recording_failed'))
     assert.ok(report.observationNotes.includes('observation_failed:ENOENT'))

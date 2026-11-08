@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { TaskEngine } from '../src/engine.ts'
+import { stopOf } from '../src/runtime-phase.ts'
 import type { AgentProfile, ChildSession, CreateChildOptions } from '../src/types.ts'
 
 function deferred<T = void>() {
@@ -75,7 +76,7 @@ async function fixture(t: TestContext) {
     },
     async prompt() {
       prompts++
-      return { text: 'normal' }
+      return { text: 'normal', outcome: { kind: 'returned', status: 'succeeded' } }
     },
     async steer() {},
     async abort() {
@@ -434,17 +435,19 @@ for (const write of ['reject', 'pending', 'marker-pending', 'terminal-pending'])
         } else {
           await starting
           await assert.rejects(
-            bounded(operation === 'stop' ? f.engine.stop(task.task_id) : f.engine.close()),
+            bounded<unknown>(operation === 'stop' ? f.engine.stop(task.task_id) : f.engine.close()),
             expected
           )
         }
         if (write === 'pending') {
           blockedWrite.reject(failure)
-          await assert.rejects(runtime.stoppingWrite!, (error) => error === failure)
+          const initialization = stopOf(runtime.phase)?.initialization
+          assert.ok(initialization?.write)
+          await assert.rejects(initialization.write, (error) => error === failure)
           expected = (error: unknown) => error === failure
         }
         assert.ok(
-          runtime.stopWait,
+          stopOf(runtime.phase)?.initialization?.wait,
           'the cleanup fallback is installed before the first write can fail'
         )
         assert.equal(f.engine.runtimes.get(task.task_id), runtime)

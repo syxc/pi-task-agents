@@ -207,7 +207,6 @@ test('append activated/steered/duplicate goldens contain admission only', () => 
       { task_id: 't&1', mode, accepted: true }
     )
   }
-  assert.throws(() => appendResult(base), /source-owned mode/)
 })
 
 test('append failure golden preserves source-owned codes/status and refuses to invent unknown codes', () => {

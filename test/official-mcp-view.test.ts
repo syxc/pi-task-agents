@@ -174,10 +174,12 @@ test(
         )
         assert.ok(reply)
         replies.push(
-          reply.content
-            .filter((part) => part.type === 'text')
-            .map((part) => part.text)
-            .join('')
+          typeof reply.content === 'string'
+            ? reply.content
+            : reply.content
+                .filter((part) => part.type === 'text')
+                .map((part) => part.text)
+                .join('')
         )
         return answer('OWNED_MCP_OK')
       })

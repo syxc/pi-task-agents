@@ -138,7 +138,9 @@ export default async () => {
               result = value
               child.stdin.end()
             }
-          } catch {}
+          } catch {
+            // Ignore partial or non-JSON output while the child is still writing.
+          }
         }
       }
       child.stdout.on('data', (bytes) => {

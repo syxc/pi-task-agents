@@ -7,6 +7,7 @@ import { TaskEngine } from '../src/engine.ts'
 import { taskResult } from '../src/tool-result-task.ts'
 import { OutputProjector, outputWait, queryResult } from '../src/tool-result-control.ts'
 import { answer, fixture, profile, tool } from './pi-backend-test-helpers.ts'
+import type { ChildFailure, VerificationReport } from '../src/types.ts'
 
 test('real verifier results reach persistence and every result surface without redefining task success', async (t) => {
   const f = await fixture(t)
@@ -37,11 +38,17 @@ test('real verifier results reach persistence and every result surface without r
   assert.deepEqual(result.verification?.changedFiles, ['owned.txt'])
   assert.equal(await readFile(join(f.cwd, 'owned.txt'), 'utf8'), 'owned changed bytes')
   const foreground = taskResult(result, { agent_name: 'verifier' })
-  assert.equal(foreground.details.verification.modelVerdict, 'fail')
+  assert.equal(
+    (foreground.details as { verification: VerificationReport }).verification.modelVerdict,
+    'fail'
+  )
   assert.match(foreground.text, /model_verdict: fail/)
   assert.equal(foreground.isError, undefined)
   const query = queryResult(await engine.query({ task_id: result.task_id }))
-  assert.deepEqual(query.details.task.verification, result.verification)
+  assert.deepEqual(
+    (query.details as { task: { verification?: unknown } }).task.verification,
+    result.verification
+  )
   const output = await engine.output(result.task_id, { offset: 0 })
   assert.deepEqual(
     new OutputProjector().result(output, outputWait(), 'verification').details.verification,
@@ -94,7 +101,7 @@ test('background task plus native foreground Bash supports long work and owned c
       },
       { ...profile, tools: ['bash'] }
     )
-    let pid
+    let pid: number | undefined
     /* oxlint-disable no-await-in-loop -- Poll one state transition at a time; the delay bounds retries. */
     for (let i = 0; i < 200; i++) {
       try {
@@ -105,7 +112,10 @@ test('background task plus native foreground Bash supports long work and owned c
       }
     }
     /* oxlint-enable no-await-in-loop */
-    assert.ok(Number.isSafeInteger(pid) && pid > 0, 'Fresh owned process must become ready')
+    assert.ok(
+      pid !== undefined && Number.isSafeInteger(pid) && pid > 0,
+      'Fresh owned process must become ready'
+    )
     process.kill(pid, 0)
     const running = await engine.query({ task_id: task.task_id })
     assert.equal(running.status, 'running')
@@ -128,7 +138,7 @@ test('background task plus native foreground Bash supports long work and owned c
       try {
         process.kill(pid, 0)
       } catch (error) {
-        if (error.code === 'ESRCH') {
+        if ((error as { code?: unknown }).code === 'ESRCH') {
           alive = false
           break
         }
@@ -179,14 +189,14 @@ test('per-turn verdicts do not leak into continuation, aborted or failed respons
   assert.equal((await child.prompt('Conflicting review')).verification?.modelVerdict, undefined)
   f.script(() => answer('VERDICT: PASS', { stopReason: 'error', errorMessage: 'SCRIPTED_FAILURE' }))
   f.script(() => answer('VERDICT: PASS', { stopReason: 'aborted' }))
-  await assert.rejects(child.prompt('Aborted review'), (error) => {
-    assert.equal(error.partialResult.verification.modelVerdict, undefined)
+  await assert.rejects(child.prompt('Aborted review'), (error: ChildFailure) => {
+    assert.equal(error.partialResult?.verification?.modelVerdict, undefined)
     return true
   })
   f.script(() => answer('VERDICT: PASS', { stopReason: 'error', errorMessage: 'SCRIPTED_FAILURE' }))
-  await assert.rejects(child.prompt('Failed review'), (error) => {
-    assert.equal(error.partialResult.verification.modelVerdict, undefined)
-    assert.equal(error.partialResult.verification.fileChange, 'no_observed_change')
+  await assert.rejects(child.prompt('Failed review'), (error: ChildFailure) => {
+    assert.equal(error.partialResult?.verification?.modelVerdict, undefined)
+    assert.equal(error.partialResult?.verification?.fileChange, 'no_observed_change')
     return true
   })
 })

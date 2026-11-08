@@ -52,9 +52,10 @@ test('official parent tool context runs hooks but is not a durable background de
               properties: { value: { type: 'string' } },
               required: ['value']
             },
-            execute: async (_id, params) => {
-              seen.push('tool:' + params.value)
-              return { content: [{ type: 'text', text: params.value }], details: {} }
+            execute: async (_id, params, _signal, _onUpdate, _ctx) => {
+              const value = String(params.value)
+              seen.push('tool:' + value)
+              return { content: [{ type: 'text', text: value }], details: {} }
             }
           })
           pi.registerTool({
@@ -220,9 +221,10 @@ test('background proxy calls can reuse IDs after the parent agent settles', asyn
             properties: { value: { type: 'string' } },
             required: ['value']
           },
-          execute: async (_id, params) => {
-            seen.push(params.value)
-            return { content: [{ type: 'text', text: params.value }], details: {} }
+          execute: async (_id, params, _signal, _onUpdate, _ctx) => {
+            const value = String(params.value)
+            seen.push(value)
+            return { content: [{ type: 'text', text: value }], details: {} }
           }
         })
         pi.registerTool({

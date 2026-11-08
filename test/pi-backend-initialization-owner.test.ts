@@ -79,7 +79,14 @@ test('native startup cancellation retains the controller owner and real leases u
   } as unknown as Parameters<TaskController['ensure']>[0]
   const controller = new TaskController(pi, {
     agentDir: f.agentDir,
-    configLoader: async () => ({ maxConcurrency: 1, roles: {}, diagnostics: [] }),
+    configLoader: async () => ({
+      cwd: f.cwd,
+      agentDir: f.agentDir,
+      maxConcurrency: 1,
+      roles: {},
+      diagnostics: [],
+      sources: []
+    }),
     childFactory: () => (options) =>
       f.create({
         ...options,

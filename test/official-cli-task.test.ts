@@ -86,7 +86,11 @@ for (const denied of [false, true]) {
       child.stderr.on('data', (bytes) => {
         stderr += bytes
       })
-      const timer = setTimeout(() => child.kill('SIGTERM'), 15000)
+      let killTimer: ReturnType<typeof setTimeout> | undefined
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM')
+        killTimer = setTimeout(() => child.kill('SIGKILL'), 2000)
+      }, 15000)
       try {
         const code = await new Promise((resolve, reject) => {
           child.once('error', reject)
@@ -127,8 +131,9 @@ for (const denied of [false, true]) {
         )
       } finally {
         clearTimeout(timer)
+        clearTimeout(killTimer)
         if (child.exitCode === null) {
-          child.kill('SIGTERM')
+          child.kill('SIGKILL')
         }
       }
     }

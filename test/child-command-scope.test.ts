@@ -4,7 +4,11 @@ import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import { SessionManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import {
+  SessionManager,
+  type ExtensionAPI,
+  type ExtensionToolContext
+} from '@earendil-works/pi-coding-agent'
 import { createChildCommands } from '../src/child-commands.ts'
 import { CommandOutput } from '../src/command-output.ts'
 
@@ -61,11 +65,15 @@ async function fixture(t: TestContext, nativeOutput?: string) {
         }
       }
     }
-  }
+  } as unknown as ExtensionToolContext
   let calls = 0
   const callAs = async (toolCallId: string, input: object) => {
     const result = await definition.execute(toolCallId, input, controller.signal, undefined, ctx)
-    return { parsed: JSON.parse(result.content[0].text), content: result.content }
+    const part = result.content[0]
+    if (part.type !== 'text') {
+      throw new Error('Expected a text tool result')
+    }
+    return { parsed: JSON.parse(part.text), content: result.content }
   }
   const call = async (input: object) => {
     const result = await callAs('owned-control-' + ++calls, input)
@@ -169,7 +177,7 @@ test(
         try {
           await f.commands.ready()
         } catch (error) {
-          assert.equal(error.code, 'CHILD_CLEANUP_FAILED')
+          assert.equal((error as { code?: unknown }).code, 'CHILD_CLEANUP_FAILED')
           quarantined = true
           break
         }
@@ -183,7 +191,7 @@ test(
         code: 'CHILD_CLEANUP_FAILED'
       })
       await assert.rejects(f.commands.ready(), { code: 'CHILD_CLEANUP_FAILED' })
-      assert.equal(f.listeners.get('tool_call')({ toolName: 'write', input: {} }).block, true)
+      assert.equal(f.listeners.get('tool_call')!({ toolName: 'write', input: {} })?.block, true)
     } finally {
       CommandOutput.prototype.close = close
     }
@@ -217,8 +225,8 @@ test(
     await assert.rejects(f.call({ action: 'start', command: 'must not run' }), {
       code: 'CHILD_CLEANUP_FAILED'
     })
-    const guard = f.listeners.get('tool_call')
-    assert.equal(guard({ toolName: 'write', input: {} }).block, true)
+    const guard = f.listeners.get('tool_call')!
+    assert.equal(guard({ toolName: 'write', input: {} })?.block, true)
     assert.equal(guard({ toolName: 'bash_task', input: { action: 'output' } }), undefined)
     const partial = await f.call({ action: 'output', command_id: row.command_id })
     assert.equal(partial.cleanup_pending, true)
