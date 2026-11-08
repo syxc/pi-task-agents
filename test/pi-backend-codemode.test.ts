@@ -114,6 +114,7 @@ test(
         name: 'fixture',
         model: 'fixture/local',
         thinking: 'off',
+        timeoutMs: 0,
         instructions: 'Use only the local scripted fixture.',
         tools: ['codemode'],
         mcp: true,

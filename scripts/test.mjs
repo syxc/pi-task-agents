@@ -9,7 +9,12 @@ const files = (await readdir(join(project, 'test')))
   .sort()
 const child = spawn(
   process.execPath,
-  ['--test', ...files.map((name) => join(project, 'test', name))],
+  [
+    // Per-test explicit timeouts still win; this bounds declarations and hooks that omit one.
+    '--test-timeout=60000',
+    '--test',
+    ...files.map((name) => join(project, 'test', name))
+  ],
   {
     cwd: project,
     stdio: 'inherit',

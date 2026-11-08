@@ -8,8 +8,7 @@ import type {
   ExtensionFactory,
   InlineExtension,
   CreateAgentSessionOptions,
-  ModelRuntime,
-  ExtensionUIContext
+  ModelRuntime
 } from '@earendil-works/pi-coding-agent'
 import type {
   AgentProfile,
@@ -23,7 +22,9 @@ import type {
 import { childResources, type HostResources } from './resource-loader.ts'
 import { childMcpFactory } from './resource-mcp.ts'
 import { seedInheritedProvider, type InheritedModelRegistry } from './model-providers.ts'
-import { thinkingLevels } from './config.ts'
+import { isThinkingLevel } from './thinking.ts'
+import { isRecord } from './guards.ts'
+import { freeze } from './engine-helpers.ts'
 import {
   childToolPolicy,
   normalizedSelectorName,
@@ -75,6 +76,12 @@ type AssistantMessage = Extract<
   { role: 'assistant' }
 >
 
+/** Injected host runtimes are boundary data; provider hooks stay optional for SDK doubles. */
+type ChildModelRuntime = Pick<ModelRuntime, 'getModel'> &
+  Partial<Pick<ModelRuntime, 'registerProvider' | 'unregisterProvider'>>
+const isChildModelRuntime = (value: unknown): value is ChildModelRuntime =>
+  isRecord(value) && typeof value.getModel === 'function'
+
 export interface PiChildFactoryOptions {
   agentDir?: string
   // Injected runtimes and SDK doubles need not implement private SDK class fields.
@@ -111,8 +118,6 @@ interface ChildError extends Error {
   partialResult?: ChildResult
   cleanupChild?: ChildSession
 }
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object'
 const abortError = (): Error =>
   Object.assign(new Error('Child session aborted'), { name: 'AbortError' })
 
@@ -155,7 +160,9 @@ function cleanupFailure(error: unknown): ChildError {
 function notify(callback: ((value: string) => void) | undefined, value: string): void {
   try {
     Promise.resolve(callback?.(value)).catch(() => {})
-  } catch {}
+  } catch {
+    // Ignore synchronous callback failures; async failures are already contained.
+  }
 }
 
 /** Create isolated leaf sessions with Pi's native tools. Tool restrictions are not an OS sandbox. */
@@ -291,14 +298,14 @@ export function createPiChildFactory({
       }
     }
     let skillCeiling = normalizeSelector(profile.skillSnapshot)
-    const resources = await childResources(
+    const resources = await childResources({
       profile,
-      workDir,
-      configDir,
+      cwd: workDir,
+      agentDir: configDir,
       projectTrusted,
-      resourceHost,
-      api
-    )
+      host: resourceHost,
+      sdk: api
+    })
     checkCanceled()
     if (
       profile.model !== undefined &&
@@ -308,10 +315,7 @@ export function createPiChildFactory({
     ) {
       throw new Error('Child model must be provider/id')
     }
-    if (
-      modelRuntime != null &&
-      (!isRecord(modelRuntime) || typeof modelRuntime.getModel !== 'function')
-    ) {
+    if (modelRuntime != null && !isChildModelRuntime(modelRuntime)) {
       throw new Error('Invalid child model runtime')
     }
     let pendingRuntime = runtimePromise
@@ -324,7 +328,8 @@ export function createPiChildFactory({
               allowModelNetwork: false,
               refreshOnCreate: false
             })
-          : (modelRuntime as unknown as ModelRuntime)
+          : // The SDK class hides private fields, so a validated host runtime must widen here.
+            (modelRuntime as unknown as ModelRuntime)
       )
       pendingRuntime = created
       runtimePromise = created
@@ -340,7 +345,7 @@ export function createPiChildFactory({
     const slash = profile.model?.indexOf('/') ?? -1
     const provider = profile.model?.slice(0, slash) ?? inheritedModel?.provider
     if (provider) {
-      if (seededProviders.delete(provider)) {
+      if (seededProviders.delete(provider) && typeof runtime.unregisterProvider === 'function') {
         runtime.unregisterProvider(provider)
       }
       if (seedInheritedProvider(runtime, inheritedModelRegistry, provider)) {
@@ -360,10 +365,10 @@ export function createPiChildFactory({
     // Accept only native Pi levels. Provider effort/managed protocol translation belongs to the SDK, not this plugin.
     const requestedThinking =
       profile.effort ?? profile.thinking ?? (profile.model ? undefined : inheritedThinking)
-    if (requestedThinking !== undefined && !thinkingLevels.includes(requestedThinking)) {
+    if (requestedThinking !== undefined && !isThinkingLevel(requestedThinking)) {
       throw new Error('Invalid Pi thinking level')
     }
-    const thinkingLevel = requestedThinking as ThinkingLevel | undefined
+    const thinkingLevel = requestedThinking
     const manager = await prepareSession(path, workDir, api.SessionManager)
     const releaseLease = await acquireSessionLease(path)
     let child: ChildSession | undefined
@@ -394,7 +399,7 @@ export function createPiChildFactory({
         configuredTools.filter((tool) => !shared?.native.has(tool.name)).map((tool) => tool.name)
       )
       if (shared) {
-        resources.extensionSnapshot = shared.extensionSnapshot
+        resources.snapshots.extensions = shared.extensionSnapshot
       }
       const fileObservation = createToolFileObservation({
         cwd: workDir,
@@ -469,8 +474,8 @@ export function createPiChildFactory({
           api,
           {
             ...profile,
-            extensions: resources.extensions,
-            extensionSnapshot: resources.extensionSnapshot
+            extensions: resources.extensions.paths,
+            extensionSnapshot: resources.snapshots.extensions
           },
           configDir,
           workDir,
@@ -497,12 +502,12 @@ export function createPiChildFactory({
         noSkills: true,
         noPromptTemplates: true,
         noThemes: true,
-        additionalExtensionPaths: resources.extensions,
-        additionalSkillPaths: resources.skillPaths,
-        extensionFactories: [...resources.inlineExtensions, ...factories],
+        additionalExtensionPaths: resources.extensions.paths,
+        additionalSkillPaths: resources.skills.paths,
+        extensionFactories: [...resources.extensions.inline, ...factories],
         disabledBuiltinExtensions: ['mcp'],
         extensionsOverride: (base) =>
-          filterConfiguredToolDefinitions(base, resources.extensionSources, profile.name),
+          filterConfiguredToolDefinitions(base, resources.extensions.sources, profile.name),
         promptsOverride: (base) => ({ ...base, prompts: [] }),
         themesOverride: (base) => ({ ...base, themes: [] }),
         systemPromptOverride: () => undefined,
@@ -521,13 +526,15 @@ export function createPiChildFactory({
           ].filter(Boolean),
         skillsOverride: (base) => {
           const skills = [
-            ...resources.inheritedSkills,
+            ...resources.skills.inherited,
             ...(!resourceHost
               ? base.skills.filter(
                   (skill) =>
-                    resources.inheritSkills ||
-                    resources.skillNames.includes(normalizedSelectorName(skill.name)) ||
-                    resources.selectedPaths.some((entry) => within(entry, resolve(skill.filePath)))
+                    resources.skills.inherit ||
+                    resources.skills.names.includes(normalizedSelectorName(skill.name)) ||
+                    resources.skills.selectedPaths.some((entry) =>
+                      within(entry, resolve(skill.filePath))
+                    )
                 )
               : [])
           ]
@@ -548,7 +555,7 @@ export function createPiChildFactory({
       await loader.reload()
       checkCanceled()
       const plugins = [
-        ...pluginToolNames(loader, resources.extensionSources),
+        ...pluginToolNames(loader, resources.extensions.sources),
         ...configuredTools.map((tool) => tool.name)
       ]
       if (commands && plugins.includes('bash_task')) {
@@ -680,6 +687,25 @@ export function createPiChildFactory({
             run.aborted ||= event.aborted
             run.resolve()
             break
+          // These Pi events carry no task lifecycle or activity signal.
+          case 'agent_start':
+          case 'agent_end':
+          case 'auto_retry_end':
+          case 'bash_execution_update':
+          case 'compaction_end':
+          case 'entry_appended':
+          case 'message_start':
+          case 'message_update':
+          case 'queue_update':
+          case 'session_info_changed':
+          case 'summarization_retry_attempt_start':
+          case 'summarization_retry_finished':
+          case 'summarization_retry_scheduled':
+          case 'thinking_level_changed':
+          case 'tool_execution_update':
+          case 'turn_start':
+          case 'turn_end':
+            break
         }
       })
       async function shutdown(): Promise<void> {
@@ -700,6 +726,7 @@ export function createPiChildFactory({
         current = undefined
         releaseLease()
       }
+      const abortChild = (): Promise<void> => child?.abort() ?? Promise.resolve()
       child = {
         sessionPath: path,
         prompt(text: string, options: ChildPromptOptions = {}): Promise<ChildResult> {
@@ -743,7 +770,7 @@ export function createPiChildFactory({
                   run.failure = Object.assign(new Error('Child session timed out'), {
                     name: 'TimeoutError'
                   })
-                  child!.abort().catch(() => {})
+                  abortChild().catch(() => {})
                 }, profile.timeoutMs)
               }
               if (profile.name === 'verifier') {
@@ -884,7 +911,7 @@ export function createPiChildFactory({
             const attempt = (async () => {
               const done = current?.done
               // Failed abort/dispose keeps the lease and can be retried by the owner.
-              await child!.abort()
+              await abortChild()
               await done?.catch(() => {})
               await shutdown()
             })().catch((error) => {
@@ -909,9 +936,7 @@ export function createPiChildFactory({
         }
         // Pi shares its headless UI singleton; do not share extension-owned session caches.
         const runner = session.extensionRunner
-        const uiContext = runner
-          ? (Object.fromEntries(Object.entries(runner.getUIContext())) as ExtensionUIContext)
-          : undefined
+        const uiContext = runner ? { ...runner.getUIContext() } : undefined
         if (runner) {
           runner.hasUI = () => false
         }
@@ -919,10 +944,10 @@ export function createPiChildFactory({
           ...(uiContext ? { uiContext } : {}),
           mode: 'json',
           abortHandler: () => {
-            child!.abort().catch(() => {})
+            abortChild().catch(() => {})
           },
           shutdownHandler: () => {
-            child!.abort().catch(() => {})
+            abortChild().catch(() => {})
           },
           onError: (error) => {
             if (!steering.staleInput()) {
@@ -943,7 +968,7 @@ export function createPiChildFactory({
         }
         await commands?.ready()
         checkCanceled()
-        for (const name of pluginToolNames(loader, resources.extensionSources)) {
+        for (const name of pluginToolNames(loader, resources.extensions.sources)) {
           extraTools.add(name)
         }
         if (session.getCallableToolNames().some((name) => !allow(name))) {
@@ -959,25 +984,17 @@ export function createPiChildFactory({
           (name) => serverFor(name)
         )
         const actualModel = session.model ?? model
-        const resolved = {
+        const resolved: AgentProfile = {
           ...profile,
-          tools: requested,
+          tools: [...requested],
           ...facts,
           model: `${actualModel.provider}/${actualModel.id}`,
           thinking: session.thinkingLevel,
-          skills: names,
-          skillSnapshot: names,
-          extensionSnapshot: resources.extensionSnapshot
+          skills: [...names],
+          skillSnapshot: [...names],
+          extensionSnapshot: [...resources.snapshots.extensions]
         }
-        const frozen = Object.freeze(
-          Object.fromEntries(
-            Object.entries(resolved).map(([key, value]) => [
-              key,
-              Array.isArray(value) ? Object.freeze([...value]) : value
-            ])
-          )
-        ) as unknown as AgentProfile
-        await onProfileResolved?.(frozen)
+        await onProfileResolved?.(freeze(resolved))
         checkCanceled()
         if (extensionError) {
           throw extensionError

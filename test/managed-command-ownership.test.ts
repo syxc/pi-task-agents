@@ -65,7 +65,7 @@ test(
           .tasks.some(
             (task) =>
               task.ownedCommandCleanupPending &&
-              engine.runtimes.get(task.task_id)?.initializing === false
+              engine.runtimes.get(task.task_id)?.phase.kind === 'running'
           )
       ) {
         held = true

@@ -312,7 +312,7 @@ test('a failed editor reports uncertainty without changing execution outcome or 
   const child = await f.child({ tools: ['edit'] })
   const result = await child.prompt('Attempt only the owned editor fixture.')
   assert.equal(await readFile(join(f.cwd, 'owned.txt'), 'utf8'), 'original')
-  assert.equal(result.outcome?.status, 'succeeded')
+  assert.equal(result.outcome?.kind === 'returned' ? result.outcome.status : undefined, 'succeeded')
   assert.equal(result.verification?.fileChange, 'uncertain')
   assert.equal(result.verification?.modelVerdict, undefined)
   assert.ok(result.verification?.observationNotes.includes('failed_tool_capture'))

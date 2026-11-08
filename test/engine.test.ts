@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { TaskEngine } from '../src/engine.ts'
+import { isAccepting } from '../src/runtime-phase.ts'
 import { TaskDomain } from '../src/task-domain.ts'
 import { taskIdFromTurnId, taskTurnId } from '../src/vendor/mcode-adapters/task-turn-id.ts'
 import {
@@ -15,6 +16,8 @@ import {
 } from '../src/engine-terminal.ts'
 import { isTerminalTaskStatus } from '../src/vendor/mcode-background-task/status.ts'
 import { normalizeTaskError } from '../src/vendor/mcode-background-task/errors.ts'
+import { thinkingLevels } from '../src/thinking.ts'
+import { bounded } from './bounded.ts'
 import type {
   BackgroundTask,
   BackgroundTaskPatch
@@ -35,7 +38,11 @@ interface Deferred<T> {
   reject: (reason?: unknown) => void
 }
 
-interface MockCall extends Deferred<ChildResult> {
+interface MockResult extends Omit<ChildResult, 'outcome'> {
+  outcome?: ChildResult['outcome']
+}
+
+interface MockCall extends Deferred<MockResult> {
   text: string
   turnId?: string
 }
@@ -130,9 +137,13 @@ async function setup(
       steers: [],
       disposed: false,
       prompt(text: string, options?: { turnId?: string }): Promise<ChildResult> {
-        const call = deferred<ChildResult>()
+        const call = deferred<MockResult>()
         this.calls.push({ text, turnId: options?.turnId, ...call })
-        return call.promise
+        // Tests may resolve only text; the mock child still reports explicit provenance like a real backend.
+        return call.promise.then((result): ChildResult => ({
+          ...result,
+          outcome: result.outcome ?? { kind: 'returned', status: 'succeeded' }
+        }))
       },
       async steer(text: string): Promise<void> {
         this.steers.push(text)
@@ -164,7 +175,7 @@ async function setup(
         call.resolve({ text: 'cleanup' })
       }
     }
-    await engine.close()
+    await bounded(engine.close(), 10000, 'engine.close')
     await rm(rootDir, { recursive: true, force: true })
   })
   return { engine, children, rootDir, createChild }
@@ -561,7 +572,7 @@ test('append waits for prompt dispatch and cancellation during child creation sk
       sessionPath: '',
       async prompt(): Promise<ChildResult> {
         prompts++
-        return { text: '' }
+        return { text: '', outcome: { kind: 'returned', status: 'succeeded' } }
       },
       async steer(): Promise<void> {},
       async abort(): Promise<void> {},
@@ -2630,7 +2641,7 @@ test('regression: default capacity does not bypass cleanup quarantine or release
   await engine.close()
 })
 
-test('regression: store restores raw effort labels without treating Pi enums as provider validation', async (t) => {
+test('regression: store restores raw effort labels while enforcing Pi thinking enums', async (t) => {
   const { engine, children, rootDir, createChild } = await setup(t)
   const first = await engine.start({ ...input(), effort: 'on' }, profile)
   await waitFor(() => children[0]?.calls.length)
@@ -2640,16 +2651,14 @@ test('regression: store restores raw effort labels without treating Pi enums as 
   await engine.close()
   const saved = await readFile(engine.store.file, 'utf8')
   /* oxlint-disable no-await-in-loop -- Cases reuse one task store; finish validation and cleanup before overwriting it. */
-  for (const label of ['on', 'off', 'provider-specific-effort']) {
+  for (const label of ['on', 'provider-specific-effort']) {
     const valid = JSON.parse(saved)
-    valid.tasks[0].profile.thinking = label
     valid.tasks[0].profile.effort = label
     valid.tasks[0].input.effort = label
     await writeFile(engine.store.file, JSON.stringify(valid))
     const restored = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
     await restored.init()
     try {
-      assert.equal(restored.task(first.task_id).profile.thinking, label)
       assert.equal(restored.task(first.task_id).profile.effort, label)
       assert.equal(restored.task(first.task_id).input.effort, label)
       assert.equal(
@@ -2657,6 +2666,29 @@ test('regression: store restores raw effort labels without treating Pi enums as 
         1,
         'store validation does not call a provider or validate model compatibility'
       )
+    } finally {
+      await restored.close()
+    }
+  }
+  for (const level of thinkingLevels) {
+    const valid = JSON.parse(saved)
+    valid.tasks[0].profile.thinking = level
+    await writeFile(engine.store.file, JSON.stringify(valid))
+    const restored = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+    await restored.init()
+    try {
+      assert.equal(restored.task(first.task_id).profile.thinking, level)
+    } finally {
+      await restored.close()
+    }
+  }
+  for (const label of ['on', 'provider-specific-effort']) {
+    const invalid = JSON.parse(saved)
+    invalid.tasks[0].profile.thinking = label
+    await writeFile(engine.store.file, JSON.stringify(invalid))
+    const restored = new TaskEngine({ rootDir, parentId: 'parent', cwd: rootDir, createChild })
+    try {
+      await assert.rejects(restored.init(), /Invalid task store state/)
     } finally {
       await restored.close()
     }
@@ -3623,7 +3655,8 @@ test('regression: a turn settled during the reservation save compensates before 
   await barrier.entered
   children[0].calls[0].resolve({ text: 'old turn done' })
   await tick()
-  assert.equal(engine.runtimes.get(first.task_id)?.accepting, false)
+  const settledRuntime = engine.runtimes.get(first.task_id)
+  assert.equal(settledRuntime ? isAccepting(settledRuntime.phase) : false, false)
   assert.deepEqual(children[0].steers, [])
   barrier.release()
   const next = await appending
@@ -4227,7 +4260,7 @@ for (const stage of [
         if (state.tasks.some((item) => item.status === 'stopping')) {
           throw firstFailure
         }
-        if (runtime.sealed) {
+        if (runtime.phase.kind === 'sealed') {
           throw new Error('terminal write also failed')
         }
         await save(state)

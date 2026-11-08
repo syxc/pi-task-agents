@@ -48,7 +48,10 @@ export async function captureWorkspace(
       if (performance.now() > deadline) {
         return { entries, error: 'observation_time_limit' }
       }
-      const directory = directories.pop()!
+      const directory = directories.pop()
+      if (directory === undefined) {
+        break
+      }
       // Refuse ordinary directory-to-symlink replacements; observation is still best effort under races.
       // oxlint-disable-next-line no-await-in-loop -- Keep traversal bounded and preserve cancellation and early exits.
       if ((await realpath(directory)) !== directory || !within(root, directory)) {

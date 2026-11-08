@@ -2,6 +2,7 @@ import { readFile, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AgentProfile } from './types.ts'
+import { isRecord } from './guards.ts'
 
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url))
 
@@ -42,10 +43,17 @@ export const taskChildBlockedTools = [
 ]
 export const normalizedSelectorName = (value: string): string =>
   value.trim().normalize('NFKC').toLocaleLowerCase('en-US')
-export const normalizeSelector = (
+export function normalizeSelector(values: readonly string[]): ReadonlySet<string>
+export function normalizeSelector(
   values: readonly string[] | undefined
-): ReadonlySet<string> | undefined =>
-  values === undefined ? undefined : new Set(values.map(normalizedSelectorName).filter(Boolean))
+): ReadonlySet<string> | undefined
+export function normalizeSelector(
+  values: readonly string[] | undefined
+): ReadonlySet<string> | undefined {
+  return values === undefined
+    ? undefined
+    : new Set(values.map(normalizedSelectorName).filter(Boolean))
+}
 export const isSelectorMcp = (name: string): boolean =>
   normalizedSelectorName(name).startsWith('mcp__')
 export const within = (root: string, path: string): boolean => {
@@ -115,7 +123,8 @@ export async function localPaths(
           }
           throw error
         }
-        if ((JSON.parse(manifest) as { name?: string }).name === 'pi-task-agents') {
+        const parsed: unknown = JSON.parse(manifest)
+        if (isRecord(parsed) && parsed.name === 'pi-task-agents') {
           throw new Error('The task plugin cannot load itself in a child')
         }
         break
@@ -146,7 +155,7 @@ export function childToolPolicy(
   extra?: ReadonlySet<string>,
   serverFor?: (tool: string) => string | undefined
 ): (name: string) => boolean {
-  const exact = normalizeSelector(tools)!
+  const exact = normalizeSelector(tools)
   const blocked = normalizeSelector(profile.disallowedTools)
   const ceiling = normalizeSelector(profile.nativeToolSnapshot)
   const nativeScope = !tools.some(isSelectorMcp)

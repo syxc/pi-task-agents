@@ -1,7 +1,8 @@
 import { taskIdFromTurnId, taskTurnId } from './vendor/mcode-adapters/task-turn-id.ts'
-import { clone, freeze } from './engine-helpers.ts'
+import { cloneJson, freeze } from './engine-helpers.ts'
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts'
 import { isVerificationReport } from './task-verification.ts'
+import { isRecord } from './guards.ts'
 import type { AgentProfile, TaskInput, TaskRecord } from './types.ts'
 
 export const isTurnId = (value: unknown, taskId: unknown): value is string =>
@@ -10,8 +11,6 @@ export const isFactName = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0
 export const isEventCount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-const object = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
 
 export function admittedFacts(
   taskId: string,
@@ -34,13 +33,13 @@ export function resolvedProfile(task: TaskRecord, profile: AgentProfile): void {
   if (!isFactName(profile.name)) {
     throw new Error('Resolved child profile has no agent name')
   }
-  task.profile = freeze(clone(profile))
+  task.profile = freeze(cloneJson(profile))
   task.resolved_agent_name = profile.name
 }
 
 // Only backend-reported facts can become execution results. Streaming tool traces are not final text.
 export function recordChildFacts(task: TaskRecord, source: unknown): void {
-  if (!object(source)) {
+  if (!isRecord(source)) {
     return
   }
   if (
@@ -64,7 +63,7 @@ export function recordChildFacts(task: TaskRecord, source: unknown): void {
   }
   if (
     source.usage !== undefined &&
-    (!object(source.usage) ||
+    (!isRecord(source.usage) ||
       !Object.values(source.usage).every(
         (amount) => typeof amount === 'number' && Number.isFinite(amount)
       ))
@@ -72,22 +71,22 @@ export function recordChildFacts(task: TaskRecord, source: unknown): void {
     throw new Error('Invalid child usage')
   }
   if (source.subTurnId !== undefined) {
-    task.sub_turn_id = source.subTurnId as string
+    task.sub_turn_id = source.subTurnId
   }
   if (source.eventCount !== undefined) {
-    task.event_count = source.eventCount as number
+    task.event_count = source.eventCount
   }
   if (source.resolvedAgentName !== undefined) {
-    task.resolved_agent_name = source.resolvedAgentName as string
+    task.resolved_agent_name = source.resolvedAgentName
   }
   if (source.text !== undefined) {
-    task.final_text = source.text as string
+    task.final_text = source.text
   }
   if (source.verification !== undefined) {
-    task.verification = clone(source.verification)
+    task.verification = cloneJson(source.verification)
   }
   if (source.usage !== undefined) {
-    task.usage = clone(source.usage) as Record<string, number>
+    task.usage = cloneJson(source.usage) as Record<string, number>
   }
 }
 
@@ -96,7 +95,7 @@ export function recordChildFailure(
   error: unknown
 ): { message: string; partialResult?: unknown } {
   let message = normalizeTaskError(error).message
-  if (object(error) && error.partialResult !== undefined) {
+  if (isRecord(error) && error.partialResult !== undefined) {
     try {
       recordChildFacts(task, error.partialResult)
       return { message, partialResult: error.partialResult }

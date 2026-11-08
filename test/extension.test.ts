@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { registerTaskAgents, toolResult } from '../src/extension.ts'
 import * as config from '../src/config.ts'
 
@@ -620,16 +622,18 @@ test('public control misses and append boundary failures use the upstream envelo
   }
 })
 
-test('task schema accepts raw effort and prepares blank optional model/effort without coercing values', async () => {
+test('task schema exposes Pi thinking levels and prepares blank optional model/effort without coercing values', async () => {
   const f = fixture()
   try {
     const task = f.tools.get('task')
-    assert.equal(task.parameters.properties.effort.type, 'string')
-    assert.equal(task.parameters.properties.effort.minLength, 1)
-    assert.equal(task.parameters.properties.effort.anyOf, undefined)
     const nativeLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
     assert.deepEqual(config.thinkingLevels, nativeLevels)
     assert.equal(Object.isFrozen(config.thinkingLevels), true)
+    assert.equal(task.parameters.properties.effort.type, undefined)
+    assert.deepEqual(
+      task.parameters.properties.effort.anyOf.map((entry) => entry.const),
+      nativeLevels
+    )
     for (const level of nativeLevels) {
       assert.match(task.parameters.properties.effort.description, new RegExp(`\\b${level}\\b`))
     }
@@ -651,8 +655,8 @@ test('task schema accepts raw effort and prepares blank optional model/effort wi
       admitted = params
       return { task_id: 't1', status: 'succeeded', agent_name: 'worker' }
     }
-    await f.execute('task', { ...input, model: 'minimax/MiniMax-M3', effort: 'on' })
-    assert.equal(admitted.effort, 'on')
+    await f.execute('task', { ...input, model: 'minimax/MiniMax-M3', effort: 'max' })
+    assert.equal(admitted.effort, 'max')
     assert.equal(admitted.model, 'minimax/MiniMax-M3')
     await f.execute('task', input)
     assert.equal(Object.hasOwn(admitted, 'effort'), false)
@@ -741,11 +745,10 @@ test('coded admission failures remain structured error results', async () => {
   }
 })
 
-test('real engine adapter waits by default, continues the same child and enforces owner isolation offline', async () => {
-  const { mkdir, mkdtemp } = await import('node:fs/promises')
-  const root = new URL('../artifacts/extension-tests/', import.meta.url)
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  const agentDir = await mkdtemp(new URL('adapter-', root).pathname)
+test('real engine adapter waits by default, continues the same child and enforces owner isolation offline', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const agentDir = await mkdtemp(join(tmpdir(), 'extension-adapter-'))
+  t.after(() => rm(agentDir, { recursive: true, force: true }))
   const tools = new Map(),
     children = [],
     sent = []
@@ -791,12 +794,13 @@ test('real engine adapter waits by default, continues the same child and enforce
               text: `reply ${this.prompts.length}`,
               eventCount: 0,
               subTurnId: options.turnId,
-              resolvedAgentName: 'worker'
+              resolvedAgentName: 'worker',
+              outcome: { kind: 'returned', status: 'succeeded' }
             }
           },
           async steer() {},
           async abort() {
-            release?.({ text: 'aborted' })
+            release?.({ text: 'aborted', outcome: { kind: 'returned', status: 'aborted' } })
           },
           async dispose() {}
         }
@@ -828,7 +832,8 @@ test('real engine adapter waits by default, continues the same child and enforce
       text: 'initial answer',
       eventCount: 0,
       subTurnId: children[0].turns[0],
-      resolvedAgentName: 'worker'
+      resolvedAgentName: 'worker',
+      outcome: { kind: 'returned', status: 'succeeded' }
     })
     const result = await first
     assert.equal(result.details.status, 'succeeded')

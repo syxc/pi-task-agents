@@ -25,7 +25,7 @@ import {
 } from './task-execution-context.ts'
 import {
   aborted,
-  clone,
+  cloneJson,
   freeze,
   normalizeTaskInput,
   trimmedContent,
@@ -33,7 +33,15 @@ import {
 } from './engine-helpers.ts'
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts'
 import { ACTIVE_TASK_STATUSES } from './vendor/mcode-background-task/status.ts'
+import {
+  isAccepting,
+  stopOf,
+  type InitializationStop,
+  type RuntimePhase,
+  type RuntimeStop
+} from './runtime-phase.ts'
 import type {
+  AdmissionReceipt,
   AgentProfile,
   ChildSession,
   CreateChild,
@@ -50,28 +58,19 @@ import type {
 } from './types.ts'
 
 interface TaskRuntime {
-  accepting: boolean
   controller: AbortController
-  initializing: boolean
-  initializationCanceled?: boolean
-  initializationCleanupPending?: boolean
-  stoppingWrite?: Promise<void>
-  stopWait?: Promise<void>
-  stopReport?: Promise<void>
-  settled?: boolean
+  backgroundRunner: boolean
+  phase: RuntimePhase
+  terminalStatus?: 'canceled' | 'failed'
   activity?: string
-  backgroundRunner?: boolean
   shutdownReason?: string
-  sealed?: boolean
+  settled?: boolean
   started?: Promise<ChildSession>
   rejectStarted?: (error: Error) => void
   ready?: Promise<ChildSession>
   done?: Promise<void>
   delivery?: Promise<void>
-  aborting?: Promise<void>
   timer?: ReturnType<typeof setTimeout>
-  stopReason?: string
-  stopStatus?: 'canceled' | 'failed'
 }
 
 interface SessionRuntime {
@@ -226,7 +225,9 @@ export class TaskEngine {
     }
     try {
       Promise.resolve(this.onChange?.(this.summary(task))).catch(() => {})
-    } catch {}
+    } catch {
+      // Ignore synchronous callback failures; async failures are already contained.
+    }
   }
 
   summary(task: TaskRecord): TaskSummary {
@@ -241,8 +242,8 @@ export class TaskEngine {
     } = task
     const runtime = this.runtimes.get(task.task_id)
     return {
-      ...clone(result),
-      ...(task.stopError ? { stopError: clone(this.safety.publicStopError(task)) } : {}),
+      ...cloneJson(result),
+      ...(task.stopError ? { stopError: cloneJson(this.safety.publicStopError(task)) } : {}),
       output_bytes: Buffer.byteLength(output),
       ...(this.safety.retains(task.session_id) || (task.stopError && runtime)
         ? { cleanup_pending: true }
@@ -262,11 +263,17 @@ export class TaskEngine {
     return task
   }
 
-  request(
+  request(key: string | undefined, fn: (key?: string) => Promise<TaskSummary>): Promise<TaskSummary>
+  request<T extends TaskSummary>(
     key: string | undefined,
-    fn: (key?: string) => Promise<TaskSummary>,
-    duplicate: (result: TaskSummary) => TaskSummary = (result) => result
-  ): Promise<TaskSummary> {
+    fn: (key?: string) => Promise<T>,
+    duplicate: (result: TaskSummary) => T
+  ): Promise<T>
+  request<T extends TaskSummary>(
+    key: string | undefined,
+    fn: (key?: string) => Promise<T>,
+    duplicate?: (result: TaskSummary) => T
+  ): Promise<T> {
     return this.admission.request(
       key,
       fn,
@@ -275,7 +282,8 @@ export class TaskEngine {
         const id = this.getState().requests[requestKey]
         return id ? this.summary(this.task(id)) : undefined
       },
-      duplicate
+      // Omitted converters only occur when T is the plain TaskSummary of start.
+      duplicate ?? ((result) => result as T)
     )
   }
 
@@ -289,7 +297,7 @@ export class TaskEngine {
     const result = await this.request(requestId && `start:${requestId}`, async (key) => {
       this.assertOpen()
       aborted(signal)
-      const effective = { ...clone(profile) }
+      const effective = { ...cloneJson(profile) }
       if (input.model) {
         effective.model = input.model
       }
@@ -322,9 +330,10 @@ export class TaskEngine {
       const completed = (async () => {
         await this.waitUntil(() => !pending.has(task.status), undefined, waiting.signal)
         const runtime = this.runtimes.get(task.task_id)
-        if (runtime?.initializationCanceled && runtime.stopReport) {
-          await runtime.stopReport
-        } else if (!runtime?.initializationCleanupPending) {
+        const initialization = runtime && stopOf(runtime.phase)?.initialization
+        if (initialization?.report) {
+          await initialization.report
+        } else if (!initialization?.cleanupPending) {
           await runtime?.done
         }
         await cancellation
@@ -334,7 +343,7 @@ export class TaskEngine {
           // so the waiter still needs a defined rejection instead of throwing undefined.
           throw this.storageError ?? new Error('Task stop persistence is unconfirmed')
         }
-        return { ...this.summary(task), mode: result.mode, accepted: result.accepted }
+        return this.summary(task)
       })()
       return await Promise.race([completed, cancellationFailed])
     } finally {
@@ -386,8 +395,8 @@ export class TaskEngine {
       execution_mode:
         input.run_in_background === true ? (previous ? 'append' : 'background') : 'foreground',
       childSessionPath: previous?.childSessionPath ?? join(this.store.dir, `${sessionId}.jsonl`),
-      profile: freeze(clone(profile)),
-      input: clone(input),
+      profile: freeze(cloneJson(profile)),
+      input: cloneJson(input),
       status: 'queued',
       description: input.description ?? '',
       agent_name: input.agent_name ?? profile.name,
@@ -419,7 +428,11 @@ export class TaskEngine {
     return result
   }
 
-  append(taskId: string, content: string, options: TaskRequestOptions = {}): Promise<TaskSummary> {
+  append(
+    taskId: string,
+    content: string,
+    options: TaskRequestOptions = {}
+  ): Promise<AdmissionReceipt> {
     const poison = (error: unknown) => {
       this.latchStorageError(error)
     }
@@ -463,7 +476,7 @@ export class TaskEngine {
     taskId: string,
     content: string,
     options: TaskRequestOptions = {}
-  ): Promise<TaskSummary> {
+  ): Promise<AdmissionReceipt> {
     this.assertOpen()
     aborted(options.signal)
     const target =
@@ -476,9 +489,9 @@ export class TaskEngine {
       async (key) => {
         this.assertDispatch()
         aborted(options.signal)
-        const task = this.getState().tasks.findLast(
-          (item) => item.session_id === original.session_id
-        )!
+        const task =
+          this.getState().tasks.findLast((item) => item.session_id === original.session_id) ??
+          original
         // Direct session send is idle-only. It must not join or cancel another caller's Turn.
         if (pending.has(task.status) || this.runtimes.has(task.task_id)) {
           throw Object.assign(new Error('Session already has an active Turn'), {
@@ -486,17 +499,19 @@ export class TaskEngine {
             status: 409
           })
         }
-        return this.enqueue(
+        const created = await this.enqueue(
           { ...task.input, prompt: content, run_in_background: false },
           task.profile,
           task,
           key,
           options.nestedToolCall
         )
+        return { ...created, mode: 'activated', accepted: true }
       },
-      (receipt) => ({ ...receipt, mode: 'duplicate', accepted: true })
+      (receipt): AdmissionReceipt => ({ ...receipt, mode: 'duplicate', accepted: true })
     )
-    return this.foreground(result, options.signal)
+    const settled = await this.foreground(result, options.signal)
+    return { ...settled, mode: result.mode, accepted: result.accepted }
   }
 
   pump(): void {
@@ -514,12 +529,11 @@ export class TaskEngine {
       task.started_at = new Date().toISOString()
       // Later background rows in the same child session use append-completion semantics.
       const runtime: TaskRuntime = {
-        accepting: true,
         controller: new AbortController(),
-        initializing: true,
         backgroundRunner:
           task.input.run_in_background === true &&
-          this.getState().tasks.find((item) => item.session_id === task.session_id) === task
+          this.getState().tasks.find((item) => item.session_id === task.session_id) === task,
+        phase: { kind: 'initializing' }
       }
       this.runtimes.set(task.task_id, runtime)
       const execute = this.executionContexts.get(task.task_id) ?? runWithoutTaskExecutionContext
@@ -566,7 +580,7 @@ export class TaskEngine {
         if (!session.child) {
           session.child = await this.createChild({
             signal: runtime.controller.signal,
-            profile: freeze(clone(task.profile)),
+            profile: freeze(cloneJson(task.profile)),
             cwd: this.cwd,
             sessionPath: task.childSessionPath,
             onProfileResolved: async (profile: AgentProfile) => {
@@ -586,7 +600,7 @@ export class TaskEngine {
             onOwnedCommandStarted: async () => {
               const active = session.active,
                 owner = active && this.runtimes.get(active.task_id)
-              if (this.closed || !active || !owner?.accepting || owner.stopReason || owner.sealed) {
+              if (this.closed || !active || !owner || !isAccepting(owner.phase)) {
                 throw new Error('Command owner is not accepting work')
               }
               this.assertDispatch()
@@ -637,7 +651,9 @@ export class TaskEngine {
         throw error
       })
       .finally(() => {
-        runtime.initializing = false
+        if (runtime.phase.kind === 'initializing') {
+          runtime.phase = { kind: 'running' }
+        }
       })
     runtime.ready.catch(() => {})
     if (task.profile.timeoutMs > 0) {
@@ -650,13 +666,13 @@ export class TaskEngine {
       if (this.storageError) {
         throw this.storageError
       }
-      if (!runtime.stopReason && !this.closed) {
+      if (!stopOf(runtime.phase) && !this.closed) {
         this.safety.assertDispatch()
       }
       if (child.sessionPath && child.sessionPath !== task.childSessionPath) {
         throw new Error('Child session path does not match assigned path')
       }
-      if (initializingChild && !runtime.initializationCanceled && !this.closed) {
+      if (initializingChild && !stopOf(runtime.phase)?.initialization && !this.closed) {
         // ready has handed off to the existing active-task contract. A canceled initializer
         // keeps its lease until the original child has actually been disposed instead.
         delete task.ownedCommandCleanupPending
@@ -668,7 +684,7 @@ export class TaskEngine {
           throw error
         }
       }
-      if (!runtime.stopReason && !this.closed) {
+      if (!stopOf(runtime.phase) && !this.closed) {
         const prompting = child.prompt(task.input.prompt, { turnId: task.sub_turn_id })
         startedResolve(child)
         const result = await prompting
@@ -678,9 +694,15 @@ export class TaskEngine {
         recordChildFacts(task, result)
         outcome = runnerOutcome(result)
       } else {
-        runtime.stopReason ??= 'Parent closed'
-        task.cancel_reason ??= runtime.stopReason
-        outcome = { status: 'aborted', errorMessage: runtime.stopReason }
+        const stop = stopOf(runtime.phase)
+        if (!stop) {
+          runtime.phase = {
+            kind: 'stopping',
+            stop: { reason: 'Parent closed', status: 'canceled' }
+          }
+        }
+        task.cancel_reason ??= stop?.reason ?? 'Parent closed'
+        outcome = { status: 'aborted', errorMessage: stop?.reason ?? 'Parent closed' }
       }
     } catch (error) {
       const failure = recordChildFailure(task, error)
@@ -699,26 +721,27 @@ export class TaskEngine {
         failure.partialResult,
         runtime.backgroundRunner ? runtime.shutdownReason : undefined
       )
-      if (this.safety.record(task, error) && !runtime.stopReason) {
-        runtime.stopStatus = 'failed'
+      if (this.safety.record(task, error) && !stopOf(runtime.phase)) {
+        runtime.terminalStatus = 'failed'
       }
-      if (!runtime.stopReason && ('failure' in outcome || outcome.status !== 'succeeded')) {
+      if (!stopOf(runtime.phase) && ('failure' in outcome || outcome.status !== 'succeeded')) {
         task.error = failure.message
       }
     } finally {
-      runtime.accepting = false
+      const stop = stopOf(runtime.phase)
+      runtime.phase = { kind: 'finishing', ...(stop ? { stop } : {}) }
       startedReject(new Error('Task ended before prompt dispatch'))
       clearTimeout(runtime.timer)
       if (runtime.delivery) {
         await runtime.delivery
       }
       // Seal synchronously before manager completion yields, so cancellation cannot reopen this slot.
-      if (runtime.aborting) {
-        await runtime.aborting
+      if (stop?.aborting) {
+        await stop.aborting
       }
-      if (runtime.initializationCanceled) {
+      if (stop?.initialization) {
         // Reporting can time out, but the original run still owns every in-flight stop write.
-        await runtime.stopWait?.catch(() => {})
+        await stop.initialization.wait?.catch(() => {})
       }
       if (task.ownedCommandCleanupPending) {
         if (!this.safety.retains(task.session_id)) {
@@ -728,18 +751,18 @@ export class TaskEngine {
             true
           )
         }
-        runtime.stopStatus ??= 'failed'
+        runtime.terminalStatus ??= 'failed'
       }
-      runtime.sealed = true
+      runtime.phase = { kind: 'sealed', ...(stop ? { stop } : {}) }
       session.active = undefined
       try {
         const terminal = appendTerminalOutput(task, outcome)
         if (pending.has(task.status) && task.error === undefined && terminal.lastError) {
           task.error = terminal.lastError.message
         }
-        await this.domain.finish(task, runtime.stopStatus ?? terminal.status)
+        await this.domain.finish(task, runtime.terminalStatus ?? stop?.status ?? terminal.status)
         task.notification_pending =
-          (task.status !== 'canceled' || !runtime.stopReason) && task.notify_completion !== false
+          (task.status !== 'canceled' || !stop) && task.notify_completion !== false
         this.uncommittedTerminals.add(task.task_id)
         await this.persist()
         this.uncommittedTerminals.delete(task.task_id)
@@ -747,7 +770,9 @@ export class TaskEngine {
         if (task.notification_pending) {
           try {
             Promise.resolve(this.notify?.(this.summary(task))).catch(() => {})
-          } catch {}
+          } catch {
+            // Ignore synchronous callback failures; async failures are already contained.
+          }
         }
       } catch (error) {
         this.latchStorageError(error)
@@ -760,17 +785,21 @@ export class TaskEngine {
     }
   }
 
-  private confirmInitializationCleanup(task: TaskRecord, runtime: TaskRuntime): void {
+  private confirmInitializationCleanup(task: TaskRecord, initialization: InitializationStop): void {
     this.safety.confirmDisposed(new Set([task.session_id]), this.getState().tasks)
-    runtime.initializationCleanupPending = false
+    initialization.cleanupPending = false
   }
 
-  private async abortChild(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+  private async abortChild(
+    task: TaskRecord,
+    runtime: TaskRuntime,
+    initialization?: InitializationStop
+  ): Promise<void> {
     let child: ChildSession | undefined
     try {
       child = await runtime.ready
     } catch (error) {
-      if (!runtime.initializationCanceled) {
+      if (!initialization) {
         throw error
       }
       child = this.sessions.get(task.session_id)?.child
@@ -779,38 +808,46 @@ export class TaskEngine {
         if (this.safety.record(task, error)) {
           throw error
         }
-        this.confirmInitializationCleanup(task, runtime)
+        this.confirmInitializationCleanup(task, initialization)
         return
       }
     }
-    await child!.abort()
-    if (runtime.initializationCanceled) {
-      await child!.dispose()
+    if (!child) {
+      throw new Error('Child session is unavailable after initialization')
+    }
+    await child.abort()
+    if (initialization) {
+      await child.dispose()
       const session = this.sessions.get(task.session_id)
       if (session && session.child === child) {
         delete session.child
       }
-      this.confirmInitializationCleanup(task, runtime)
+      this.confirmInitializationCleanup(task, initialization)
     }
   }
 
-  private async waitForInitializationStop(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+  private async waitForInitializationStop(
+    task: TaskRecord,
+    stop: RuntimeStop,
+    initialization: InitializationStop,
+    write: Promise<void>,
+    aborting: Promise<void>
+  ): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const stopped = await Promise.race([
-        runtime.aborting!.then(() => true),
+        aborting.then(() => true),
         new Promise<boolean>((finishWait) => {
           timer = setTimeout(() => finishWait(false), initializationStopWaitMs)
         })
       ])
       if (!stopped) {
-        runtime.initializationCleanupPending = true
+        initialization.cleanupPending = true
         this.safety.record(task, new Error('Child initialization cleanup is unconfirmed'), true)
         if (pending.has(task.status)) {
-          this.domain.transition(task, runtime.stopStatus!)
+          this.domain.transition(task, stop.status)
           task.finished_at = new Date().toISOString()
-          task.notification_pending =
-            runtime.stopStatus !== 'canceled' && task.notify_completion !== false
+          task.notification_pending = stop.status !== 'canceled' && task.notify_completion !== false
         }
         this.uncommittedTerminals.add(task.task_id)
         this.changed(task)
@@ -822,10 +859,10 @@ export class TaskEngine {
             this.latchStorageError(error)
             this.changed(task)
           })
-        await Promise.allSettled([runtime.stoppingWrite, marker])
+        await Promise.allSettled([write, marker])
         this.changed(task)
       } else {
-        await runtime.stoppingWrite?.catch(() => {})
+        await write.catch(() => {})
       }
       if (this.storageError) {
         throw this.storageError
@@ -835,12 +872,17 @@ export class TaskEngine {
     }
   }
 
-  private async initializationStopReport(task: TaskRecord, runtime: TaskRuntime): Promise<void> {
+  private async initializationStopReport(
+    task: TaskRecord,
+    runtime: TaskRuntime,
+    initialization: InitializationStop,
+    wait: Promise<void>
+  ): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       await Promise.race([
-        runtime.stopWait!.then(async () => {
-          if (!runtime.initializationCleanupPending) {
+        wait.then(async () => {
+          if (!initialization.cleanupPending) {
             await runtime.done
           }
           if (this.storageError) {
@@ -877,15 +919,16 @@ export class TaskEngine {
     if (runtime && shutdown) {
       runtime.shutdownReason = reason
     }
-    if (runtime?.initializationCanceled && runtime.stopReport && !(shutdown && runtime.settled)) {
-      await runtime.stopReport.catch((error) => {
+    const pendingStop = runtime && stopOf(runtime.phase)
+    if (pendingStop?.initialization?.report && !(shutdown && runtime?.settled)) {
+      await pendingStop.initialization.report.catch((error) => {
         // A cached deadline is not allowed to hide the first real write failure arriving later.
         throw this.storageError ?? error
       })
       return this.summary(task)
     }
-    if (runtime?.sealed || !pending.has(task.status)) {
-      if (pending.has(task.status) || runtime?.sealed) {
+    if (runtime?.phase.kind === 'sealed' || !pending.has(task.status)) {
+      if (pending.has(task.status) || runtime?.phase.kind === 'sealed') {
         await runtime?.done
       }
       if (this.uncommittedTerminals.has(task.task_id)) {
@@ -914,58 +957,77 @@ export class TaskEngine {
       this.changed(task)
       return this.summary(task)
     }
-    if (!runtime.stopReason) {
-      runtime.initializationCanceled = runtime.initializing
-      runtime.accepting = false
-      clearTimeout(runtime.timer)
-      runtime.stopReason = reason || 'Task canceled'
-      runtime.stopStatus = status
-      this.domain.transition(task, 'stopping')
-      task.cancel_reason = runtime.stopReason
-      runtime.rejectStarted?.(new Error(runtime.stopReason))
-      if (status === 'failed') {
-        task.error = runtime.stopReason
+    let activeStop = pendingStop
+    if (!activeStop) {
+      const initialization: InitializationStop | undefined =
+        runtime.phase.kind === 'initializing' ? { cleanupPending: false } : undefined
+      const stop: RuntimeStop = {
+        reason: reason || 'Task canceled',
+        status,
+        ...(initialization ? { initialization } : {})
       }
-      runtime.aborting = this.abortChild(task, runtime).catch(async (error) => {
-        if (runtime.initializationCanceled) {
-          runtime.initializationCleanupPending = true
-        }
-        if (!this.safety.record(task, error, runtime.initializationCanceled)) {
-          task.stopError = {
-            code: 'TASK_STOP_FAILED',
-            message: normalizeTaskError(error).message
+      activeStop = stop
+      runtime.phase = { kind: 'stopping', stop }
+      clearTimeout(runtime.timer)
+      this.domain.transition(task, 'stopping')
+      task.cancel_reason = stop.reason
+      runtime.rejectStarted?.(new Error(stop.reason))
+      if (status === 'failed') {
+        task.error = stop.reason
+      }
+      const aborting = (stop.aborting = this.abortChild(task, runtime, initialization).catch(
+        async (error) => {
+          if (initialization) {
+            initialization.cleanupPending = true
           }
-          task.error = task.stopError.message
+          if (!this.safety.record(task, error, initialization !== undefined)) {
+            task.stopError = {
+              code: 'TASK_STOP_FAILED',
+              message: normalizeTaskError(error).message
+            }
+            task.error = task.stopError.message
+          }
+          stop.status = status
+          // Upstream reports a failed explicit stop as canceled + stopError; capacity remains owned independently.
+          if (pending.has(task.status)) {
+            this.domain.transition(task, status)
+            task.finished_at = new Date().toISOString()
+            task.notification_pending = status !== 'canceled' && task.notify_completion !== false
+          }
+          try {
+            await this.persist()
+          } catch (failure) {
+            this.latchStorageError(failure)
+          }
+          this.changed(task)
         }
-        runtime.stopStatus = status
-        // Upstream reports a failed explicit stop as canceled + stopError; capacity remains owned independently.
-        if (pending.has(task.status)) {
-          this.domain.transition(task, status)
-          task.finished_at = new Date().toISOString()
-          task.notification_pending = status !== 'canceled' && task.notify_completion !== false
-        }
-        try {
-          await this.persist()
-        } catch (failure) {
-          this.latchStorageError(failure)
-        }
-        this.changed(task)
-      })
+      ))
       // Install both cleanup and bounded reporting before the first stopping-row write can fail.
-      if (runtime.initializationCanceled) {
-        runtime.stoppingWrite = this.persist().catch((error) => {
+      if (initialization) {
+        const write = (initialization.write = this.persist().catch((error) => {
           this.latchStorageError(error)
           this.changed(task)
           throw this.storageError
-        })
-        runtime.stoppingWrite.catch(() => {})
-        runtime.stopWait = this.waitForInitializationStop(task, runtime)
-        runtime.stopWait.catch(() => {})
-        runtime.stopReport = this.initializationStopReport(task, runtime)
-        runtime.stopReport.catch(() => {})
+        }))
+        write.catch(() => {})
+        const wait = (initialization.wait = this.waitForInitializationStop(
+          task,
+          stop,
+          initialization,
+          write,
+          aborting
+        ))
+        wait.catch(() => {})
+        const report = (initialization.report = this.initializationStopReport(
+          task,
+          runtime,
+          initialization,
+          wait
+        ))
+        report.catch(() => {})
       }
       runtime.controller.abort()
-      if (!runtime.initializationCanceled) {
+      if (!initialization) {
         try {
           await this.persist()
         } catch (error) {
@@ -976,11 +1038,11 @@ export class TaskEngine {
       }
       this.changed(task)
     }
-    if (runtime.initializationCanceled) {
-      await runtime.stopReport
+    if (activeStop.initialization) {
+      await activeStop.initialization.report
       return this.summary(task)
     }
-    await runtime.aborting
+    await activeStop.aborting
     // A failed abort is observable immediately, but the live child still owns its slot.
     if (!task.stopError) {
       await runtime.done
@@ -1008,7 +1070,7 @@ export class TaskEngine {
   }
 
   waitUntil(predicate: () => boolean, timeout?: number, signal?: AbortSignal): Promise<boolean> {
-    return waitForChange(this.waiters, predicate, timeout, signal)
+    return waitForChange({ waiters: this.waiters, predicate, timeout, signal })
   }
 
   async output(
@@ -1093,7 +1155,7 @@ export class TaskEngine {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       let disposal = this.disposing
-      if ([...this.runtimes.values()].some((runtime) => runtime.initializationCanceled)) {
+      if ([...this.runtimes.values()].some((runtime) => stopOf(runtime.phase)?.initialization)) {
         disposal = Promise.race([
           disposal,
           new Promise<never>((_, reject) => {
@@ -1147,7 +1209,7 @@ export class TaskEngine {
     this.closing = (async () => {
       // Append admission may be waiting for initial prompt dispatch. Closing must wake it first.
       for (const runtime of this.runtimes.values()) {
-        if (runtime.initializing) {
+        if (runtime.phase.kind === 'initializing') {
           runtime.rejectStarted?.(new Error('Parent closed'))
         }
       }
@@ -1180,7 +1242,7 @@ export class TaskEngine {
       }
       if (
         [...this.runtimes.values()].some(
-          (runtime) => runtime.initializationCanceled && !runtime.settled
+          (runtime) => stopOf(runtime.phase)?.initialization && !runtime.settled
         )
       ) {
         // The original run still owns its pending factory/disposal; do not race a second cleanup.

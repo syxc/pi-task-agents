@@ -34,24 +34,39 @@ export interface HostResources {
   getSkills(): { skills: Skill[] }
 }
 
-export async function childResources(
-  profile: AgentProfile,
-  cwd: string,
-  agentDir: string,
-  projectTrusted: boolean,
-  host?: HostResources,
+export interface ChildResources {
+  extensions: {
+    paths: string[]
+    inline: InlineExtension[]
+    sources: string[]
+  }
+  skills: {
+    paths: string[]
+    selectedPaths: string[]
+    inherited: Skill[]
+    names: string[]
+    inherit: boolean
+  }
+  snapshots: {
+    extensions: string[]
+  }
+}
+
+export async function childResources({
+  profile,
+  cwd,
+  agentDir,
+  projectTrusted,
+  host,
+  sdk
+}: {
+  profile: AgentProfile
+  cwd: string
+  agentDir: string
+  projectTrusted: boolean
+  host?: HostResources
   sdk?: Parameters<typeof discoverResourcePaths>[0]
-): Promise<{
-  extensions: string[]
-  inlineExtensions: InlineExtension[]
-  extensionSources: string[]
-  extensionSnapshot: string[]
-  skillPaths: string[]
-  selectedPaths: string[]
-  inheritedSkills: Skill[]
-  skillNames: string[]
-  inheritSkills: boolean
-}> {
+}): Promise<ChildResources> {
   const allowedSource = (source: { scope: string }): boolean =>
     projectTrusted || source.scope !== 'project'
   const inheritedSkills = (host?.getSkills().skills ?? []).filter((skill) =>
@@ -167,12 +182,13 @@ export async function childResources(
   }
   // Snapshot names are not path authority: explicit directories must still appear in
   // the current role configuration loaded under the current project trust decision.
+  // A saved role may outlive its config entry; a missing role grants no skill selectors.
   const currentRole =
     profile.skillSnapshot === undefined
       ? undefined
       : (await loadConfig({ cwd, agentDir, projectTrusted })).roles[profile.name]
   const currentSelectors =
-    profile.skillSnapshot === undefined ? profile.skills : currentRole ? currentRole.skills : []
+    profile.skillSnapshot === undefined ? profile.skills : (currentRole?.skills ?? [])
   const inheritSkills = currentSelectors === undefined
   const skillNames = (currentSelectors ?? []).filter(isResourceName).map(normalizedSelectorName)
   const skillPaths = await localPaths(
@@ -213,14 +229,18 @@ export async function childResources(
     (path) => !extensionCeiling || extensionCeiling.has(path)
   )
   return {
-    extensions: files,
-    inlineExtensions,
-    extensionSources: [...files, ...inlineSources],
-    extensionSnapshot: [...files, ...inlineSnapshot],
-    skillPaths: host ? [] : skillPaths,
-    selectedPaths,
-    inheritedSkills: selectedSkills,
-    skillNames,
-    inheritSkills
+    extensions: {
+      paths: files,
+      inline: inlineExtensions,
+      sources: [...files, ...inlineSources]
+    },
+    skills: {
+      paths: host ? [] : skillPaths,
+      selectedPaths,
+      inherited: selectedSkills,
+      names: skillNames,
+      inherit: inheritSkills
+    },
+    snapshots: { extensions: [...files, ...inlineSnapshot] }
   }
 }

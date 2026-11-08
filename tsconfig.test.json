@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true
+  },
+  "include": ["test/**/*.ts", "scripts/**/*.mjs"],
+  "exclude": [
+    "test/child-parent-tools.test.ts",
+    "test/controller-rpc-widget.test.ts",
+    "test/controller.test.ts",
+    "test/engine.test.ts",
+    "test/extension.test.ts",
+    "test/managed-command-ownership.test.ts",
+    "test/nested-foreground-capacity.test.ts",
+    "test/nested-foreground-lifecycle.test.ts",
+    "test/nested-foreground-test-helpers.ts",
+    "test/parent-runtime.test.ts",
+    "test/parent-tool-continuation.test.ts",
+    "test/parent-tools.test.ts",
+    "test/pi-backend.test.ts",
+    "test/resource-mcp.test.ts",
+    "test/runtime-inheritance.test.ts",
+    "test/task-call-ancestry.test.ts",
+    "test/task-lineage.test.ts",
+    "test/tool-result-golden.test.ts",
+    "test/upstream.test.ts"
+  ]
+}

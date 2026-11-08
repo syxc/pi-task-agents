@@ -1,4 +1,5 @@
 import type { CreateAgentSessionOptions } from '@earendil-works/pi-coding-agent'
+import { Type, type Static } from 'typebox'
 import type { BackgroundTaskStatus } from './vendor/mcode-background-task/types.ts'
 
 export type TaskStatus = BackgroundTaskStatus
@@ -62,17 +63,33 @@ export type ChildOutcome =
   | { kind: 'returned'; status: 'succeeded' | 'failed' | 'aborted' }
   | { kind: 'exception' }
 
-export type ModelVerdict = 'pass' | 'fail' | 'partial'
-export interface VerificationReport {
-  modelVerdict?: ModelVerdict
-  fileChange: 'no_observed_change' | 'change_observed' | 'uncertain' | 'recording_failed'
-  changedFiles?: string[]
-  observationNotes: string[]
-}
+const ModelVerdictSchema = Type.Union([
+  Type.Literal('pass'),
+  Type.Literal('fail'),
+  Type.Literal('partial')
+])
+export type ModelVerdict = Static<typeof ModelVerdictSchema>
+
+/** Stored reports are boundary data: the schema is the single definition of their shape. */
+export const VerificationReportSchema = Type.Object(
+  {
+    modelVerdict: Type.Optional(ModelVerdictSchema),
+    fileChange: Type.Union([
+      Type.Literal('no_observed_change'),
+      Type.Literal('change_observed'),
+      Type.Literal('uncertain'),
+      Type.Literal('recording_failed')
+    ]),
+    changedFiles: Type.Optional(Type.Array(Type.String())),
+    observationNotes: Type.Array(Type.String())
+  },
+  { additionalProperties: false }
+)
+export type VerificationReport = Static<typeof VerificationReportSchema>
 
 export interface ChildResult {
   /** Internal producer provenance for terminal formatting; never public Task details. */
-  outcome?: ChildOutcome
+  outcome: ChildOutcome
   /** Host-produced proof that this turn has no unconfirmed managed-command resources. */
   commandCleanupConfirmed?: true
   eventCount?: number
@@ -154,7 +171,7 @@ export interface TaskRecord {
   error?: string
   cancel_reason?: string
   usage?: Record<string, number>
-  mode?: 'activated' | 'steered' | 'duplicate'
+  mode?: AdmissionMode
   accepted?: boolean
   stopError?: { code: string; message: string }
 }
@@ -179,11 +196,18 @@ export interface TaskOutput extends TaskSummary {
   has_more: boolean
 }
 
+export type AdmissionMode = 'activated' | 'steered' | 'duplicate'
+
+/** Append/send producers always state how content was admitted; start returns a plain summary. */
+export type AdmissionReceipt = TaskSummary & { mode: AdmissionMode; accepted: true }
+
 export interface TaskState {
   version: 1
   parentId: string
   tasks: TaskRecord[]
   requests: Record<string, string>
+  /** Release-acknowledged CHILD_CLEANUP_FAILED receipts; IDs must still exist on a matching task. */
+  cleanupConfirmed?: string[]
 }
 
 export interface TaskEngineOptions {
@@ -199,9 +223,10 @@ export interface TaskEngineOptions {
 
 export interface TaskService {
   init(): Promise<unknown>
+  task(id: string): TaskRecord
   start(input: TaskInput, profile: AgentProfile, options?: TaskRequestOptions): Promise<TaskSummary>
-  append(taskId: string, content: string, options?: TaskRequestOptions): Promise<TaskSummary>
-  send(taskId: string, content: string, options?: TaskRequestOptions): Promise<TaskSummary>
+  append(taskId: string, content: string, options?: TaskRequestOptions): Promise<AdmissionReceipt>
+  send(taskId: string, content: string, options?: TaskRequestOptions): Promise<AdmissionReceipt>
   query(): Promise<TaskSummary[]>
   query(query: TaskQuery & { task_id: string }): Promise<TaskSummary>
   query(query: TaskQuery & { task_id?: undefined }): Promise<TaskSummary[]>

@@ -8,6 +8,7 @@ import * as sdk from '@earendil-works/pi-coding-agent'
 import { registerTaskAgents } from '../src/extension.ts'
 import { answer, fixture, tool } from './pi-backend-test-helpers.ts'
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { Message } from '@earendil-works/pi-ai'
 
 const server = fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url))
 
@@ -154,7 +155,8 @@ test(
             const result = (
               context as Parameters<sdk.ModelRuntime['streamSimple']>[1]
             ).messages.find(
-              (message) => message.role === 'toolResult' && message.toolName === 'owned_extension'
+              (message): message is Extract<Message, { role: 'toolResult' }> =>
+                message.role === 'toolResult' && message.toolName === 'owned_extension'
             )
             assert.equal(result?.isError, true)
             assert.doesNotMatch(text, /OWNED_EXTENSION_RESULT/)
@@ -269,7 +271,7 @@ test(
         assert.equal(result.status, 'succeeded', `${name}: ${result.error}`)
         assert.equal(result.final_text, `RESOURCES_USED:${name}`)
         assert.ok(
-          controller.engine.task(result.task_id).profile.nativeToolSnapshot.includes('codemode'),
+          controller.engine!.task(result.task_id).profile.nativeToolSnapshot?.includes('codemode'),
           name
         )
       }

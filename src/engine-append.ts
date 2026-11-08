@@ -1,5 +1,8 @@
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts'
+import { isAccepting, stopOf, type RuntimePhase } from './runtime-phase.ts'
 import type {
+  AdmissionMode,
+  AdmissionReceipt,
   ChildSession,
   TaskRecord,
   TaskRequestOptions,
@@ -8,11 +11,10 @@ import type {
 } from './types.ts'
 
 interface AppendRuntime {
-  accepting: boolean
+  phase: RuntimePhase
   started?: Promise<ChildSession>
   done?: Promise<void>
   delivery?: Promise<void>
-  stopReason?: string
 }
 
 interface AppendHost {
@@ -23,15 +25,19 @@ interface AppendHost {
   runtimes: ReadonlyMap<string, AppendRuntime>
   request(
     key: string | undefined,
-    fn: (key?: string) => Promise<TaskSummary>,
-    duplicate: (result: TaskSummary) => TaskSummary
-  ): Promise<TaskSummary>
+    fn: (key?: string) => Promise<AdmissionReceipt>,
+    duplicate: (result: TaskSummary) => AdmissionReceipt
+  ): Promise<AdmissionReceipt>
   queued(task: TaskRecord, content: string, key?: string): Promise<void>
   enqueue(task: TaskRecord, content: string, key?: string): Promise<TaskSummary>
   reserve(task: TaskRecord, key?: string): Promise<() => Promise<boolean>>
   pump(): void
   changed(task: TaskRecord): void
   summary(task: TaskRecord): TaskSummary
+}
+
+function receipt(summary: TaskSummary, mode: AdmissionMode): AdmissionReceipt {
+  return { ...summary, mode, accepted: true }
 }
 
 function failure(code: string, status: number, message: string, cause?: unknown): Error {
@@ -65,7 +71,7 @@ export async function appendTask(
   taskId: string,
   content: string,
   { requestId, signal }: TaskRequestOptions
-): Promise<TaskSummary> {
+): Promise<AdmissionReceipt> {
   if (typeof taskId !== 'string' || !taskId.trim()) {
     throw failure('INVALID_ARGUMENT', 400, 'task_append requires a task_id.')
   }
@@ -88,24 +94,28 @@ export async function appendTask(
         if (!original) {
           throw failure('TASK_NOT_FOUND', 404, `Local background task not found: ${taskId}`)
         }
-        const task = tasks.findLast((item) => item.session_id === original.session_id)!
+        const task = tasks.findLast((item) => item.session_id === original.session_id) ?? original
         if (task.status === 'stopping') {
           throw rejected(new Error('Task is stopping'))
         }
         if (task.status === 'queued') {
           await host.queued(task, content, key)
           host.changed(task)
-          const result = host.summary(task)
+          const result = receipt(host.summary(task), 'steered')
           host.pump()
           return result
         }
         const runtime = host.runtimes.get(task.task_id)
-        if (runtime?.accepting) {
+        if (runtime && isAccepting(runtime.phase)) {
+          const started = runtime.started
+          if (started === undefined) {
+            throw rejected(new Error('Task runtime has no child session'))
+          }
           let release!: () => void
           const turnId = task.sub_turn_id
           const active = () =>
             host.runtimes.get(task.task_id) === runtime &&
-            runtime.accepting &&
+            isAccepting(runtime.phase) &&
             task.status === 'running' &&
             task.sub_turn_id === turnId
           // Keep the existing delivery reservation through persistence, recheck, and delivery.
@@ -115,19 +125,19 @@ export async function appendTask(
           try {
             let child: ChildSession | undefined
             try {
-              child = await runtime.started!
+              child = await started
             } catch (error) {
-              if (runtime.stopReason) {
+              if (stopOf(runtime.phase)) {
                 throw rejected(error)
               }
               aborted(signal)
               host.assertAdmission()
-              if (runtime.accepting) {
+              if (isAccepting(runtime.phase)) {
                 throw error
               }
             }
             aborted(signal)
-            if (runtime.stopReason) {
+            if (stopOf(runtime.phase)) {
               throw rejected(new Error('Task is stopping'))
             }
             if (child && active()) {
@@ -139,13 +149,13 @@ export async function appendTask(
                 await compensate()
                 throw error
               }
-              if (!active() || runtime.stopReason) {
+              if (!active() || stopOf(runtime.phase)) {
                 const removed = await compensate()
-                if (runtime.stopReason) {
+                if (stopOf(runtime.phase)) {
                   throw rejected(new Error('Task is stopping'))
                 }
                 if (!removed) {
-                  return { ...host.summary(task), mode: 'duplicate', accepted: true }
+                  return receipt(host.summary(task), 'duplicate')
                 }
               } else {
                 let delivered = false
@@ -164,16 +174,16 @@ export async function appendTask(
                   }
                   const removed = await compensate()
                   aborted(signal)
-                  if (runtime.stopReason || active()) {
+                  if (stopOf(runtime.phase) || active()) {
                     throw rejected(error)
                   }
                   if (!removed) {
-                    return { ...host.summary(task), mode: 'duplicate', accepted: true }
+                    return receipt(host.summary(task), 'duplicate')
                   }
                 }
                 if (delivered) {
                   host.changed(task)
-                  return host.summary(task)
+                  return receipt(host.summary(task), 'steered')
                 }
               }
             }
@@ -184,9 +194,9 @@ export async function appendTask(
         }
         await runtime?.done
         aborted(signal)
-        return host.enqueue(task, content, key)
+        return receipt(await host.enqueue(task, content, key), 'activated')
       },
-      (result) => ({ ...result, mode: 'duplicate', accepted: true })
+      (result) => receipt(result, 'duplicate')
     )
   } catch (error) {
     if (

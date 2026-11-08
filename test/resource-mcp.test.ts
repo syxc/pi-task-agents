@@ -263,7 +263,9 @@ test(
         if ((await readFile(marker, 'utf8')) === 'closed') {
           break
         }
-      } catch {}
+      } catch {
+        // Keep polling until the marker becomes readable.
+      }
       await delay(10)
     }
     /* oxlint-enable no-await-in-loop */

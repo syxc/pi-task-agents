@@ -43,7 +43,10 @@ async function fixture(t: TestContext) {
         prompts++
         const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
         assert.equal(saved.tasks.at(-1).ownedCommandCleanupPending, undefined)
-        return { text: 'offline evidence' }
+        return {
+          text: 'offline evidence',
+          outcome: { kind: 'returned', status: 'succeeded' }
+        }
       },
       async steer() {},
       async abort() {},

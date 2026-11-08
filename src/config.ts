@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 import type { AgentProfile, ConfigLoadOptions, TaskAgentsConfig } from './types.ts'
 import { isResourceName, isUnavailablePath, within } from './resource-selection.ts'
 import { DEFAULT_MAX_CONCURRENCY, resolveMaxConcurrency } from './concurrency.ts'
+import { isThinkingLevel, thinkingLevels } from './thinking.ts'
+
+export { thinkingLevels } from './thinking.ts'
 
 type RoleOptions = { -readonly [K in keyof Omit<AgentProfile, 'name'>]?: AgentProfile[K] }
 type RoleInput = Omit<RoleOptions, 'thinking'> & { thinking?: string }
@@ -17,15 +20,6 @@ interface ParsedConfig {
 const pluginRoot = fileURLToPath(new URL('../', import.meta.url))
 const builtins: readonly string[] = ['explore', 'worker', 'verifier', 'mavis']
 const readTools: readonly string[] = ['read', 'grep', 'find', 'ls']
-export const thinkingLevels: readonly string[] = Object.freeze([
-  'off',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max'
-])
 const roleKeys: readonly string[] = [
   'model',
   'thinking',
@@ -148,7 +142,7 @@ function checkRole(role: unknown, path: string): asserts role is RoleInput {
     text(role.effort, path + '.effort')
   }
   for (const key of ['thinking', 'effort']) {
-    if (typeof role[key] === 'string' && !thinkingLevels.includes(role[key].trim())) {
+    if (typeof role[key] === 'string' && !isThinkingLevel(role[key].trim())) {
       fail(path + '.' + key, 'expected a Pi thinking level: ' + thinkingLevels.join(', '))
     }
   }
@@ -304,13 +298,10 @@ async function readConfig(file: string): Promise<ParsedConfig | undefined> {
       ...(rawEffort === undefined ? {} : { effort: rawEffort.trim() })
     }
     for (const resource of ['extensions', 'skills'] as const) {
-      if (own(value, resource)) {
+      const paths = value[resource]
+      if (own(value, resource) && paths !== undefined) {
         // oxlint-disable-next-line no-await-in-loop -- Preserve configuration order and stop at the first invalid resource.
-        override[resource] = await resourcePaths(
-          value[resource]!,
-          file,
-          'roles.' + key + '.' + resource
-        )
+        override[resource] = await resourcePaths(paths, file, 'roles.' + key + '.' + resource)
       }
     }
     roles[name] = override
@@ -476,7 +467,7 @@ export function resolveProfile(config: TaskAgentsConfig, input: unknown): AgentP
   if (own(input, 'effort')) {
     text(input.effort, 'input.effort')
     requestedEffort = input.effort.trim()
-    if (!thinkingLevels.includes(requestedEffort)) {
+    if (!isThinkingLevel(requestedEffort)) {
       fail('input.effort', 'expected a Pi thinking level')
     }
   }

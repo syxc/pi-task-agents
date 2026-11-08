@@ -28,7 +28,7 @@ async function activityFixture(t: TestContext, sameName = false, duplicateIds = 
       required: ['slot']
     },
     async execute(_id, args, signal) {
-      const index = Number(args.slot)
+      const index = Number((args as { slot?: unknown }).slot)
       started[index].resolve()
       await new Promise<void>((resolve) => {
         if (signal?.aborted) {

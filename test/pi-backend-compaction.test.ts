@@ -57,7 +57,7 @@ test('canceled authentication preflight cannot start a compaction model request'
       ;(f.runtime as unknown as sdk.ModelRuntime).checkAuth = async () => {
         entered.resolve()
         await release.promise
-        return 'owned-test-auth'
+        return { type: 'api_key' }
       }
       let calls = 0,
         compactions = 0,

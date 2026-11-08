@@ -1,4 +1,4 @@
-import type { TaskInput, TaskSummary } from './types.ts'
+import type { AdmissionReceipt, TaskInput, TaskSummary } from './types.ts'
 import {
   escapeAttribute,
   knownFailure,
@@ -114,11 +114,8 @@ export function appendFailure(taskId: string, error: AppendFailure): TaskToolRes
 export const knownAppendFailure = knownFailure
 
 export function appendResult(
-  task: Pick<TaskSummary, 'task_id' | 'mode' | 'accepted'>
+  task: Pick<AdmissionReceipt, 'task_id' | 'mode' | 'accepted'>
 ): TaskToolResult {
-  if (!task.mode || task.accepted !== true) {
-    throw new Error('Task append requires a source-owned mode and accepted=true')
-  }
   return projectedResult(
     'task_append',
     `<task_append task_id="${escapeAttribute(task.task_id)}" mode="${task.mode}" accepted="true" />`,

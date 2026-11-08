@@ -6,6 +6,7 @@ import * as sdk from '@earendil-works/pi-coding-agent'
 import { registerTaskAgents } from '../src/extension.ts'
 import { TaskEngine } from '../src/engine.ts'
 import { RESULT_TYPE, type TaskController } from '../src/controller.ts'
+import { isRecord } from '../src/guards.ts'
 import { answer, deferred, fixture, profile, tool } from './pi-backend-test-helpers.ts'
 
 const longReport =
@@ -156,9 +157,12 @@ for (const [name, report] of [
               agentDir: f.agentDir,
               childFactory: () => f.create,
               configLoader: async () => ({
+                cwd: f.cwd,
+                agentDir: f.agentDir,
                 maxConcurrency: 1,
                 roles: { worker: profile },
-                diagnostics: []
+                diagnostics: [],
+                sources: []
               })
             })
           }
@@ -214,11 +218,14 @@ for (const [name, report] of [
           .getBranch()
           .filter((entry) => entry.type === 'custom_message' && entry.customType === RESULT_TYPE)
         assert.equal(notices.length, 1)
-        assert.equal(
-          (notices[0] as (typeof notices)[0] & { details: { parent_id: string } }).details
-            .parent_id,
-          manager.getSessionId()
+        const notice = notices[0]
+        assert.ok(isRecord(notice))
+        const noticeDetails = notice.details
+        assert.ok(
+          isRecord(noticeDetails) && typeof noticeDetails.parent_id === 'string',
+          'completion notice must carry details.parent_id'
         )
+        assert.equal(noticeDetails.parent_id, manager.getSessionId())
         const persisted = (await readFile(manager.getSessionFile()!, 'utf8'))
           .trim()
           .split('\n')
@@ -259,7 +266,7 @@ for (const [name, report] of [
           await controller?.shutdown()
         } finally {
           if (parent) {
-            await parent.extensionRunner?.emit({ type: 'session_shutdown' })
+            await parent.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' })
             parent.dispose()
           }
         }

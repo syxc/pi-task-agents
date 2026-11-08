@@ -7,12 +7,21 @@ import { createSmokeChildFactory, runSdkSmoke } from '../scripts/sdk-smoke.mjs'
 import { appendResult, taskResult } from '../src/tool-result-task.ts'
 import { OutputProjector, outputWait, queryResult, stopResult } from '../src/tool-result-control.ts'
 import { projectedResult, type TaskToolResult } from '../src/tool-result-common.ts'
-import type { TaskInput, TaskSummary } from '../src/types.ts'
+import type { AdmissionReceipt, TaskInput, TaskSummary, VerificationReport } from '../src/types.ts'
 
-type Mutation = (name: string, result: TaskToolResult) => void
+interface SmokeDetails {
+  agent_name?: string
+  final_text: string
+  verification: VerificationReport & { changedFiles?: string[] }
+  task?: TaskSummary
+  [key: string]: unknown
+}
+
+type SmokeResult = Omit<TaskToolResult, 'details'> & { details: SmokeDetails }
+type Mutation = (name: string, result: SmokeResult) => void
 
 async function harness(mutate: Mutation = () => {}) {
-  const root = await mkdtemp(join(tmpdir(), 'sdk-smoke-'))
+  const root = await mkdtemp(join(tmpdir(), 'tool-surface-'))
   const tasks = new Map<string, TaskSummary>()
   const delivered: Array<{ message: unknown; options: { triggerTurn: boolean } }> = []
   const calls: Array<{
@@ -71,7 +80,7 @@ async function harness(mutate: Mutation = () => {}) {
         roles: { explore: {}, worker: {}, verifier: {}, mavis: {} }
       })
     } else if (name === 'task') {
-      const input = params as TaskInput
+      const input = params as unknown as TaskInput
       const role = input.agent_name!
       const summary: TaskSummary = {
         task_id: input.run_in_background ? 'cancel' : role,
@@ -102,7 +111,7 @@ async function harness(mutate: Mutation = () => {}) {
       tasks.set(summary.task_id, summary)
       result = taskResult(summary, input)
     } else if (name === 'task_append') {
-      const summary: TaskSummary = {
+      const summary: AdmissionReceipt = {
         ...tasks.get(params.task_id)!,
         task_id: 'continued',
         status: 'running',
@@ -141,7 +150,7 @@ async function harness(mutate: Mutation = () => {}) {
     } else {
       throw new Error(`Unexpected tool: ${name}`)
     }
-    mutate(name, result)
+    mutate(name, result as SmokeResult)
     return result
   }
   const session = {
@@ -177,7 +186,7 @@ async function harness(mutate: Mutation = () => {}) {
   }
 }
 
-test('SDK smoke accepts actual public projections and proves continuation/session history', async () => {
+test('tool surface accepts actual public projections and proves continuation/session history', async () => {
   const h = await harness()
   try {
     const report = await runSdkSmoke(h)
@@ -211,7 +220,7 @@ test('SDK smoke accepts actual public projections and proves continuation/sessio
   }
 })
 
-test('SDK smoke accepts normal verifier formatting and truthful concurrent-change observation', async () => {
+test('tool surface accepts normal verifier formatting and truthful concurrent-change observation', async () => {
   const h = await harness((name, result) => {
     if (name === 'task' && result.details.agent_name === 'verifier') {
       const text =
@@ -246,7 +255,7 @@ test('live factory override preserves every parent context option except agentDi
   const child = () => {}
   let received: unknown
   const factory = createSmokeChildFactory(
-    (value) => {
+    (value: unknown) => {
       received = value
       return child
     },
@@ -258,7 +267,7 @@ test('live factory override preserves every parent context option except agentDi
   assert.equal(options.agentDir, '/isolated-parent')
 })
 
-const invalidProjections: Array<[string, string, (result: TaskToolResult) => void, RegExp]> = [
+const invalidProjections: Array<[string, string, (result: SmokeResult) => void, RegExp]> = [
   [
     'missing details',
     'task_agents',
@@ -336,7 +345,7 @@ const invalidProjections: Array<[string, string, (result: TaskToolResult) => voi
     'task',
     (r) => {
       if (r.details.agent_name === 'verifier') {
-        delete r.details.verification
+        delete (r.details as { verification?: unknown }).verification
       }
     },
     /verifier verification/
@@ -366,7 +375,7 @@ const invalidProjections: Array<[string, string, (result: TaskToolResult) => voi
     'task',
     (r) => {
       if (r.details.agent_name === 'verifier') {
-        r.details.verification.fileChange = 'clean'
+        r.details.verification.fileChange = 'clean' as unknown as VerificationReport['fileChange']
       }
     },
     /verifier verification/
@@ -375,7 +384,7 @@ const invalidProjections: Array<[string, string, (result: TaskToolResult) => voi
     'flattened query',
     'task_query',
     (r) => {
-      r.details = r.details.task as Record<string, unknown>
+      r.details = r.details.task as unknown as SmokeDetails
     },
     /task_query.details.task/
   ],
@@ -565,7 +574,7 @@ const invalidProjections: Array<[string, string, (result: TaskToolResult) => voi
 ]
 
 for (const [label, tool, corrupt, expected] of invalidProjections) {
-  test(`SDK smoke rejects ${label}`, async () => {
+  test(`tool surface rejects ${label}`, async () => {
     const h = await harness((name, result) => {
       if (name === tool) {
         corrupt(result)
@@ -665,7 +674,7 @@ const invalidHistory: Array<
 ]
 
 for (const [label, tool, corrupt, expected] of invalidHistory) {
-  test(`SDK smoke rejects ${label}`, async () => {
+  test(`tool surface rejects ${label}`, async () => {
     const h = await harness((name, result) => {
       if (
         name === tool &&

@@ -13,7 +13,8 @@ test('target extraction retains pinned upstream helpers with narrow Pi path port
   const lock = JSON.parse(await readFile(new URL('../upstream.lock.json', import.meta.url), 'utf8'))
   assert.equal(
     createHash('sha256').update(source).digest('hex'),
-    lock.watch.find((entry) => entry.source === sourcePath)?.sha256
+    lock.watch.find((entry: { source: string; sha256: string }) => entry.source === sourcePath)
+      ?.sha256
   )
   const section = (start: string, end?: string) => {
     const first = source.indexOf(start),

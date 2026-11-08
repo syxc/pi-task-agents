@@ -111,53 +111,65 @@ test('capture cancellation does not wait for a held connector or expose its late
 test('saved extension identities do not acquire newly accepted hook-only factories', async () => {
   const owned = extension('owned'),
     added = extension('added')
-  const first = await childResources(profile, '/owned', '/owned/agent', true, host([owned]))
-  assert.deepEqual(first.extensionSnapshot, [owned.path])
-  const restored = await childResources(
-    { ...profile, toolInventory: ['read'], extensionSnapshot: first.extensionSnapshot },
-    '/owned',
-    '/owned/agent',
-    true,
-    host([owned, added])
-  )
-  assert.deepEqual(restored.extensionSnapshot, [owned.path])
-  assert.equal(restored.inlineExtensions.length, 1)
-  assert.equal(restored.inlineExtensions[0].factory, owned.factory)
+  const first = await childResources({
+    profile,
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: true,
+    host: host([owned])
+  })
+  assert.deepEqual(first.snapshots.extensions, [owned.path])
+  const restored = await childResources({
+    profile: { ...profile, toolInventory: ['read'], extensionSnapshot: first.snapshots.extensions },
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: true,
+    host: host([owned, added])
+  })
+  assert.deepEqual(restored.snapshots.extensions, [owned.path])
+  assert.equal(restored.extensions.inline.length, 1)
+  assert.equal(restored.extensions.inline[0].factory, owned.factory)
 })
 
 test('anonymous factory reordering cannot transfer old approval to the replacement ordinal', async () => {
   const original = extension('0', { factoryId: 'owned-original' }),
     replacement = extension('0', { factoryId: 'owned-replacement' })
-  const first = await childResources(profile, '/owned', '/owned/agent', true, host([original]))
+  const first = await childResources({
+    profile,
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: true,
+    host: host([original])
+  })
   const moved = { ...original, path: '<inline:1>', resolvedPath: '<inline:1>' }
-  const restored = await childResources(
-    { ...profile, toolInventory: ['read'], extensionSnapshot: first.extensionSnapshot },
-    '/owned',
-    '/owned/agent',
-    true,
-    host([replacement, moved])
-  )
-  assert.equal(restored.inlineExtensions.length, 1)
-  assert.equal(restored.inlineExtensions[0].factory, original.factory)
-  const afterRestart = await childResources(
-    { ...profile, toolInventory: ['read'], extensionSnapshot: first.extensionSnapshot },
-    '/owned',
-    '/owned/agent',
-    true,
-    host([replacement])
-  )
-  assert.equal(afterRestart.inlineExtensions.length, 0)
+  const restored = await childResources({
+    profile: { ...profile, toolInventory: ['read'], extensionSnapshot: first.snapshots.extensions },
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: true,
+    host: host([replacement, moved])
+  })
+  assert.equal(restored.extensions.inline.length, 1)
+  assert.equal(restored.extensions.inline[0].factory, original.factory)
+  const afterRestart = await childResources({
+    profile: { ...profile, toolInventory: ['read'], extensionSnapshot: first.snapshots.extensions },
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: true,
+    host: host([replacement])
+  })
+  assert.equal(afterRestart.extensions.inline.length, 0)
 })
 
 test('historical automatic extension inheritance without identities requires explicit reauthorization', async () => {
   await assert.rejects(
-    childResources(
-      { ...profile, toolInventory: ['read'] },
-      '/owned',
-      '/owned/agent',
-      true,
-      host([extension('unknown-old-owner')])
-    ),
+    childResources({
+      profile: { ...profile, toolInventory: ['read'] },
+      cwd: '/owned',
+      agentDir: '/owned/agent',
+      projectTrusted: true,
+      host: host([extension('unknown-old-owner')])
+    }),
     { code: 'LEGACY_RESOURCE_SNAPSHOT_REQUIRED' }
   )
 })
@@ -167,14 +179,20 @@ test('role disables and current project trust narrow even saved extension identi
     sourceInfo: { scope: 'project', kind: 'extension', path: '<inline:project>' }
   })
   const saved = { ...profile, extensionSnapshot: [entry.path] }
-  const untrusted = await childResources(saved, '/owned', '/owned/agent', false, host([entry]))
-  assert.deepEqual(untrusted.extensionSnapshot, [])
-  const disabled = await childResources(
-    { ...saved, extensions: [] },
-    '/owned',
-    '/owned/agent',
-    true,
-    host([entry])
-  )
-  assert.deepEqual(disabled.extensionSnapshot, [])
+  const untrusted = await childResources({
+    profile: saved,
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: false,
+    host: host([entry])
+  })
+  assert.deepEqual(untrusted.snapshots.extensions, [])
+  const disabled = await childResources({
+    profile: { ...saved, extensions: [] },
+    cwd: '/owned',
+    agentDir: '/owned/agent',
+    projectTrusted: true,
+    host: host([entry])
+  })
+  assert.deepEqual(disabled.snapshots.extensions, [])
 })

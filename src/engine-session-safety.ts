@@ -1,18 +1,17 @@
-import { clone, freeze } from './engine-helpers.ts'
+import { cloneJson, freeze } from './engine-helpers.ts'
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts'
 import type { AgentProfile, ChildSession, TaskRecord, TaskState } from './types.ts'
 
 const cleanupFailed = 'CHILD_CLEANUP_FAILED'
-type SafetyState = TaskState & { cleanupConfirmed?: string[] }
 const failure = (code: string, message: string): Error =>
   Object.assign(new Error(message), { code, status: 409 })
 
 // Restored resource authority and unresolved descendant cleanup belong to the session, not the model turn.
 export class SessionSafety {
   private readonly restored = new Set<string>()
-  private readonly unresolved = new Map<string, TaskRecord>()
+  private readonly unresolved = new Map<string, string>()
   private readonly orphaned = new Set<string>()
-  private state?: SafetyState
+  private state?: TaskState
 
   restore(state: TaskState): void {
     this.state = state
@@ -20,7 +19,7 @@ export class SessionSafety {
     for (const task of state.tasks) {
       this.restored.add(task.session_id)
       if (task.stopError?.code === cleanupFailed && !confirmed.has(task.task_id)) {
-        this.unresolved.set(task.session_id, task)
+        this.unresolved.set(task.session_id, task.stopError.message)
         this.orphaned.add(task.session_id)
       }
       if (task.ownedCommandCleanupPending) {
@@ -43,9 +42,9 @@ export class SessionSafety {
   }
 
   assertDispatch(): void {
-    const task = this.unresolved.values().next().value
-    if (task) {
-      throw failure(cleanupFailed, `Owner quarantined: ${task.stopError!.message}`)
+    const message = this.unresolved.values().next().value
+    if (message !== undefined) {
+      throw failure(cleanupFailed, `Owner quarantined: ${message}`)
     }
   }
 
@@ -58,7 +57,7 @@ export class SessionSafety {
         )
       }
       // Only an explicitly empty selector proves a historical empty upper bound.
-      task.profile = freeze({ ...clone(task.profile), skillSnapshot: [] })
+      task.profile = freeze({ ...cloneJson(task.profile), skillSnapshot: [] })
     }
     return task.profile
   }
@@ -75,7 +74,7 @@ export class SessionSafety {
     }
     task.stopError = { code: cleanupFailed, message: normalizeTaskError(error).message }
     task.error = task.stopError.message
-    this.unresolved.set(task.session_id, task)
+    this.unresolved.set(task.session_id, task.stopError.message)
     if (this.state?.cleanupConfirmed) {
       const ids = new Set(
         this.state.tasks

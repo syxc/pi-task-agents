@@ -50,7 +50,10 @@ for (const role of ['worker', 'verifier', 'mavis']) {
         { turnId: `same-logical-${role}` }
       )
       assert.equal(result.subTurnId, `same-logical-${role}`)
-      assert.equal(result.outcome?.status, 'succeeded')
+      assert.equal(
+        result.outcome?.kind === 'returned' ? result.outcome.status : undefined,
+        'succeeded'
+      )
       assert.equal(calls, 4)
       assert.doesNotMatch(result.text, /PREMATURE_PARENT_HANDOFF/)
       assert.match(result.text, /COMMAND_ACKNOWLEDGED/)
@@ -622,7 +625,7 @@ test('Explore and historical native ceilings cannot gain the private command sur
   for (const [name, overrides] of [
     ['explore', {}],
     ['worker', { nativeToolSnapshot: ['bash'] }]
-  ]) {
+  ] as const) {
     await f.child(
       { name, tools: ['bash', 'bash_task'], ...overrides },
       join(f.root, `${name}.jsonl`)

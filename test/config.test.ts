@@ -322,7 +322,7 @@ test('input model and Pi thinking overrides produce independent frozen profiles'
     assertFrozen(actual)
     assert.notEqual(actual.tools, config.roles.worker.tools)
     assert.throws(() => {
-      actual.tools.push('other')
+      ;(actual.tools as string[]).push('other')
     }, TypeError)
   }
   assert.equal(config.roles.worker.model, undefined)
@@ -364,15 +364,14 @@ test('input model and Pi thinking overrides produce independent frozen profiles'
 
 test('strict JSON schema rejects unknown keys, wrong types, invalid names, and integer boundaries', async (t) => {
   const paths = await setup(t)
-  const cases = [
+  const cases: Array<[unknown, RegExp]> = [
     [null, /expected an object/],
     [[], /expected an object/],
     [{ maxConcurency: 2 }, /unknown key/],
     [{ auth: {} }, /unknown key/],
-    ...[0, 11, 64, 65, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4', null].map((maxConcurrency) => [
-      { maxConcurrency },
-      /expected an integer/
-    ]),
+    ...[0, 11, 64, 65, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4', null].map(
+      (maxConcurrency): [unknown, RegExp] => [{ maxConcurrency }, /expected an integer/]
+    ),
     [{ roles: [] }, /expected an object/],
     [{ roles: { 'agent:': {} } }, /invalid role name/],
     [{ roles: { 'bad/name': {} } }, /invalid role name/],
@@ -387,7 +386,7 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
     [{ roles: { worker: { extensions: [null] } } }, /expected a string/],
     [{ roles: { worker: { skills: {} } } }, /expected an array/],
     [{ roles: { worker: { mcp: {} } } }, /expected a boolean/],
-    ...[-1, 2147483648, 2.5, '100', null].map((timeoutMs) => [
+    ...[-1, 2147483648, 2.5, '100', null].map((timeoutMs): [unknown, RegExp] => [
       { roles: { worker: { timeoutMs } } },
       /expected an integer/
     ]),
@@ -413,7 +412,10 @@ test('strict JSON schema rejects unknown keys, wrong types, invalid names, and i
     assert.equal(config.roles.worker.timeoutMs, timeoutMs)
   }
   /* oxlint-enable no-await-in-loop */
-  await assert.rejects(loadConfig({ ...paths, projectTrusted: 'true' }), /expected a boolean/)
+  await assert.rejects(
+    loadConfig({ ...paths, projectTrusted: 'true' as unknown as boolean }),
+    /expected a boolean/
+  )
 })
 
 test('trusted project schema is just as strict as global schema', async (t) => {
@@ -464,7 +466,12 @@ test('parent task controls remain unavailable and MCP business names are not ove
   ]) {
     assert.equal(roleAllowsTool('worker', name), true, name)
   }
-  const selected = { name: 'verifier', tools: ['read'], timeoutMs: 0 }
+  const selected = {
+    name: 'verifier',
+    instructions: 'Owned selector fixture',
+    tools: ['read'],
+    timeoutMs: 0
+  }
   const allow = childToolPolicy(
     selected,
     selected.tools,
@@ -517,7 +524,7 @@ test('resource loading rejects own plugin paths, symlink aliases, packages, miss
   const paths = await setup(t)
   const alias = join(paths.agentDir, 'alias')
   await symlink(root, alias)
-  const cases = [
+  const cases: Array<['extensions' | 'skills', string[], RegExp]> = [
     ['extensions', [join(root, 'src/config.ts')], /cannot load itself/],
     ['extensions', ['./alias/src/config.ts'], /cannot load itself/],
     ['skills', ['./alias'], /cannot load itself/],

@@ -5,7 +5,8 @@ import {
   Container,
   TuiMainScreen,
   stripTerminalSequences,
-  visibleWidth
+  visibleWidth,
+  type Terminal
 } from '@earendil-works/pi-tui'
 import {
   renderRoles,
@@ -41,7 +42,7 @@ function sdkRows(
     hideCursor() {},
     showCursor() {},
     stop() {}
-  })
+  } as unknown as Terminal)
   initTheme(options.appearance ?? 'dark', false)
   const host = Object.create(InteractiveMode.prototype)
   Object.assign(host, {
@@ -52,21 +53,21 @@ function sdkRows(
     widgetContainerBelow: new Container()
   })
   try {
-    host.setExtensionWidget('task-agents', (_tui, theme) => {
+    host.setExtensionWidget('task-agents', (_tui: unknown, theme: Theme) => {
       options.onTheme?.(theme)
       return taskWidget(tasks, 0, theme, clock)
     })
     return host.widgetContainerAbove
       .render(width)
       .slice(1)
-      .map((line) => (options.raw ? line : stripTerminalSequences(line)))
+      .map((line: string) => (options.raw ? line : stripTerminalSequences(line)))
   } finally {
     tui.stop()
   }
 }
 
 test('hidden task hint never displays an incomplete command', () => {
-  const widget = taskWidget([], 12, { fg: (_color, text) => text } as never, now)
+  const widget = taskWidget([], 12, { fg: (_color: unknown, text: string) => text } as never, now)
   assert.deepEqual(widget.render(20), ['12 more /tasks list'])
   assert.deepEqual(widget.render(14), ['12 more'])
   for (const width of [40, 60, 80, 120]) {
@@ -139,7 +140,10 @@ test('progress preserves graphemes at former UTF-16 cutoffs and puts critical st
       error: reason,
       cleanup_pending: true
     } as Parameters<typeof taskProgress>[0])
-    assert.equal(line.isWellFormed(), true)
+    assert.doesNotMatch(
+      line,
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+    )
     assert.ok(line.includes(description))
     assert.ok(line.includes(reason))
     assert.ok(line.startsWith('failed · cleanup pending · '))
@@ -450,7 +454,7 @@ test('SDK running exceptions keep explicit state while ordinary rows keep identi
       if ('cleanup_pending' in exception) {
         assert.match(rows.join('\n'), /cleanup pending/)
       }
-      assert.ok(rows.every((row) => visibleWidth(row) <= width))
+      assert.ok(rows.every((row: string) => visibleWidth(row) <= width))
     }
   }
 })
@@ -500,7 +504,7 @@ test('SDK cleanup warnings retain priority, short IDs and bounded rows with long
         assert.match(text, /Cannot confirm cleanup/)
       }
     }
-    assert.ok(rows.every((row) => visibleWidth(row) <= width))
+    assert.ok(rows.every((row: string) => visibleWidth(row) <= width))
   }
 })
 

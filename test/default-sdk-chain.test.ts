@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { hasCode } from '../src/guards.ts'
 
 const scenarios = fileURLToPath(
   new URL('./fixtures/default-sdk-chain/scenarios.mjs', import.meta.url)
@@ -29,7 +30,7 @@ test(
       try {
         process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL')
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        if (!hasCode(error, 'ESRCH')) {
           throw error
         }
       }

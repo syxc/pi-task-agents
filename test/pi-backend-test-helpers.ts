@@ -6,6 +6,7 @@ import * as sdk from '@earendil-works/pi-coding-agent'
 import type { AgentSession, CreateAgentSessionOptions } from '@earendil-works/pi-coding-agent'
 import { createPiChildFactory, type PiChildFactoryOptions } from '../src/pi-backend.ts'
 import type { AgentProfile, ChildSession } from '../src/types.ts'
+import { bounded } from './bounded.ts'
 
 export const answer = (text = 'done', extra: Record<string, unknown> = {}) => ({
   role: 'assistant',
@@ -133,7 +134,7 @@ export async function fixture(t: TestContext, extra: Partial<PiChildFactoryOptio
     try {
       /* oxlint-disable no-await-in-loop -- Release owned resources in order before removing the shared fixture. */
       for (const child of children) {
-        await child.dispose()
+        await bounded(child.dispose(), 10000, 'child.dispose')
       }
       /* oxlint-enable no-await-in-loop */
     } finally {

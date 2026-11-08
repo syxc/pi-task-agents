@@ -32,6 +32,7 @@
     "test/",
     "scripts/",
     "tsconfig.json",
+    "tsconfig.test.json",
     "pnpm-workspace.yaml",
     "upstream.lock.json"
   ],
@@ -44,12 +45,13 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "test": "node scripts/test.mjs",
-    "check": "pnpm run typecheck && node scripts/check.mjs && pnpm run upstream:verify && pnpm run lint && pnpm run lint:type-aware && pnpm run lint:markdown && pnpm run format:check",
+    "check": "pnpm run typecheck && pnpm run typecheck:test && node scripts/check.mjs && pnpm run upstream:verify && pnpm run lint && pnpm run lint:type-aware && pnpm run lint:markdown && pnpm run format:check",
     "lint": "oxlint -c .oxlintrc.json .",
     "lint:markdown": "markdownlint-cli2",
     "lint:markdown:fix": "markdownlint-cli2 --fix",
-    "lint:type-aware": "oxlint --type-aware -c .oxlintrc.json --report-unused-disable-directives-severity=off -A correctness -A suspicious -A perf -A style -A restriction -A pedantic -A nursery -D typescript/await-thenable -D typescript/no-floating-promises src",
+    "lint:type-aware": "oxlint --type-aware -c .oxlintrc.json --report-unused-disable-directives-severity=off -A correctness -A suspicious -A perf -A style -A restriction -A pedantic -A nursery -D typescript/await-thenable -D typescript/no-floating-promises -D typescript/no-unnecessary-type-assertion -D typescript/switch-exhaustiveness-check src",
     "format": "oxfmt .oxlintrc.json .oxfmtrc.json .markdownlint-cli2.jsonc '**/*.{mjs,json,jsonc,ts,tsx}'",
     "format:check": "oxfmt --check .oxlintrc.json .oxfmtrc.json .markdownlint-cli2.jsonc '**/*.{mjs,json,jsonc,ts,tsx}'",
     "pack": "node scripts/pack.mjs",

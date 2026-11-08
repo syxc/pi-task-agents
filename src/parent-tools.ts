@@ -9,6 +9,7 @@ import {
   type ToolDefinition
 } from '@earendil-works/pi-coding-agent'
 import type { ParentRuntimeSnapshot } from './parent-runtime.ts'
+import { isRecord } from './guards.ts'
 import { taskChildBlockedTools } from './resource-selection.ts'
 import { taskExecutionBinding, type ParentToolBinding } from './task-execution-context.ts'
 
@@ -50,6 +51,10 @@ function verifiedLeaf(tool: ReturnType<ExtensionAPI['getAllTools']>[number]): bo
       (tool.name.startsWith('mcp__') && tool.namespace?.name.startsWith('mcp__') === true))
   )
 }
+
+/** Tool execution contexts are SDK boundary data; nested calls require both members. */
+const isToolContext = (value: unknown): value is ExtensionToolContext =>
+  isRecord(value) && Array.isArray(value.tools) && typeof value.executeTool === 'function'
 
 /** Share the parent's execution pipeline, not extension factories or MCP credentials. */
 export function createParentTools(pi: ExtensionAPI) {
@@ -113,14 +118,16 @@ export function createParentTools(pi: ExtensionAPI) {
 
   return {
     bind(name: string, id: string, ctx: ExtensionContext, inline: boolean) {
-      const wrapper = (ctx as ExtensionToolContext).tools?.find((tool) => tool.name === name)
-      const binding = wrapper && {
-        owner: pi,
-        ctx: ctx as ExtensionToolContext,
-        tool: wrapper,
-        id,
-        inline
-      }
+      const toolCtx = isToolContext(ctx) ? ctx : undefined
+      const wrapper = toolCtx?.tools.find((tool) => tool.name === name)
+      const binding = toolCtx &&
+        wrapper && {
+          owner: pi,
+          ctx: toolCtx,
+          tool: wrapper,
+          id,
+          inline
+        }
       if (binding) {
         dispatchers.set(ctx, binding)
       }
@@ -140,7 +147,10 @@ export function createParentTools(pi: ExtensionAPI) {
         return
       }
       pending.delete(id)
-      return call(ctx as ExtensionToolContext)
+      if (!isToolContext(ctx)) {
+        throw new Error('Nested tool calls require a Pi tool execution context')
+      }
+      return call(ctx)
     },
     invalidate() {
       generation++
@@ -153,10 +163,12 @@ export function createParentTools(pi: ExtensionAPI) {
       if (signal?.aborted) {
         throw abortError()
       }
-      const toolCtx = ctx as ExtensionToolContext
+      if (!isToolContext(ctx)) {
+        throw new Error('Task admission requires Pi tool execution context')
+      }
       const binding = dispatchers.get(ctx)
-      const dispatcher = binding?.tool ?? toolCtx.tools?.find((tool) => tool.name === 'task')
-      if (!dispatcher || typeof toolCtx.executeTool !== 'function') {
+      const dispatcher = binding?.tool ?? ctx.tools.find((tool) => tool.name === 'task')
+      if (!dispatcher) {
         throw new Error('Task admission requires Pi tool execution context')
       }
       const admitted = generation,
@@ -172,7 +184,7 @@ export function createParentTools(pi: ExtensionAPI) {
         }
       }
       assertOwner()
-      const callable = new Set(toolCtx.tools.map((tool) => tool.name))
+      const callable = new Set(ctx.tools.map((tool) => tool.name))
       const definitions = pi
         .getAllTools()
         .filter(
