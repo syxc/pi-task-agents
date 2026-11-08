@@ -24,7 +24,11 @@ export type ParentTool = ToolDefinition & {
     permits: ToolPermission
   ) => ReturnType<ToolDefinition['execute']>
 }
-export type ToolPermission = (name: string, args: unknown) => boolean
+export type ToolPermission = (
+  name: string,
+  args: unknown,
+  registrations?: ParentTool['mcpRegistrationSources']
+) => boolean
 type Dispatch = (ctx: ExtensionToolContext) => ReturnType<ToolDefinition['execute']>
 const abortError = () =>
   Object.assign(new Error('Parent tool admission canceled'), { name: 'AbortError' })
@@ -61,7 +65,14 @@ export function createParentTools(pi: ExtensionAPI) {
   const pending = new Map<string, Dispatch>()
   const dispatchers = new WeakMap<object, ParentToolBinding>()
   const permissionIds = new WeakMap<ToolPermission, string>()
-  type Scope = { active: boolean; caller: string; check: ToolPermission; cancel: AbortController }
+  type Scope = {
+    active: boolean
+    caller: string
+    toolName: string
+    args: unknown
+    check: ToolPermission
+    cancel: AbortController
+  }
   const authority = new AsyncLocalStorage<Scope>()
   const scopes = new Set<Scope>()
   const prefix = 'task-agent-' + randomUUID() + '/'
@@ -77,6 +88,16 @@ export function createParentTools(pi: ExtensionAPI) {
       scope.cancel.abort()
     }
   }
+  const registrationSources = () =>
+    pi.getMcpServers().map((entry) => ({ name: entry.name, source: entry.extensionPath }))
+  // A later permission hook may still be waiting when a registration changes.
+  pi.on('mcp_servers_change', () => {
+    for (const scope of scopes) {
+      if (!scope.check(scope.toolName, scope.args)) {
+        scope.cancel.abort()
+      }
+    }
+  })
   // Pi clears nested-call IDs at agent_end; each child policy otherwise shares a bounded recorder.
   pi.on('agent_end', () => {
     toolEpoch++
@@ -198,7 +219,7 @@ export function createParentTools(pi: ExtensionAPI) {
       const fingerprints = new Map(
         definitions.map((definition) => [definition.name, JSON.stringify(definition)])
       )
-      const registrations = pi.getMcpServers()
+      const registrations = registrationSources()
       const tools: ParentTool[] = definitions.map((definition) => {
         const delegate: NonNullable<ParentTool['delegate']> = async (
           args,
@@ -218,6 +239,15 @@ export function createParentTools(pi: ExtensionAPI) {
           ) {
             throw new Error('Parent tool definition changed; start a new task')
           }
+          if (
+            !permits(
+              definition.name,
+              args,
+              definition.sourceInfo.path === 'builtin:mcp' ? registrationSources() : undefined
+            )
+          ) {
+            throw new Error('Parent tool call is outside the delegated child scope')
+          }
           let policyId = permissionIds.get(permits)
           if (!policyId) {
             policyId = randomUUID()
@@ -235,6 +265,8 @@ export function createParentTools(pi: ExtensionAPI) {
           const scope: Scope = {
             active: true,
             caller,
+            toolName: definition.name,
+            args,
             cancel,
             check: (name, input) => {
               try {
@@ -242,7 +274,11 @@ export function createParentTools(pi: ExtensionAPI) {
                 const live = pi.getAllTools().find((tool) => tool.name === name)
                 return (
                   !combined.aborted &&
-                  permits(name, input) &&
+                  permits(
+                    name,
+                    input,
+                    live?.sourceInfo.path === 'builtin:mcp' ? registrationSources() : undefined
+                  ) &&
                   !!live &&
                   verifiedLeaf(live) &&
                   JSON.stringify(live) === fingerprints.get(name)
@@ -286,11 +322,8 @@ export function createParentTools(pi: ExtensionAPI) {
           delegate,
           mcpRegistrationSource: registrations.find(
             (entry) => definition.namespace?.name === 'mcp__' + entry.name.replace(/-/g, '_')
-          )?.extensionPath,
-          mcpRegistrationSources: registrations.map((entry) => ({
-            name: entry.name,
-            source: entry.extensionPath
-          })),
+          )?.source,
+          mcpRegistrationSources: registrations,
           execute: (_id, args, callSignal, onUpdate, childCtx) =>
             delegate(args, callSignal, onUpdate, (name) =>
               childCtx.tools.some((tool) => tool.name === name)

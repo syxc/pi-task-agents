@@ -21,7 +21,7 @@ import {
   projectedResult,
   type TaskToolResult
 } from './tool-result-common.ts'
-import { appendFailure, appendResult, knownAppendFailure, taskResult } from './tool-result-task.ts'
+import { appendFailure, appendResult, taskResult } from './tool-result-task.ts'
 import {
   OutputProjector,
   outputFailure,
@@ -287,7 +287,7 @@ export function registerTaskAgents(
         }
         return appendResult(await controller.append({ task_id: taskId, content }, id, signal, ctx))
       } catch (error) {
-        const failure = knownAppendFailure(error)
+        const failure = knownFailure(error)
         if (failure) {
           return appendFailure(taskId, failure)
         }

@@ -102,9 +102,9 @@ test('private logs have UTF-8 byte cursors, restrictive modes, bounded reads and
   t.after(() => rm(root, { recursive: true, force: true }))
   const logs = new CommandLogs(join(root, 'child.jsonl'))
   const id = createBackgroundTaskId()
-  const fd = logs.create(id)
-  logs.append(fd, Buffer.from('中🙂Z'))
-  logs.close(fd)
+  const handle = await logs.createHandle(id)
+  logs.append(handle.fd, Buffer.from('中🙂Z'))
+  await handle.close()
   assert.equal((await stat(logs.root)).mode & 0o777, 0o700)
   assert.equal((await stat(join(logs.root, id + '.log'))).mode & 0o777, 0o600)
   assert.deepEqual(logs.read(id, 0, 1), {
@@ -126,7 +126,7 @@ test('private logs have UTF-8 byte cursors, restrictive modes, bounded reads and
   assert.throws(() => logs.read(alias, 0), /ELOOP/)
   const linked = new CommandLogs(join(root, 'linked.jsonl'))
   await symlink(logs.root, linked.root)
-  assert.throws(() => linked.create(createBackgroundTaskId()), /must not be a symlink/)
+  assert.throws(() => linked.createHandle(createBackgroundTaskId()), /must not be a symlink/)
   assert.equal(await readFile(join(logs.root, id + '.log'), 'utf8'), '中🙂Z')
 })
 

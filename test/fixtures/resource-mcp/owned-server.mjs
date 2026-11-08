@@ -51,6 +51,16 @@ input.on('line', (line) => {
         }
       ]
     }
+  } else if (request.method === 'resources/read') {
+    result = {
+      contents: [
+        {
+          uri: request.params.uri,
+          mimeType: 'text/plain',
+          text: `OWNED_MCP_READ:${label}:${++calls}`
+        }
+      ]
+    }
   } else if (request.method === 'resources/templates/list') {
     result = { resourceTemplates: [] }
   } else if (request.method === 'ping') {

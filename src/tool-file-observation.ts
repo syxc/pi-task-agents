@@ -8,6 +8,7 @@ import { extractToolWritePaths } from './vendor/mcode-adapters/file-write-target
 import { within } from './resource-selection.ts'
 import { buildVerification } from './task-verification.ts'
 import { captureWorkspace, type WorkspaceSnapshot } from './workspace-observation.ts'
+import { isRecord } from './guards.ts'
 
 interface Run {
   id: string
@@ -26,10 +27,6 @@ const readonlyTools = new Set(['read', 'grep', 'find', 'ls'])
 const shells = new Set(['bash', 'shell', 'sh', 'zsh', 'powershell', 'pwsh'])
 const scopeNote =
   'Tool-target metadata only; file contents are not read. Excluded, dynamic or incomplete targets are uncertain. Observed changes are not attributed to this child and are not a universal write audit.'
-const object = (value: unknown): Record<string, unknown> =>
-  value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {}
 
 /** Observe actual native tool calls, including nested codemode calls, without reading file contents. */
 export function createToolFileObservation(options: {
@@ -159,7 +156,7 @@ export function createToolFileObservation(options: {
     ) {
       return
     }
-    const args = object(input)
+    const args = isRecord(input) ? input : {}
     const relevant = [
       'file_path',
       'filePath',
@@ -244,7 +241,7 @@ export function createToolFileObservation(options: {
       scope.notes.add('tool_before_capture_unavailable')
       return
     }
-    if (JSON.stringify(targets(name, object(input))) !== capture.targets) {
+    if (JSON.stringify(targets(name, isRecord(input) ? input : {})) !== capture.targets) {
       scope.notes.add('tool_targets_changed')
     }
     if (failed) {

@@ -177,7 +177,6 @@ export class TaskStore {
   readonly dir: string
   readonly file: string
   private tail: Promise<void>
-  private lockDir?: string
   private lockPath?: string
 
   constructor(rootDir: string, parentId: string) {
@@ -193,19 +192,19 @@ export class TaskStore {
     await chmod(this.rootDir, 0o700)
     await mkdir(this.dir, { recursive: true, mode: 0o700 })
     await chmod(this.dir, 0o700)
-    this.lockDir = join(this.dir, 'owners')
-    await mkdir(this.lockDir, { mode: 0o700 }).catch((error: unknown) => {
+    const lockDir = join(this.dir, 'owners')
+    await mkdir(lockDir, { mode: 0o700 }).catch((error: unknown) => {
       if (!hasCode(error, 'EEXIST')) {
         throw error
       }
     })
     // Unique candidates avoid deleting a successor's lock during stale-owner recovery.
-    this.lockPath = join(this.lockDir, `${process.pid}-${randomUUID()}.lock`)
+    this.lockPath = join(lockDir, `${process.pid}-${randomUUID()}.lock`)
     const handle = await open(this.lockPath, 'wx', 0o600)
     await handle.close()
     try {
-      for (const name of await readdir(this.lockDir)) {
-        const path = join(this.lockDir, name)
+      for (const name of await readdir(lockDir)) {
+        const path = join(lockDir, name)
         if (path === this.lockPath) {
           continue
         }

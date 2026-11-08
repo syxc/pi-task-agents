@@ -221,8 +221,6 @@ export class CommandOutput {
         const text = textOf(value)
         if (text.startsWith(this.prefix)) {
           this.logs.append(this.writer.fd, Buffer.from(text.slice(this.prefix.length)))
-        } else if (text && !this.prefix) {
-          this.logs.append(this.writer.fd, Buffer.from(text))
         } else if (text) {
           // The final text no longer extends the streamed prefix, so the log cannot
           // prove it contains the complete output; report that instead of silence.

@@ -690,21 +690,17 @@ export class TaskController {
         this.retryAt.set(task.task_id, now + delay)
       }
     }
-    let delivered = false
     try {
       this.pi.sendMessage(
         this.notificationMessage(batch, parentId),
         wake ? { triggerTurn: true, deliverAs: 'followUp' } : { deliverAs: 'nextTurn' }
       )
-      delivered = true
+      this.burstDelivered++
     } catch (error) {
       for (const task of batch) {
         this.inFlight.delete(task.task_id)
       }
       this.warn(error)
-    }
-    if (delivered) {
-      this.burstDelivered++
     }
     // sendMessage returns void; a later disk/idle check also catches asynchronous failures.
     this.armRetryTimer(pending)
@@ -1017,16 +1013,9 @@ export class TaskController {
       admission.abort()
     }
     await this.initializing
-    let closed = false
-    try {
-      await this.closeOwner(preserve)
-      closed = true
-    } finally {
-      // Do not immediately retry a close that just failed; the retained owner keeps
-      // its quarantine and is retried by a later shutdown or reattach.
-      if (!preserve && closed) {
-        await closeDetachedOwners(join(this.agentDir, 'task-agents', 'sessions'))
-      }
+    await this.closeOwner(preserve)
+    if (!preserve) {
+      await closeDetachedOwners(join(this.agentDir, 'task-agents', 'sessions'))
     }
   }
 }

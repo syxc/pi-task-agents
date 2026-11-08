@@ -558,3 +558,22 @@ test('returned model failures and true input exceptions preserve terminal proven
     return true
   })
 })
+
+test('a transient extension failure does not poison later turns of the same child', async (t) => {
+  const f = await fixture(t),
+    extension = join(f.root, 'transient-input.mjs')
+  await writeFile(
+    extension,
+    `export default pi => pi.on('input', event => {
+      if (event.text.endsWith('_TRANSIENT_FAILURE')) throw Error(event.text);
+    });`
+  )
+  const child = await f.child({ extensions: [extension] })
+  await assert.rejects(child.prompt('FIRST_TRANSIENT_FAILURE'), /FIRST_TRANSIENT_FAILURE/)
+  f.script(() => answer('RECOVERED_CHILD_TURN'))
+  assert.equal(
+    (await child.prompt('Continue after the transient error')).text,
+    'RECOVERED_CHILD_TURN'
+  )
+  await assert.rejects(child.prompt('NEXT_TRANSIENT_FAILURE'), /NEXT_TRANSIENT_FAILURE/)
+})

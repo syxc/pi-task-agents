@@ -29,7 +29,6 @@ import {
   childToolPolicy,
   normalizedSelectorName,
   normalizeSelector,
-  recursiveTools,
   taskChildBlockedTools,
   roleAllowsTool,
   within
@@ -566,7 +565,7 @@ export function createPiChildFactory({
           extraTools.add(name)
         }
       }
-      const excludeTools = [...new Set([...recursiveTools, ...taskChildBlockedTools])]
+      const excludeTools = [...taskChildBlockedTools]
       if (!allow('codemode')) {
         excludeTools.push('codemode')
       }
@@ -745,6 +744,7 @@ export function createPiChildFactory({
           ) {
             return Promise.reject(new Error('Turn ID must be a nonempty string'))
           }
+          extensionError = undefined
           const run: ChildRun = {
             id: options.turnId ?? randomUUID(),
             controller: new AbortController(),
