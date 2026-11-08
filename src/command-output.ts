@@ -1,8 +1,8 @@
 import {
   constants,
-  fstatSync,
   lstatSync,
   linkSync,
+  readSync,
   realpathSync,
   renameSync,
   unlinkSync,
@@ -39,6 +39,7 @@ export class CommandOutput {
   private nativePath?: string
   private nativeTruncated = false
   private prefix = ''
+  private aligned?: boolean
   incomplete = false
   private constructor(logs: CommandLogs, id: string, changed: () => void) {
     this.logs = logs
@@ -116,13 +117,30 @@ export class CommandOutput {
     }
     this.changed()
   }
+  // A decoded prefix and the raw source share byte cursors only when their bytes agree.
+  private sourceAligned(source: { handle: FileHandle }): boolean {
+    if (this.aligned === undefined) {
+      const expected = Buffer.byteLength(this.prefix)
+      const bytes = Buffer.alloc(expected)
+      let offset = 0
+      while (offset < expected) {
+        const count = readSync(source.handle.fd, bytes, offset, expected - offset, offset)
+        if (count === 0) {
+          break
+        }
+        offset += count
+      }
+      this.aligned = offset === expected && bytes.toString('utf8') === this.prefix
+      if (!this.aligned) {
+        this.incomplete = true
+      }
+    }
+    return this.aligned
+  }
   read(offset: number) {
-    if (
-      this.source &&
-      this.source.handle.fd >= 0 &&
-      fstatSync(this.source.handle.fd).size >= Buffer.byteLength(this.prefix)
-    ) {
-      return readCommandFd(this.source.handle.fd, offset)
+    const source = this.source
+    if (source && source.handle.fd >= 0 && this.sourceAligned(source)) {
+      return readCommandFd(source.handle.fd, offset)
     }
     return this.logs.read(this.id, offset)
   }
