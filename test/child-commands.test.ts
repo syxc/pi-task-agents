@@ -219,6 +219,55 @@ test(
 )
 
 test(
+  'a silent command stopped before producing output does not persist an internal abort error',
+  { timeout: 10000 },
+  async (t) => {
+    const f = await fixture(t),
+      child = await f.child({ name: 'worker', tools: ['bash'] })
+    let id = ''
+    const previous = () => {
+      const message = f
+        .session()
+        .messages.findLast(
+          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
+        )
+      assert.ok(message && message.role === 'toolResult')
+      return JSON.parse(
+        message.content
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text)
+          .join('')
+      )
+    }
+    f.script((step) => {
+      if (step === 1) {
+        id = ''
+        return tool('bash_task', {
+          action: 'start',
+          command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify('setInterval(()=>{},1000)')}`
+        })
+      }
+      if (step === 2) {
+        id = previous().command_id
+        return tool('bash_task', { action: 'stop', command_id: id })
+      }
+      if (step === 3) {
+        return tool('bash_task', { action: 'output', command_id: id, offset: 0 })
+      }
+      assert.equal(step, 4)
+      const value = previous()
+      assert.equal(value.status, 'canceled')
+      assert.doesNotMatch(value.output, /Parent tool admission canceled/)
+      return answer('SILENT_STOP_ACKNOWLEDGED')
+    })
+    const result = await child.prompt('Stop a silent owned command before it writes output.')
+    assert.equal(result.text, 'SILENT_STOP_ACKNOWLEDGED')
+    const log = join(f.session().sessionFile! + '.commands', id + '.log')
+    assert.equal(await readFile(log, 'utf8'), '', 'cancellation must not become command output')
+  }
+)
+
+test(
   'a native command timeout reports failure and returns through the same logical task',
   { timeout: 10000 },
   async (t) => {

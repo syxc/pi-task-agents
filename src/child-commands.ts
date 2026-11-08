@@ -278,7 +278,13 @@ export async function createChildCommands(options: {
         } finally {
           input.run.signal.removeEventListener('abort', onAbort)
           try {
-            await commandOutput.finish(result)
+            // An abort can surface as a tool error; that internal text is not command output.
+            // A stop that timed out keeps the late survivor's real result instead.
+            await commandOutput.finish(
+              failed && controller.signal.aborted && !execution.cleanupUnconfirmed
+                ? undefined
+                : result
+            )
           } catch (failure) {
             commandOutput.incomplete = true
             error ??= failure
