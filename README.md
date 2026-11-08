@@ -225,10 +225,11 @@ pnpm run pack
 开发使用 Node >= 22.19.0、pnpm 11.15.1 和 TypeScript 7.0.2；`packageManager` 固定 pnpm 版本。开发依赖的 Pi SDK 与 `pi-ai` 同版锁定为 1.5.0；工具链及 typebox、Node 类型的固定版本见 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml)。[pnpm-workspace.yaml](pnpm-workspace.yaml) 将 `markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
 
 - `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `pnpm run lint`、`pnpm run lint:type-aware`、`pnpm run lint:markdown`、`pnpm run format:check`；`pnpm run format` 仅格式化自有代码与配置，不改上游锁定源码。
-- `test`：直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试。`typescript-fixture` 固定为 `npm:typescript@5.9.3`，仅用于动态编译上游原文 fixture；项目 `tsc` 和类型检查仍使用 7.0.2。
+- `test`：直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试。`typescript-fixture` 固定为 `npm:typescript@5.9.3`，仅用于动态编译上游原文 fixture；项目 `tsc` 和类型检查仍使用 7.0.2。默认离线，不包含 `test/e2e`。
+- `test:e2e`：真实模型端到端回归，默认不随 `test` 运行。运行 `pnpm test:e2e`，或追加文件名片段只跑部分场景（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-sol` 和 `gpt-6-luna`，在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；设置 `PI_E2E_KEEP=1` 可保留现场。每次运行消耗真实额度。场景覆盖前台写入与查询、后台完成通知、并行后台、`task_append`、`task_send`、父会话重启续接、输出等待与 30 秒上限、停止、explore/verifier、skill 继承、错误边界和模型继承；每个场景检查父/子 token、费用、消息数与耗时预算，阈值可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整。MCP 与第三方 provider 不在真实模型覆盖范围内。
 - `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证。内部使用 Node 随附的 `npm pack --ignore-scripts`，避免 pnpm 打包时移除清单末尾换行而导致提取包格式检查失败；npm 不用于依赖安装。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
 
-离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收。真实模型和第三方业务验收须另行授权；`scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度。
+离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收。真实模型和第三方业务验收须另行授权；`pnpm test:e2e` 以及 `scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度。
 
 ### 上游维护
 
