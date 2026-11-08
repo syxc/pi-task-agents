@@ -51,7 +51,7 @@ export function failureResult(
   error: CodedFailure,
   extra: Record<string, unknown> = {}
 ): TaskToolResult {
-  const text = `<${tag} task_id="${escapeAttribute(taskId)}" code="${escapeAttribute(error.code)}">${error.message}</${tag}>`
+  const text = `<${tag} task_id="${escapeAttribute(taskId)}" code="${escapeAttribute(error.code)}">${escapeText(error.message)}</${tag}>`
   return projectedResult(
     toolName,
     text,

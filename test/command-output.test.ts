@@ -181,3 +181,19 @@ test('native source replacement uses the pinned FileHandle with bounded-copy fal
   assert.equal(f.output.incomplete, false)
   assert.deepEqual(await readFile(join(f.logs.root, f.id + '.log')), bytes)
 })
+
+test('malformed bytes inside a native spool are reported when decoded, not silently replaced', async (t) => {
+  const f = await fixture(t),
+    bytes = Buffer.concat([
+      Buffer.from('HEAD'),
+      Buffer.from([0xf0, 0x90, 0x80]),
+      Buffer.from('TAIL\n'),
+      Buffer.alloc(100000, 'x')
+    ])
+  const source = await f.native(bytes)
+  await f.output.finish(snapshot(source))
+  const value = f.output.read(0)
+  assert.match(value.output, /HEAD\uFFFDTAIL/)
+  assert.equal(value.output_incomplete, true)
+  assert.deepEqual(await readFile(join(f.logs.root, f.id + '.log')), bytes)
+})

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { TaskEngine } from '../src/engine.ts'
-import { isAccepting } from '../src/runtime-phase.ts'
+import { isAccepting, stopOf } from '../src/runtime-phase.ts'
 import { TaskDomain } from '../src/task-domain.ts'
 import { taskIdFromTurnId, taskTurnId } from '../src/vendor/mcode-adapters/task-turn-id.ts'
 import {
@@ -1743,6 +1743,45 @@ test('regression: upstream failed stop returns canceled + TASK_STOP_FAILED while
   } finally {
     await restored.close()
   }
+})
+
+test('a timed-out running task with failed abort keeps its notice for the late prompt result', async (t) => {
+  const notifications: TaskSummary[] = []
+  const { engine, children } = await setup(t, {
+    maxConcurrency: 1,
+    notify: (task) => {
+      notifications.push(task)
+    }
+  })
+  const task = await engine.start(input(), { ...profile, timeoutMs: 1000 })
+  const queued = await engine.start(input('queued successor'), profile)
+  await waitFor(() => children[0]?.calls.length)
+  const runtime = engine.runtimes.get(task.task_id)!
+  children[0].abort = async () => {
+    throw new Error('child abort remains unconfirmed')
+  }
+  await waitFor(() => engine.task(task.task_id).status === 'failed')
+  await stopOf(runtime.phase)?.aborting
+  assert.equal(notifications.length, 0, 'a live prompt must retain its final-result delivery')
+  assert.equal(engine.task(task.task_id).stopError?.code, 'TASK_STOP_FAILED')
+  assert.equal(engine.runtimes.get(task.task_id), runtime)
+  assert.equal(engine.task(queued.task_id).status, 'queued')
+
+  children[0].calls[0].resolve(terminalResult('succeeded', 'late result'))
+  await runtime.done
+  assert.equal(notifications.length, 1)
+  assert.equal(notifications[0].final_text, 'late result')
+  assert.equal(notifications[0].notification_pending, true)
+  assert.deepEqual(
+    (await engine.pendingNotifications()).map((item) => item.task_id),
+    [task.task_id]
+  )
+  assert.equal(engine.task(task.task_id).status, 'failed')
+  assert.equal(engine.task(task.task_id).output, 'late result')
+  assert.equal(
+    JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].notification_pending,
+    true
+  )
 })
 
 test('regression: failed admission cannot dispatch on a later start and retry requires reopening', async (t) => {

@@ -1,6 +1,6 @@
 import { basename, dirname, resolve } from 'node:path'
 import type { AgentProfile } from './types.ts'
-import type { ParentTool } from './parent-tools.ts'
+import type { ParentTool, ToolPermission } from './parent-tools.ts'
 import { isRecord } from './guards.ts'
 import {
   childToolPolicy,
@@ -103,24 +103,34 @@ export function selectParentTools(
     serverFor
   )
   const definitions = new Map(tools.map((tool) => [tool.name, tool]))
-  const permits = (name: string, args: unknown) => {
+  const permits: ToolPermission = (name, args, registrations) => {
     const tool = definitions.get(name)
     if (!tool || !policy(name)) {
       return false
     }
+    if (isSelectorMcp(name)) {
+      const source =
+        registrations === undefined
+          ? tool.mcpRegistrationSource
+          : registrations.find(
+              (entry) => tool.namespace?.name === 'mcp__' + entry.name.replace(/-/g, '_')
+            )?.source
+      if (source && (!sourceAllowed(source) || !sources.has(source))) {
+        return false
+      }
+    }
     if (mcpResources.includes(normalizedSelectorName(name))) {
       const blockedServers = new Set(
-        (tool.mcpRegistrationSources ?? [])
-          .filter((entry) => !sourceAllowed(entry.source))
+        (registrations ?? tool.mcpRegistrationSources ?? [])
+          .filter((entry) => !sourceAllowed(entry.source) || !sources.has(entry.source))
           .map((entry) => normalizedSelectorName(entry.name))
       )
       if (servers || blockedServers.size) {
-        const server = isRecord(args) ? args.server : undefined
-        if (
-          typeof server !== 'string' ||
-          (servers && !servers.has(normalizedSelectorName(server))) ||
-          blockedServers.has(normalizedSelectorName(server))
-        ) {
+        const server =
+          isRecord(args) && typeof args.server === 'string'
+            ? normalizedSelectorName(args.server)
+            : undefined
+        if (!server || (servers && !servers.has(server)) || blockedServers.has(server)) {
           return false
         }
       }
@@ -130,7 +140,8 @@ export function selectParentTools(
   const selected = tools.map((tool) => ({
     ...tool,
     async execute(...args: Parameters<ParentTool['execute']>) {
-      if (!permits(tool.name, args[1])) {
+      // Delegates use live provenance: a removed registration may now be file-backed.
+      if (!tool.delegate && !permits(tool.name, args[1])) {
         throw new Error('Tool call requires an allowed server and child scope')
       }
       return tool.delegate

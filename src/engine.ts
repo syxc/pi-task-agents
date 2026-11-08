@@ -16,6 +16,7 @@ import {
   appendTerminalOutput,
   exceptionOutcome,
   runnerOutcome,
+  toTerminalProjection,
   type TaskTerminalOutcome
 } from './engine-terminal.ts'
 import { SessionSafety } from './engine-session-safety.ts'
@@ -225,6 +226,17 @@ export class TaskEngine {
     }
     try {
       Promise.resolve(this.onChange?.(this.summary(task))).catch(() => {})
+    } catch {
+      // Ignore synchronous callback failures; async failures are already contained.
+    }
+  }
+
+  private notifyCompletion(task: TaskRecord): void {
+    if (!task.notification_pending) {
+      return
+    }
+    try {
+      Promise.resolve(this.notify?.(this.summary(task))).catch(() => {})
     } catch {
       // Ignore synchronous callback failures; async failures are already contained.
     }
@@ -755,7 +767,16 @@ export class TaskEngine {
       }
       session.active = undefined
       try {
-        const terminal = appendTerminalOutput(task, outcome)
+        // An initialization-only drain must not repeat the already published synthetic stop report.
+        const terminal =
+          stop?.initialization &&
+          task.output &&
+          !('failure' in outcome) &&
+          outcome.status === 'aborted' &&
+          outcome.finalText === undefined &&
+          outcome.errorMessage === stop.reason
+            ? toTerminalProjection(outcome)
+            : appendTerminalOutput(task, outcome)
         if (pending.has(task.status) && task.error === undefined && terminal.lastError) {
           task.error = terminal.lastError.message
         }
@@ -766,13 +787,7 @@ export class TaskEngine {
         await this.persist()
         this.uncommittedTerminals.delete(task.task_id)
         this.changed(task)
-        if (task.notification_pending) {
-          try {
-            Promise.resolve(this.notify?.(this.summary(task))).catch(() => {})
-          } catch {
-            // Ignore synchronous callback failures; async failures are already contained.
-          }
-        }
+        this.notifyCompletion(task)
       } catch (error) {
         this.latchStorageError(error)
         this.changed(task)
@@ -781,6 +796,15 @@ export class TaskEngine {
         this.runtimes.delete(task.task_id)
       }
       this.pump()
+    }
+  }
+
+  private recordInitializationStopOutput(task: TaskRecord, stop: RuntimeStop): void {
+    if (!task.output) {
+      appendTerminalOutput(task, {
+        status: stop.status === 'canceled' ? 'aborted' : 'failed',
+        errorMessage: [stop.reason, task.stopError?.message].filter(Boolean).join('; ')
+      })
     }
   }
 
@@ -848,11 +872,13 @@ export class TaskEngine {
           task.finished_at = new Date().toISOString()
           task.notification_pending = stop.status !== 'canceled' && task.notify_completion !== false
         }
+        this.recordInitializationStopOutput(task, stop)
         this.uncommittedTerminals.add(task.task_id)
         this.changed(task)
         const marker = this.persist()
           .then(() => {
             this.uncommittedTerminals.delete(task.task_id)
+            this.notifyCompletion(task)
           })
           .catch((error) => {
             this.latchStorageError(error)
@@ -993,8 +1019,14 @@ export class TaskEngine {
             task.finished_at = new Date().toISOString()
             task.notification_pending = status !== 'canceled' && task.notify_completion !== false
           }
+          if (initialization) {
+            this.recordInitializationStopOutput(task, stop)
+          }
           try {
             await this.persist()
+            if (initialization) {
+              this.notifyCompletion(task)
+            }
           } catch (failure) {
             this.latchStorageError(failure)
           }

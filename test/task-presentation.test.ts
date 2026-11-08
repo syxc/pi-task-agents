@@ -292,7 +292,16 @@ test(
   }
 )
 
-test('SDK tool state words use semantic theme colors, not the goal or tool name', () => {
+test('SDK tool state words use semantic theme colors, not the goal or tool name', (t) => {
+  const previous = process.env.NO_COLOR
+  delete process.env.NO_COLOR
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.NO_COLOR
+    } else {
+      process.env.NO_COLOR = previous
+    }
+  })
   for (const appearance of ['dark', 'light']) {
     for (const width of [20, 40, 80, 120]) {
       const colors = new Set<string>()

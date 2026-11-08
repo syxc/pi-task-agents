@@ -8,7 +8,8 @@ import * as sdk from '@earendil-works/pi-coding-agent'
 import { registerTaskAgents } from '../src/extension.ts'
 import { answer, fixture, tool } from './pi-backend-test-helpers.ts'
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
-import type { Message } from '@earendil-works/pi-ai'
+import { getCurrentSystemPrompt, type Message } from '@earendil-works/pi-ai'
+import type { AgentProfile } from '../src/types.ts'
 
 const server = fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url))
 
@@ -326,6 +327,96 @@ test(
     }
   }
 )
+
+for (const scenario of ['default', 'custom-default', 'custom-removed', 'explicit-empty'] as const) {
+  test(`real SDK Skill restore keeps inherited defaults within the saved ceiling: ${scenario}`, async (t) => {
+    const f = await fixture(t, {
+      resourceLoader: {
+        getExtensions: () => ({ extensions: [] }),
+        getSkills: () => parentLoader.getSkills()
+      }
+    })
+    const name = scenario.startsWith('custom-') ? 'agent:owned' : 'worker'
+    const configPath = join(f.agentDir, 'task-agents.json')
+    await writeFile(configPath, JSON.stringify({ roles: { [name]: {} } }))
+    const original = join(f.agentDir, 'skills', 'owned-original')
+    await mkdir(original, { recursive: true })
+    await writeFile(
+      join(original, 'SKILL.md'),
+      '---\nname: owned-original\ndescription: OWNED_ORIGINAL_SKILL_METADATA\n---\nOwned fixture.\n'
+    )
+    const parentLoader = new sdk.DefaultResourceLoader({
+      cwd: f.cwd,
+      agentDir: f.agentDir,
+      settingsManager: sdk.SettingsManager.inMemory({}, { projectTrusted: false }),
+      noExtensions: true,
+      noSkills: true,
+      additionalSkillPaths: [join(f.agentDir, 'skills')],
+      noPromptTemplates: true,
+      noThemes: true
+    })
+    await parentLoader.reload()
+    assert.deepEqual(
+      parentLoader.getSkills().skills.map((skill) => skill.name),
+      ['owned-original']
+    )
+    let saved!: AgentProfile
+    const first = await f.child({ name, skills: undefined }, undefined, async (value) => {
+      saved = value
+    })
+    f.script((_step, context) => {
+      assert.match(getCurrentSystemPrompt(context.messages), /OWNED_ORIGINAL_SKILL_METADATA/)
+      return answer('ORIGINAL_SKILL_ACCEPTED')
+    })
+    assert.equal((await first.prompt('Use the inherited Skill.')).text, 'ORIGINAL_SKILL_ACCEPTED')
+    assert.deepEqual(saved.skillSnapshot, ['owned-original'])
+    await first.dispose()
+
+    const added = join(f.agentDir, 'skills', 'owned-later')
+    await mkdir(added)
+    await writeFile(
+      join(added, 'SKILL.md'),
+      '---\nname: owned-later\ndescription: OWNED_LATER_SKILL_METADATA\n---\nOwned fixture.\n'
+    )
+    await parentLoader.reload()
+    assert.deepEqual(
+      parentLoader
+        .getSkills()
+        .skills.map((skill) => skill.name)
+        .sort(),
+      ['owned-later', 'owned-original']
+    )
+    if (scenario === 'custom-removed') {
+      await writeFile(configPath, JSON.stringify({ roles: {} }))
+    } else if (scenario === 'explicit-empty') {
+      await writeFile(configPath, JSON.stringify({ roles: { [name]: { skills: [] } } }))
+    }
+    const expected =
+      scenario === 'default' || scenario === 'custom-default' ? ['owned-original'] : []
+    let restoredProfile!: AgentProfile
+    const restored = await f.child(saved, first.sessionPath, async (value) => {
+      restoredProfile = value
+    })
+    assert.deepEqual(
+      f
+        .options()
+        .resourceLoader!.getSkills()
+        .skills.map((skill) => skill.name),
+      expected
+    )
+    assert.deepEqual(restoredProfile.skillSnapshot, expected)
+    f.script((_step, context) => {
+      const prompt = getCurrentSystemPrompt(context.messages)
+      assert.equal(prompt.includes('OWNED_ORIGINAL_SKILL_METADATA'), expected.length > 0)
+      assert.doesNotMatch(prompt, /OWNED_LATER_SKILL_METADATA/)
+      return answer('RESTORED_SKILL_CEILING_CHECKED')
+    })
+    assert.equal(
+      (await restored.prompt('Continue the owned task.')).text,
+      'RESTORED_SKILL_CEILING_CHECKED'
+    )
+  })
+}
 
 test('inherited MCP tools also execute through native codemode', { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { isCodemodeEnabled: () => true })

@@ -1,9 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TaskController, RESULT_TYPE } from '../src/controller.ts'
 import { taskWidget } from '../src/task-presentation.ts'
+import { OutputProjector, outputWait } from '../src/tool-result-control.ts'
 import {
   AgentSession,
   InteractiveMode,
@@ -16,6 +18,7 @@ import {
   stripTerminalSequences,
   visibleWidth
 } from '@earendil-works/pi-tui'
+import { bounded } from './bounded.ts'
 
 function widgetHost(width = 80) {
   const writes = []
@@ -1645,7 +1648,17 @@ test('SDK task selection promotes cleanup at the end without placing queued work
   }
 })
 
-test('SDK task widget preserves grapheme prefixes and follows live themes on invalidation', async () => {
+test('SDK task widget preserves grapheme prefixes and follows live themes on invalidation', async (t) => {
+  const previous = process.env.NO_COLOR
+  delete process.env.NO_COLOR
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.NO_COLOR
+    } else {
+      process.env.NO_COLOR = previous
+    }
+    initTheme('dark', false)
+  })
   const f = fixture()
   const { host, tui } = widgetHost()
   f.ctx.hasUI = true
@@ -1689,7 +1702,6 @@ test('SDK task widget preserves grapheme prefixes and follows live themes on inv
     assert.deepEqual(light.map(stripTerminalSequences), dark.map(stripTerminalSequences))
     assert.match(light.map(stripTerminalSequences).join('\n'), /^active · /)
   } finally {
-    initTheme('dark', false)
     await f.controller.shutdown()
     tui.stop()
   }
@@ -2073,5 +2085,135 @@ test('real TaskEngine lifecycle releases the store and reopens persisted tasks a
     assert.equal((await second.controller.engine.query()).length, 1)
   } finally {
     await second.controller.shutdown()
+  }
+})
+
+test('initialization timeout wakes the owning controller after persisting its cleanup report', async (t) => {
+  const agentDir = await mkdtemp(join(tmpdir(), 'controller-initialization-notice-'))
+  t.after(() => rm(agentDir, { recursive: true, force: true }))
+  const entered = deferred(),
+    factory = deferred(),
+    disposing = deferred(),
+    cleanup = deferred(),
+    notified = deferred()
+  const entries = [],
+    messages = []
+  let prompts = 0
+  const controller = new TaskController(
+    {
+      ...runtimeAPI,
+      getThinkingLevel: () => 'off',
+      appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }),
+      sendMessage: (...args) => {
+        messages.push(args)
+        notified.resolve()
+      }
+    },
+    {
+      agentDir,
+      configLoader: async () => ({
+        maxConcurrency: 1,
+        roles: {
+          worker: { name: 'worker', instructions: '', tools: [], timeoutMs: 1000 }
+        },
+        diagnostics: []
+      }),
+      childFactory:
+        () =>
+        async ({ sessionPath }) => {
+          entered.resolve()
+          await factory.promise
+          return {
+            sessionPath,
+            prompt: async () => {
+              prompts++
+              return { text: 'must not run', outcome: { kind: 'returned', status: 'succeeded' } }
+            },
+            steer: async () => {},
+            abort: async () => {},
+            dispose: async () => {
+              disposing.resolve()
+              await cleanup.promise
+            }
+          }
+        }
+    }
+  )
+  const ctx = {
+    cwd: agentDir,
+    mode: 'tui',
+    hasUI: false,
+    model: { provider: 'fake', id: 'parent' },
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    sessionManager: { getSessionId: () => 'initialization-parent', getEntries: () => entries }
+  }
+  try {
+    const task = await controller.start(
+      {
+        agent_name: 'worker',
+        description: 'initialization notice',
+        prompt: 'offline',
+        run_in_background: true
+      },
+      'initialization-notice',
+      undefined,
+      ctx
+    )
+    const engine = controller.engine
+    await bounded(entered.promise, 4000, 'child factory entry')
+    const runtime = engine.runtimes.get(task.task_id)
+    await bounded(notified.promise, 4000, 'initialization timeout notification')
+    assert.equal(prompts, 0)
+    assert.equal(engine.runtimes.get(task.task_id), runtime)
+    assert.equal(messages[0][0].details.parent_id, 'initialization-parent')
+    assert.equal(messages[0][0].details.task_id, task.task_id)
+    assert.match(messages[0][0].content, /cleanup_pending: true/)
+    assert.deepEqual(messages[0][1], { triggerTurn: true, deliverAs: 'followUp' })
+    const before = JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0]
+    assert.equal(before.status, 'failed')
+    assert.equal(before.notification_pending, true)
+    assert.equal(before.ownedCommandCleanupPending, true)
+    const early = await engine.output(task.task_id, { offset: 0 })
+    const visible = new OutputProjector().result(early, outputWait(), 'initialization-parent')
+      .content[0].text
+    assert.match(visible, /\[failed\] Task timed out/)
+    assert.match(visible, /Child initialization cleanup is unconfirmed/)
+    assert.equal(early.output, before.output)
+
+    entries.push({ type: 'custom_message', ...messages[0][0] })
+    await controller.reconcile()
+    assert.deepEqual(await engine.pendingNotifications(), [])
+    factory.resolve()
+    await bounded(disposing.promise, 4000, 'late child disposal')
+    cleanup.resolve()
+    await bounded(runtime.done, 4000, 'late initialization settlement')
+    await controller.flush()
+    assert.equal(prompts, 0)
+    assert.equal(engine.runtimes.size, 0)
+    assert.equal(
+      messages.length,
+      1,
+      'existing task-ID receipts still reconcile cleanup-only updates'
+    )
+    assert.equal(
+      (await engine.output(task.task_id, { offset: 0 })).output,
+      early.output,
+      'cleanup-only settlement must preserve the readable failure without duplicate suffixes'
+    )
+    assert.equal(
+      JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0].output,
+      before.output
+    )
+  } finally {
+    factory.resolve()
+    cleanup.resolve()
+    const remaining = controller.engine?.runtimes.values() ?? []
+    await bounded(
+      Promise.all([...remaining].map((runtime) => runtime.done)),
+      4000,
+      'released child settlement'
+    )
+    await bounded(controller.shutdown(), 10000, 'initialization owner shutdown')
   }
 })

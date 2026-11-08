@@ -745,6 +745,7 @@ export function createPiChildFactory({
           ) {
             return Promise.reject(new Error('Turn ID must be a nonempty string'))
           }
+          extensionError = undefined
           const run: ChildRun = {
             id: options.turnId ?? randomUUID(),
             controller: new AbortController(),

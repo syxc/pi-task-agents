@@ -271,3 +271,45 @@ test('aggregate MCP resources cannot cross server or extension-source restrictio
   await invoke({ server: 'file' })
   assert.equal(calls, 1)
 })
+
+test('aggregate MCP blank servers cannot bypass excluded registration sources without server selectors', async () => {
+  let calls = 0
+  const inventory = ['list_mcp_resources', 'list_mcp_resource_templates'].map((name) =>
+    tool(name, 'builtin:mcp', {
+      mcpRegistrationSources: [{ name: 'runtime', source: '<inline:runtime-plugin>' }],
+      execute: async () => {
+        calls++
+        return { content: [], details: {} }
+      }
+    })
+  )
+  const restricted = selectParentTools(
+    inventory,
+    { ...profile, tools: inventory.map((entry) => entry.name), extensions: [] },
+    '/project'
+  )
+  /* oxlint-disable no-await-in-loop -- Exercise each resource adapter and its aggregate spellings. */
+  for (const definition of restricted.tools) {
+    for (const args of [{}, { server: '' }, { server: ' \t ' }, { server: 'runtime' }]) {
+      await assert.rejects(
+        definition.execute('blocked', args, undefined, undefined, undefined),
+        /allowed server/
+      )
+    }
+    assert.equal(calls, 0)
+    await definition.execute('allowed', { server: 'file' }, undefined, undefined, undefined)
+    calls = 0
+  }
+  const unrestricted = selectParentTools(
+    inventory,
+    { ...profile, tools: inventory.map((entry) => entry.name) },
+    '/project'
+  )
+  for (const definition of unrestricted.tools) {
+    for (const args of [{}, { server: '' }, { server: ' \t ' }]) {
+      await definition.execute('aggregate', args, undefined, undefined, undefined)
+    }
+  }
+  /* oxlint-enable no-await-in-loop */
+  assert.equal(calls, 6, 'unrestricted aggregate calls retain the SDK blank-server behavior')
+})

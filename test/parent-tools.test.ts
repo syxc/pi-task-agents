@@ -1078,3 +1078,279 @@ for (const mode of ['foreground', 'background', 'cancel']) {
     assert.equal(events.filter((event) => event.method === 'tools/call').length, cancel ? 0 : 1)
   })
 }
+
+for (const change of [
+  'blank-server',
+  'late-registration',
+  'late-inherited-source',
+  'same-source-registration',
+  'replacement-source',
+  'hook-late-registration',
+  'hook-replacement-source',
+  'hook-unrelated-native',
+  'removed-to-file'
+]) {
+  test('official MCP resource source ceiling: ' + change, { timeout: 15000 }, async (t) => {
+    const logs = await mkdtemp(join(tmpdir(), 'owned-mcp-sources-'))
+    t.after(() => rm(logs, { recursive: true, force: true }))
+    const audit = join(logs, 'audit.jsonl')
+    const config = (label) => ({
+      command: process.execPath,
+      args: [server, audit, label, '', 'resources'],
+      exposure: 'direct' as const
+    })
+    const entered = deferred(),
+      release = deferred(),
+      waiting = deferred(),
+      finishHook = deferred(),
+      changed = deferred()
+    const registrations = new Map<string, sdk.ExtensionAPI>()
+    const sameSource = change === 'same-source-registration'
+    const initial = [
+      'blank-server',
+      'same-source-registration',
+      'replacement-source',
+      'hook-replacement-source',
+      'removed-to-file'
+    ].includes(change)
+    const target = sameSource ? 'late' : change === 'removed-to-file' ? 'known' : 'runtime'
+    const inHook = change.startsWith('hook-')
+    const resourceNames = ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']
+    const first =
+      change === 'hook-unrelated-native'
+        ? { name: 'read', args: { path: 'owned.txt' }, denied: false }
+        : change === 'hook-replacement-source'
+          ? {
+              name: 'read_mcp_resource',
+              args: { server: 'runtime', uri: 'owned://source-original/state' },
+              denied: true
+            }
+          : { name: 'list_mcp_resources', args: {}, denied: true }
+    let factories = 0,
+      waitingOnce = false
+    const f = await setup(
+      t,
+      [
+        {
+          name: 'mcp',
+          builtin: true,
+          factory: sdk.createMcpExtension({
+            startupWaitMs: 5000,
+            logPath: join(logs, 'mcp.log'),
+            loadConfig: () => ({
+              servers: [
+                {
+                  name: 'known',
+                  scope: 'global',
+                  source: 'known-file',
+                  config: config('known-file')
+                }
+              ],
+              errors: []
+            })
+          })
+        },
+        ...['source-original', 'source-replacement'].map((owner) => ({
+          name: owner,
+          factory: (pi) => {
+            factories++
+            registrations.set(owner, pi)
+            if (initial && owner === 'source-original') {
+              pi.registerMcpServer(sameSource ? 'runtime' : target, config(owner))
+            }
+          }
+        }))
+      ],
+      {
+        worker: {
+          tools: ['read', ...resourceNames],
+          ...([
+            'replacement-source',
+            'hook-replacement-source',
+            'late-inherited-source',
+            'same-source-registration'
+          ].includes(change)
+            ? {}
+            : { extensions: [] })
+        }
+      },
+      [
+        {
+          name: 'owned-source-policy',
+          factory: (pi) => {
+            pi.on('mcp_servers_change', (event) => {
+              if (
+                change === 'removed-to-file'
+                  ? !event.servers.some((entry) => entry.name === target)
+                  : event.servers.some(
+                      (entry) =>
+                        entry.name === target &&
+                        entry.extensionPath ===
+                          `<inline:${sameSource ? 'source-original' : 'source-replacement'}>`
+                    )
+              ) {
+                changed.resolve()
+              }
+            })
+            pi.on('tool_call', async (event) => {
+              if (
+                inHook &&
+                !waitingOnce &&
+                event.parentToolCallId &&
+                event.toolName === first.name
+              ) {
+                waitingOnce = true
+                waiting.resolve()
+                await finishHook.promise
+              }
+            })
+          }
+        }
+      ]
+    )
+    f.api.sendMessage = () => {}
+    const known = [
+      { name: 'list_mcp_resources', args: { server: 'known' }, denied: false },
+      {
+        name: 'read_mcp_resource',
+        args: { server: 'known', uri: 'owned://known-file/state' },
+        denied: false
+      },
+      { name: 'read', args: { path: 'owned.txt' }, denied: false }
+    ]
+    const checks =
+      change === 'removed-to-file' || sameSource
+        ? [
+            { name: 'list_mcp_resources', args: {}, denied: false },
+            { name: 'list_mcp_resources', args: { server: ' \t ' }, denied: false },
+            ...(sameSource
+              ? [
+                  { name: 'list_mcp_resources', args: { server: 'late' }, denied: false },
+                  {
+                    name: 'read_mcp_resource',
+                    args: { server: 'late', uri: 'owned://source-original/state' },
+                    denied: false
+                  }
+                ]
+              : []),
+            ...known
+          ]
+        : [
+            ...(inHook ? [first] : []),
+            { name: 'list_mcp_resources', args: { server: '' }, denied: true },
+            { name: 'list_mcp_resource_templates', args: { server: ' \t ' }, denied: true },
+            { name: 'list_mcp_resources', args: {}, denied: true },
+            { name: 'list_mcp_resources', args: { server: 'runtime' }, denied: true },
+            { name: 'list_mcp_resource_templates', args: { server: 'runtime' }, denied: true },
+            {
+              name: 'read_mcp_resource',
+              args: { server: 'runtime', uri: 'owned://source-replacement/state' },
+              denied: true
+            },
+            {
+              name: 'read_mcp_resource',
+              args: { server: ' \t runtime \t ', uri: 'owned://source-replacement/state' },
+              denied: true
+            },
+            ...known
+          ]
+    const parentActions = [tool('task', input('worker', true))]
+    let childCalls = 0
+    f.script(async (_step, context) => {
+      if (!f.child(context)) {
+        return parentActions.shift() ?? answer('PARENT_DONE')
+      }
+      if (childCalls === 0) {
+        entered.resolve()
+        if (!inHook) {
+          await release.promise
+        }
+      } else {
+        const previous = checks[childCalls - 1]
+        const result = reply(context, previous.name)
+        assert.ok(result, 'the real child must receive each tool result')
+        assert.equal(Boolean(result.isError), previous.denied, JSON.stringify(result))
+        if (!previous.denied && previous.name === 'read_mcp_resource') {
+          assert.match(
+            JSON.stringify(result),
+            previous.args.server === 'known'
+              ? /OWNED_MCP_READ:known-file:/
+              : /OWNED_MCP_READ:source-original:/
+          )
+        }
+        if (!previous.denied && previous.name === 'read') {
+          assert.match(JSON.stringify(result), /OWNED_NATIVE_RESULT/)
+        }
+      }
+      const next = checks[childCalls++]
+      return next ? tool(next.name, next.args) : answer('SOURCE_CEILING_CHECKED')
+    })
+    await f.session.prompt('Admit an offline child before changing registered MCP provenance.')
+    await entered.promise
+    const id = f.taskResult().task_id,
+      execution = f.controller.engine.runtimes.get(id)
+    const before = JSON.stringify(
+      f.api.getAllTools().filter((entry) => resourceNames.includes(entry.name))
+    )
+    if (inHook) {
+      await waiting.promise
+    }
+    if (change !== 'blank-server') {
+      if (initial && !sameSource) {
+        registrations.get('source-original').unregisterMcpServer(target)
+      }
+      if (change !== 'removed-to-file') {
+        const owner = sameSource ? 'source-original' : 'source-replacement'
+        registrations.get(owner).registerMcpServer(target, config(owner))
+      }
+      await changed.promise
+    }
+    assert.equal(
+      JSON.stringify(f.api.getAllTools().filter((entry) => resourceNames.includes(entry.name))),
+      before,
+      'the shared resource definition stays unchanged while its reachable servers change'
+    )
+    const prior = (await readFile(audit, 'utf8')).trim().split('\n').length
+    release.resolve()
+    finishHook.resolve()
+    await execution.done
+    const completed = f.controller.engine.task(id)
+    assert.equal(completed.status, 'succeeded', JSON.stringify(completed))
+    const events = (await readFile(audit, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    assert.equal(
+      events
+        .slice(prior)
+        .filter(
+          (event) =>
+            event.label !== 'known-file' && event.method?.startsWith('resources/') && !sameSource
+        ).length,
+      0,
+      'denied child calls must never reach a registered server'
+    )
+    assert.equal(factories, 2, 'child calls must not rerun either source factory')
+    parentActions.push(tool('list_mcp_resources', { server: ' \t ' }))
+    await f.session.prompt('The parent retains unrestricted aggregate MCP access.')
+    const parentList = reply({ messages: f.session.messages }, 'list_mcp_resources')
+    assert.equal(parentList.isError, false, JSON.stringify(parentList))
+    assert.match(JSON.stringify(parentList), /OWNED_MCP_RESOURCE:known-file:/)
+    if (change !== 'removed-to-file') {
+      assert.match(
+        JSON.stringify(parentList),
+        /OWNED_MCP_RESOURCE:source-(?:original|replacement):/
+      )
+    }
+    parentActions.push(
+      tool('read_mcp_resource', {
+        server: change === 'removed-to-file' ? 'known' : 'runtime',
+        uri: 'owned://parent/state'
+      })
+    )
+    await f.session.prompt('The parent retains direct MCP resource reads.')
+    const parentRead = reply({ messages: f.session.messages }, 'read_mcp_resource')
+    assert.equal(parentRead.isError, false, JSON.stringify(parentRead))
+    assert.match(JSON.stringify(parentRead), /OWNED_MCP_READ:/)
+  })
+}

@@ -188,7 +188,7 @@ export async function childResources({
       ? undefined
       : (await loadConfig({ cwd, agentDir, projectTrusted })).roles[profile.name]
   const currentSelectors =
-    profile.skillSnapshot === undefined ? profile.skills : (currentRole?.skills ?? [])
+    profile.skillSnapshot === undefined ? profile.skills : currentRole ? currentRole.skills : []
   const inheritSkills = currentSelectors === undefined
   const skillNames = (currentSelectors ?? []).filter(isResourceName).map(normalizedSelectorName)
   const skillPaths = await localPaths(

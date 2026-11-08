@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer'
 import {
   constants,
   closeSync,
@@ -276,10 +277,20 @@ export function readCommandFd(fd: number, offset: number, limit = 8192) {
   const count = readSync(fd, bytes, 0, bytes.length, start)
   const result = utf8Output(bytes.subarray(0, count), 0, bounded)
   const nextOffset = start + result.nextOffset
+  let decodedStart = 0
+  // A caller may deliberately start inside a valid point; those skipped bytes are not decoding loss.
+  if (start > 0) {
+    while (decodedStart < result.nextOffset && (bytes[decodedStart] & 0xc0) === 0x80) {
+      decodedStart++
+    }
+  }
   return {
     output: result.content,
     next_offset: nextOffset,
     truncated: nextOffset < info.size,
-    output_bytes: info.size
+    output_bytes: info.size,
+    ...(!isUtf8(bytes.subarray(decodedStart, result.nextOffset))
+      ? { output_incomplete: true as const }
+      : {})
   }
 }
