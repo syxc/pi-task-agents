@@ -1,6 +1,10 @@
 import type { TaskInput } from './types.ts'
 
-export const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+/**
+ * Only JSON-safe values survive this clone; undefined members, Date, Map, and cycles do not.
+ * Persisted task records and their summary projections are JSON data by contract.
+ */
+export const cloneJson = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 export const freeze = <T>(value: T): T => {
   if (value && typeof value === 'object') {
     Object.values(value).forEach(freeze)
@@ -46,12 +50,17 @@ export function normalizeTaskInput(input: TaskInput): TaskInput {
 }
 
 // Return true for a matching change and false for timeout. Each exit removes its listener and timer.
-export async function waitForChange(
-  waiters: Set<() => void>,
-  predicate: () => boolean,
-  timeout?: number,
+export async function waitForChange({
+  waiters,
+  predicate,
+  timeout,
+  signal
+}: {
+  waiters: Set<() => void>
+  predicate: () => boolean
+  timeout?: number
   signal?: AbortSignal
-): Promise<boolean> {
+}): Promise<boolean> {
   aborted(signal)
   if (predicate()) {
     return true
