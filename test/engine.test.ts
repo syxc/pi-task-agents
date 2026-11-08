@@ -345,7 +345,11 @@ test('parent lock, isolation and same-process owner changes preserve runtime cur
   await assert.rejects(competitor.init(), /active task owner/)
   const foreign = new TaskEngine({ rootDir, parentId: 'other', cwd: rootDir, createChild })
   await foreign.init()
-  await assert.rejects(foreign.query({ task_id: a.task_id }), /Unknown task/)
+  await assert.rejects(foreign.query({ task_id: a.task_id }), {
+    code: 'TASK_NOT_FOUND',
+    status: 404,
+    message: `Local background task not found: ${a.task_id}`
+  })
   await foreign.close()
   assert.equal((await stat(engine.store.file)).mode & 0o777, 0o600)
   assert.equal((await stat(engine.store.dir)).mode & 0o777, 0o700)
@@ -1548,7 +1552,11 @@ test('regression: idle send has no background notification and replays before ch
   assert.deepEqual(children[0].steers, [])
   assert.equal((await engine.query({ task_id: background.task_id })).status, 'running')
   assert.equal(engine.waiters.size, 0)
-  await assert.rejects(engine.send('foreign-session', 'no'), /Unknown task/)
+  await assert.rejects(engine.send('foreign-session', 'no'), {
+    code: 'TASK_NOT_FOUND',
+    status: 404,
+    message: 'Local background task not found: foreign-session'
+  })
 })
 
 test('regression: send rejects busy queued and running sessions without mutating or canceling background work', async (t) => {

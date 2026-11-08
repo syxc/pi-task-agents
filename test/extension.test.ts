@@ -815,7 +815,9 @@ test('real engine adapter waits by default, continues the same child and enforce
     for (const handle of [result.details.task_id, result.details.sub_session_id]) {
       const denied = await execute('task_send', { task_id: handle, content: 'intrusion' }, other)
       assert.equal(denied.isError, true)
-      assert.match(denied.details.error_message, /Unknown task|owner|parent/i)
+      assert.equal(denied.details.code, 'TASK_NOT_FOUND')
+      assert.equal(denied.details.status, 404)
+      assert.equal(denied.details.error_message, `Local background task not found: ${handle}`)
     }
     /* oxlint-enable no-await-in-loop */
     assert.deepEqual(children[0].prompts, ['first', 'second', 'third'])

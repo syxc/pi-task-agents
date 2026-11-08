@@ -254,7 +254,10 @@ export class TaskEngine {
   task(id: string): TaskRecord {
     const task = this.getState().tasks.find((item) => item.task_id === id)
     if (!task || task.parent_id !== this.parentId) {
-      throw new Error('Unknown task for this parent')
+      throw Object.assign(new Error(`Local background task not found: ${id}`), {
+        code: 'TASK_NOT_FOUND',
+        status: 404
+      })
     }
     return task
   }
