@@ -37,7 +37,7 @@ pi install git:github.com/syxc/pi-task-agents
 - 父会话须用 `task_output` 读取持久结果再整合回复，`details` 等元数据不能代替读取；不按长度筛选必要信息或截取报告摘要。
 - `task_output` 默认返回完整验证文本及覆盖整个报告的确定性 SHA-256 fingerprint。读过报告后，可用 `known_verification_fingerprint` 回传该值；仅匹配当前报告时省略验证详情文本，缺失或不匹配时返回当前完整报告。省略时仍有 fingerprint、说明和恢复方法，实际输出、状态、错误、游标、截断标志及 `details.verification` 不变。任意有效 `offset`、重试或原父会话恢复后，省略该参数即可重读完整报告；不依赖投递历史。
 
-通知与结果分离：Pi 原生扩展消息通过 `followUp` 排队，不模拟用户提交。`display:false` 只隐藏 TUI 展示，仍进入模型上下文、唤醒空闲主会话，不等于减少 token。`task_output` 不是 Bash 日志流，取消读取不会停止任务。
+通知与结果分离：运行期间的完成通知通过 `followUp` 排队并唤醒空闲主会话，不模拟用户提交；启动时仍有待投递通知时，TUI 同样唤醒，print/json/RPC 模式改用 `nextTurn` 排队，避免宿主即将提交首个提示时抢占运行槽。`display:false` 只隐藏 TUI 展示，仍进入模型上下文、唤醒空闲主会话，不等于减少 token。`task_output` 不是 Bash 日志流，取消读取不会停止任务。
 
 ### 续接与查看状态
 

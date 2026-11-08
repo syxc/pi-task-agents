@@ -537,10 +537,10 @@ export class TaskController {
     )
   }
 
-  flush(): Promise<void> {
+  flush(options: { startup?: boolean } = {}): Promise<void> {
     const operation = this.delivery.then(async () => {
       await this.reconcile({ reclaim: true })
-      await this.deliver()
+      await this.deliver(options)
     })
     this.delivery = operation.catch(() => {})
     return operation
@@ -557,13 +557,16 @@ export class TaskController {
     )
   }
 
-  private async deliver(): Promise<void> {
+  private async deliver(options: { startup?: boolean } = {}): Promise<void> {
     const engine = this.engine
     const epoch = this.cancelEpoch
     if (!engine || !this.eligible(engine, epoch)) {
       return
     }
     const parentId = this.parentId
+    // A startup notification must not claim the host's run slot before its first
+    // prompt: print/json/RPC sessions submit that prompt immediately after start.
+    const wake = !options.startup || this.ctx?.mode === 'tui'
     for (const task of await engine.pendingNotifications()) {
       if (!this.eligible(engine, epoch)) {
         return
@@ -582,7 +585,7 @@ export class TaskController {
             content: taskCompletionNotice(task),
             details: { task_id: task.task_id, parent_id: parentId, status: task.status }
           },
-          { triggerTurn: true, deliverAs: 'followUp' }
+          wake ? { triggerTurn: true, deliverAs: 'followUp' } : { deliverAs: 'nextTurn' }
         )
       } catch (error) {
         this.inFlight.delete(task.task_id)

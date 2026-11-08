@@ -408,7 +408,7 @@ export function registerTaskAgents(
     outputProjector.reset()
     try {
       await controller.ensure(ctx)
-      await controller.flush()
+      await controller.flush({ startup: true })
     } catch (error) {
       controller.warn(error)
     }

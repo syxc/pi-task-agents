@@ -272,6 +272,36 @@ test('completion is sent once and stays pending until the persisted message rece
   await f.controller.shutdown()
 })
 
+test('startup delivery queues outside TUI instead of starting a turn before the host prompt', async () => {
+  const f = fixture()
+  try {
+    f.ctx.mode = 'print'
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(complete())
+    await f.controller.flush({ startup: true })
+    assert.equal(f.sent.length, 1)
+    assert.deepEqual(f.sent[0][1], { deliverAs: 'nextTurn' })
+    await f.controller.flush()
+    assert.equal(f.sent.length, 1, 'a queued startup notice must not be redelivered as a wake')
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('startup delivery still wakes an interactive TUI session', async () => {
+  const f = fixture()
+  try {
+    f.ctx.mode = 'tui'
+    await f.controller.ensure(f.ctx)
+    f.engines[0].tasks.push(complete())
+    await f.controller.flush({ startup: true })
+    assert.equal(f.sent.length, 1)
+    assert.deepEqual(f.sent[0][1], { triggerTurn: true, deliverAs: 'followUp' })
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('background completion delivers verifier facts without treating a failed verdict as execution failure', async () => {
   const f = fixture()
   try {
