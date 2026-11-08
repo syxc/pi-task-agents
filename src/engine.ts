@@ -729,13 +729,13 @@ export class TaskEngine {
       }
     } finally {
       const stop = stopOf(runtime.phase)
-      runtime.phase = { kind: 'finishing', ...(stop ? { stop } : {}) }
+      // Seal synchronously before the first yield so a late stop cannot reopen the terminal slot.
+      runtime.phase = { kind: 'sealed', ...(stop ? { stop } : {}) }
       startedReject(new Error('Task ended before prompt dispatch'))
       clearTimeout(runtime.timer)
       if (runtime.delivery) {
         await runtime.delivery
       }
-      // Seal synchronously before manager completion yields, so cancellation cannot reopen this slot.
       if (stop?.aborting) {
         await stop.aborting
       }
@@ -753,7 +753,6 @@ export class TaskEngine {
         }
         runtime.terminalStatus ??= 'failed'
       }
-      runtime.phase = { kind: 'sealed', ...(stop ? { stop } : {}) }
       session.active = undefined
       try {
         const terminal = appendTerminalOutput(task, outcome)

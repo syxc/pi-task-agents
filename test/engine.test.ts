@@ -1351,6 +1351,29 @@ test('MCode completion seals cancellation and retains admission until its update
   }
 })
 
+test('regression: a stop racing terminal steering delivery cannot reopen the sealed task', async (t) => {
+  const { engine, children } = await setup(t, { maxConcurrency: 1 })
+  const task = await engine.start(input('A'), profile)
+  await waitFor(() => children[0]?.calls.length)
+  const delivery = deferred()
+  engine.runtimes.get(task.task_id)!.delivery = delivery.promise
+  let aborts = 0
+  const originalAbort = children[0].abort
+  children[0].abort = async function () {
+    aborts++
+    await originalAbort.call(children[0])
+  }
+  children[0].calls[0].resolve({ text: 'A done' })
+  await waitFor(() => !isAccepting(engine.runtimes.get(task.task_id)!.phase))
+  const stopping = engine.stop(task.task_id, 'late stop')
+  await tick()
+  delivery.resolve()
+  const stopped = await stopping
+  assert.equal(stopped.status, 'succeeded')
+  assert.equal(stopped.cancel_reason, undefined)
+  assert.equal(aborts, 0, 'a late stop cannot abort a child that already returned')
+})
+
 test('timeout fails without notifying cancellation; close cancels queued and running tasks', async (t) => {
   const { engine, children } = await setup(t, { maxConcurrency: 1 })
   const timed = await engine.start(input(), { ...profile, timeoutMs: 10 })

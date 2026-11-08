@@ -21,13 +21,10 @@ export type RuntimePhase =
   | { kind: 'initializing' }
   | { kind: 'running' }
   | { kind: 'stopping'; stop: RuntimeStop }
-  | { kind: 'finishing'; stop?: RuntimeStop }
   | { kind: 'sealed'; stop?: RuntimeStop }
 
 export function stopOf(phase: RuntimePhase): RuntimeStop | undefined {
-  return phase.kind === 'stopping' || phase.kind === 'finishing' || phase.kind === 'sealed'
-    ? phase.stop
-    : undefined
+  return phase.kind === 'stopping' || phase.kind === 'sealed' ? phase.stop : undefined
 }
 
 export function isAccepting(phase: RuntimePhase): boolean {
