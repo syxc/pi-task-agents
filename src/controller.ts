@@ -14,6 +14,7 @@ import {
 import { loadConfig, resolveProfile } from './config.ts'
 import { createPiChildFactory, type PiChildFactoryOptions } from './pi-backend.ts'
 import { captureParentRuntime, type ParentRuntimeAPI } from './parent-runtime.ts'
+import { isRecord } from './guards.ts'
 import {
   closeDetachedOwners,
   forgetOwner,
@@ -23,6 +24,7 @@ import {
 } from './controller-owners.ts'
 import { isActiveTaskStatus } from './vendor/mcode-background-task/status.ts'
 import type {
+  AdmissionReceipt,
   ConfigLoadOptions,
   CreateChild,
   TaskAgentsConfig,
@@ -56,10 +58,6 @@ export interface TaskControllerOptions {
     ctx: ExtensionContext,
     signal?: AbortSignal
   ) => ReturnType<typeof captureParentRuntime>
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function receiptTaskIds(entry: unknown, parentId: string | undefined): string[] {
@@ -137,9 +135,13 @@ export class TaskController {
   private parentId?: string
   private suppressed = false
   config!: TaskAgentsConfig
-  engine?: TaskService
   cancelEpoch = 0
   dialogOpen = false
+
+  /** The attached owner solely owns the live engine. */
+  get engine(): TaskService | undefined {
+    return this.owner?.engine
+  }
 
   constructor(pi: ParentAPI, options: TaskControllerOptions) {
     this.pi = pi
@@ -158,10 +160,10 @@ export class TaskController {
       if (generation !== this.generation) {
         throw canceled()
       }
-      if (this.engine && this.parentId === id) {
-        this.checkOwnerContext(this.owner!, ctx)
+      if (this.owner && this.parentId === id) {
+        this.checkOwnerContext(this.owner, ctx)
         this.ctx = ctx
-        return this.engine
+        return this.owner.engine
       }
       await this.closeOwner(true)
       this.ctx = ctx
@@ -209,17 +211,25 @@ export class TaskController {
         this.checkOwnerContext(owner, ctx)
       }
       if (!owner) {
-        const handle = {} as ControllerOwner
+        // The engine constructor receives callbacks that run only after this handle
+        // exists, so the owner is constructed once and published through the holder.
+        const ref: { current?: ControllerOwner } = {}
         const engine = new this.Engine({
           rootDir,
           parentId: id,
           cwd: ctx.cwd,
           maxConcurrency: this.config.maxConcurrency,
-          createChild: (options) => handle.createChild(options),
-          notify: () => handle.notify?.(),
-          onChange: () => handle.onChange?.()
+          createChild: (options) => {
+            const current = ref.current
+            if (!current) {
+              throw new Error('Task owner is not initialized')
+            }
+            return current.createChild(options)
+          },
+          notify: () => ref.current?.notify?.(),
+          onChange: () => ref.current?.onChange?.()
         })
-        Object.assign(handle, {
+        const handle: ControllerOwner = {
           rootDir,
           parentId: id,
           cwd: resolve(ctx.cwd),
@@ -229,19 +239,22 @@ export class TaskController {
           createChild: this.makeChildFactory(
             ctx,
             () => {
-              if (handle.readCodemodeEnabled) {
-                handle.codemodeEnabled = handle.readCodemodeEnabled()
+              const current = ref.current
+              if (current?.readCodemodeEnabled) {
+                current.codemodeEnabled = current.readCodemodeEnabled()
               }
-              return handle.codemodeEnabled === true
+              return current?.codemodeEnabled === true
             },
             () => {
-              if (!handle.hostRuntime) {
+              const runtime = ref.current?.hostRuntime
+              if (!runtime) {
                 throw new Error('Parent runtime snapshot is not ready')
               }
-              return handle.hostRuntime
+              return runtime
             }
           )
-        })
+        }
+        ref.current = handle
         await engine.init()
         if (generation !== this.generation) {
           await engine.close()
@@ -251,7 +264,12 @@ export class TaskController {
           retainOwner(handle)
         } catch (error) {
           // Losing the retention race must not leave an initialized store lock behind.
-          await engine.close().catch(() => {})
+          try {
+            await engine.close()
+          } catch (closeError) {
+            // Keep the retention failure as the caller's error, but never hide a leaked lock.
+            this.warn(closeError)
+          }
           throw error
         }
         owner = handle
@@ -273,7 +291,7 @@ export class TaskController {
       }
       this.owner = owner
       this.config = owner.config
-      const engine = (this.engine = owner.engine)
+      const engine = owner.engine
       for (const diagnostic of this.config.diagnostics) {
         this.warn(diagnostic)
       }
@@ -495,11 +513,11 @@ export class TaskController {
     }
   }
 
-  private async admit(
+  private async admit<T extends TaskSummary>(
     ctx: ExtensionContext,
     signal: AbortSignal | undefined,
-    operation: (engine: TaskService, signal: AbortSignal) => Promise<TaskSummary>
-  ): Promise<TaskSummary> {
+    operation: (engine: TaskService, signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
     const epoch = this.cancelEpoch
     const engine = await this.ensure(ctx)
     if (
@@ -575,7 +593,7 @@ export class TaskController {
     toolCallId: string,
     signal: AbortSignal | undefined,
     ctx: ExtensionContext
-  ): Promise<TaskSummary> {
+  ): Promise<AdmissionReceipt> {
     return this.admit(ctx, signal, (engine, combined) =>
       engine.append(input.task_id, input.content, { requestId: toolCallId, signal: combined })
     )
@@ -587,7 +605,7 @@ export class TaskController {
     signal: AbortSignal | undefined,
     ctx: ExtensionContext,
     nestedToolCall = false
-  ): Promise<TaskSummary> {
+  ): Promise<AdmissionReceipt> {
     return this.admit(ctx, signal, (engine, combined) =>
       engine.send(input.task_id, input.content, {
         requestId: toolCallId,
@@ -949,8 +967,8 @@ export class TaskController {
     await this.delivery
     let released = false
     try {
-      if (!preserve && this.engine) {
-        await this.engine.close()
+      if (!preserve && owner) {
+        await owner.engine.close()
       }
       released = true
     } finally {
@@ -967,7 +985,6 @@ export class TaskController {
         }
       }
       this.owner = undefined
-      this.engine = undefined
       this.inFlight.clear()
       this.attempts.clear()
       this.retryAt.clear()

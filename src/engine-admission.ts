@@ -19,12 +19,12 @@ export class TaskAdmissions {
     return this.pending.has(id)
   }
 
-  request(
+  request<T extends TaskSummary>(
     key: string | undefined,
-    fn: (key?: string) => Promise<TaskSummary>,
+    fn: (key?: string) => Promise<T>,
     lookup: (key: string) => TaskSummary | undefined,
-    duplicate: (result: TaskSummary) => TaskSummary
-  ): Promise<TaskSummary> {
+    duplicate: (result: TaskSummary) => T
+  ): Promise<T> {
     if (!key) {
       return this.exclusive(fn)
     }
@@ -132,7 +132,10 @@ export class TaskAdmissions {
     } catch (error) {
       // A failed write can have committed. Only a new owner may reconcile its receipt.
       poison(error || new Error('Task admission persistence failed'))
-      state.tasks.splice(state.tasks.indexOf(task), 1)
+      const index = state.tasks.indexOf(task)
+      if (index >= 0) {
+        state.tasks.splice(index, 1)
+      }
       if (key && state.requests[key] === id) {
         delete state.requests[key]
       }
