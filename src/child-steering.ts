@@ -31,8 +31,6 @@ export function createChildSteering<T extends Run>(current: () => T | undefined)
     !run.settled &&
     !run.aborted &&
     !run.controller.signal.aborted
-  const ownsTurn = (input: Admission<T>) => ownsRun(input.run)
-  const valid = (input: Admission<T>) => input.open && ownsTurn(input)
 
   async function beforeSettle() {
     const run = current()
@@ -75,7 +73,7 @@ export function createChildSteering<T extends Run>(current: () => T | undefined)
       if (!input) {
         return
       }
-      if (!valid(input)) {
+      if (!input.open || !ownsRun(input.run)) {
         input.rejected = true
         return { action: 'handled' }
       }
@@ -117,7 +115,7 @@ export function createChildSteering<T extends Run>(current: () => T | undefined)
     session.agent.steer = (message) => {
       const input = context.getStore()
       if (input) {
-        if (!valid(input)) {
+        if (!input.open || !ownsRun(input.run)) {
           input.rejected = true
           return
         }
@@ -226,7 +224,7 @@ export function createChildSteering<T extends Run>(current: () => T | undefined)
     staleInput: () => {
       const input = context.getStore(),
         prompt = promptContext.getStore()
-      return (!!input && !ownsTurn(input)) || (!!prompt && !ownsRun(prompt))
+      return (!!input && !ownsRun(input.run)) || (!!prompt && !ownsRun(prompt))
     }
   }
 }

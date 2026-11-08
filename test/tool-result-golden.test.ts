@@ -1,13 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  appendFailure,
-  appendResult,
-  knownAppendFailure,
-  taskResult
-} from '../src/tool-result-task.ts'
+import { appendFailure, appendResult, taskResult } from '../src/tool-result-task.ts'
 import { OutputProjector, outputWait, queryResult, stopResult } from '../src/tool-result-control.ts'
-import { failureResult, notFound } from '../src/tool-result-common.ts'
+import { failureResult, knownFailure, notFound } from '../src/tool-result-common.ts'
 
 // Public task results expose execution facts, not host observation reports.
 const base = {
@@ -248,7 +243,7 @@ test('append failure golden preserves source-owned codes/status and refuses to i
   }
   for (const [code, status] of Object.entries(codes)) {
     const source = Object.assign(new Error('source-owned failure'), { code, status })
-    const failure = knownAppendFailure(source)
+    const failure = knownFailure(source)
     assert.deepEqual(failure, { code, status, message: 'source-owned failure' })
     exact(
       appendFailure('t1', failure),
@@ -257,9 +252,9 @@ test('append failure golden preserves source-owned codes/status and refuses to i
       true
     )
   }
-  assert.equal(knownAppendFailure(new Error('storage problem')), undefined)
+  assert.equal(knownFailure(new Error('storage problem')), undefined)
   assert.equal(
-    knownAppendFailure(Object.assign(new Error('code without status'), { code: 'UNKNOWN' })),
+    knownFailure(Object.assign(new Error('code without status'), { code: 'UNKNOWN' })),
     undefined
   )
 })

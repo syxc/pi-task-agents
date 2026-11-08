@@ -119,10 +119,6 @@ export function stopResult(task: TaskSummary, requestedId = task.task_id): TaskT
   )
 }
 
-// Optional wait facts come directly from TaskOutput. Elapsed wall time is not
-// proof that a read timed out rather than observing a state change.
-export type OutputFacts = TaskOutput
-
 export interface OutputWait {
   effective_wait_ms: number
   wait_ms_clamped: boolean
@@ -147,8 +143,10 @@ export class OutputProjector {
     this.lastRead = undefined
   }
 
+  // Optional wait facts come directly from TaskOutput. Elapsed wall time is not
+  // proof that a read timed out rather than observing a state change.
   result(
-    read: OutputFacts,
+    read: TaskOutput,
     wait: OutputWait,
     parentId: string,
     signal?: AbortSignal,
@@ -192,7 +190,7 @@ export class OutputProjector {
     })
   }
 
-  private pollingHint(read: OutputFacts, parentId: string): string {
+  private pollingHint(read: TaskOutput, parentId: string): string {
     const previous = this.lastRead
     this.reset()
     if (

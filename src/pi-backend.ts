@@ -29,7 +29,6 @@ import {
   childToolPolicy,
   normalizedSelectorName,
   normalizeSelector,
-  recursiveTools,
   taskChildBlockedTools,
   roleAllowsTool,
   within
@@ -566,7 +565,7 @@ export function createPiChildFactory({
           extraTools.add(name)
         }
       }
-      const excludeTools = [...new Set([...recursiveTools, ...taskChildBlockedTools])]
+      const excludeTools = [...taskChildBlockedTools]
       if (!allow('codemode')) {
         excludeTools.push('codemode')
       }

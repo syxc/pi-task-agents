@@ -6,7 +6,7 @@ type Window = {
   rootUser?: unknown
   available: boolean
 }
-export interface ChildCommittedMessages {
+interface ChildCommittedMessages {
   available: boolean
   text: string
 }

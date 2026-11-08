@@ -30,7 +30,7 @@ import { utf8Output } from './utf8-output.ts'
 import { isRecord } from './guards.ts'
 
 export const COMMAND_ENTRY = 'pi-task-agents:command'
-export const commandId = (id: unknown): id is string =>
+const commandId = (id: unknown): id is string =>
   typeof id === 'string' && /^bg_[a-f0-9-]{36}$/.test(id)
 
 const finite = (value: unknown): value is number =>
@@ -220,13 +220,6 @@ export class CommandLogs {
     }
     return join(this.root, id + '.log')
   }
-  create(id: string): number {
-    return openSync(
-      this.path(id, true),
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
-      0o600
-    )
-  }
   createHandle(id: string) {
     return openHandle(
       this.path(id, true),
@@ -249,9 +242,6 @@ export class CommandLogs {
       }
       offset += written
     }
-  }
-  close(fd: number): void {
-    closeSync(fd)
   }
   read(id: string, offset: number, limit = 8192) {
     const fd = openSync(this.path(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))

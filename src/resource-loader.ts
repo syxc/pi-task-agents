@@ -34,7 +34,7 @@ export interface HostResources {
   getSkills(): { skills: Skill[] }
 }
 
-export interface ChildResources {
+interface ChildResources {
   extensions: {
     paths: string[]
     inline: InlineExtension[]
