@@ -1,6 +1,7 @@
 import { basename, dirname, resolve } from 'node:path'
 import type { AgentProfile } from './types.ts'
 import type { ParentTool } from './parent-tools.ts'
+import { isRecord } from './guards.ts'
 import {
   childToolPolicy,
   isResourceName,
@@ -114,11 +115,11 @@ export function selectParentTools(
           .map((entry) => normalizedSelectorName(entry.name))
       )
       if (servers || blockedServers.size) {
-        const input = args as { server?: unknown }
+        const server = isRecord(args) ? args.server : undefined
         if (
-          typeof input?.server !== 'string' ||
-          (servers && !servers.has(normalizedSelectorName(input.server))) ||
-          blockedServers.has(normalizedSelectorName(input.server))
+          typeof server !== 'string' ||
+          (servers && !servers.has(normalizedSelectorName(server))) ||
+          blockedServers.has(normalizedSelectorName(server))
         ) {
           return false
         }

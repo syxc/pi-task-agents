@@ -1,5 +1,6 @@
 import { normalizeTaskError } from './vendor/mcode-background-task/errors.ts'
 import type { TaskRecord } from './types.ts'
+import { assertNever } from './guards.ts'
 
 export interface TaskRunOutcome {
   status: 'succeeded' | 'failed' | 'aborted'
@@ -25,28 +26,27 @@ export function toTerminalProjection(result: TaskTerminalOutcome): TaskTerminalP
       lastError: normalizeTaskError(result.failure, 'TASK_FAILED')
     }
   }
-  const status =
-    result.status === 'succeeded'
-      ? 'succeeded'
-      : result.status === 'aborted'
-        ? 'canceled'
-        : 'failed'
-  const failureText =
-    result.status === 'succeeded'
-      ? ''
-      : `\n\n[${result.status}] ${result.errorMessage ?? 'Local background task did not complete.'}`
-  return {
-    status,
+  const body = (failureText: string): Pick<TaskTerminalProjection, 'outputText' | 'summary'> => ({
     outputText: `${result.finalText ?? ''}${failureText}`,
-    ...(result.finalText !== undefined ? { summary: result.finalText } : {}),
-    ...(result.status === 'succeeded'
-      ? {}
-      : {
-          lastError: {
-            message: result.errorMessage ?? result.status,
-            code: status === 'canceled' ? 'TASK_CANCELED' : 'TASK_FAILED'
-          }
-        })
+    ...(result.finalText === undefined ? {} : { summary: result.finalText })
+  })
+  switch (result.status) {
+    case 'succeeded':
+      return { status: 'succeeded', ...body('') }
+    case 'aborted':
+    case 'failed':
+      return {
+        status: result.status === 'aborted' ? 'canceled' : 'failed',
+        ...body(
+          `\n\n[${result.status}] ${result.errorMessage ?? 'Local background task did not complete.'}`
+        ),
+        lastError: {
+          message: result.errorMessage ?? result.status,
+          code: result.status === 'aborted' ? 'TASK_CANCELED' : 'TASK_FAILED'
+        }
+      }
+    default:
+      return assertNever(result.status, 'Unexpected task outcome status')
   }
 }
 
@@ -66,11 +66,12 @@ export function runnerOutcome(value: unknown): TaskRunOutcome {
     throw new Error('Invalid child runner result')
   }
   const result = value as { outcome?: unknown; text?: unknown }
-  const status = result.outcome === undefined ? 'succeeded' : returnedStatus(result.outcome)
+  const status = returnedStatus(result.outcome)
   if (status === undefined || (result.text !== undefined && typeof result.text !== 'string')) {
+    // A backend that omits or mistypes provenance must fail closed; never infer success.
     throw new Error('Invalid child runner outcome')
   }
-  return { status, ...(result.text === undefined ? {} : { finalText: result.text as string }) }
+  return { status, ...(result.text === undefined ? {} : { finalText: result.text }) }
 }
 
 export function exceptionOutcome(

@@ -13,17 +13,16 @@ import { open, type FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { readCommandFd, type CommandLogs } from './command-journal.ts'
+import { hasCode, isRecord } from './guards.ts'
 
-const object = (value: unknown): Record<string, unknown> =>
-  value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
 const textOf = (value: unknown): string => {
-  const parts = object(value).content
-  return Array.isArray(parts)
-    ? parts
-        .filter((part) => object(part).type === 'text')
-        .map((part) => String(object(part).text ?? ''))
-        .join('\n')
-    : ''
+  if (!isRecord(value) || !Array.isArray(value.content)) {
+    return ''
+  }
+  return value.content
+    .filter((part): part is Record<string, unknown> => isRecord(part) && part.type === 'text')
+    .map((part) => String(part.text ?? ''))
+    .join('\n')
 }
 
 /** Accept native artifacts only from the live native call, never from history or caller-provided URIs. */
@@ -80,9 +79,10 @@ export class CommandOutput {
   }
   update(value: unknown): void {
     try {
-      const details = object(object(value).details),
-        path = details.fullOutputPath
-      this.nativeTruncated ||= object(details.truncation).truncated === true
+      const details = isRecord(value) && isRecord(value.details) ? value.details : {}
+      const path = details.fullOutputPath
+      const truncated = isRecord(details.truncation) && details.truncation.truncated === true
+      this.nativeTruncated ||= truncated
       if (
         !this.source &&
         !this.opening &&
@@ -94,7 +94,7 @@ export class CommandOutput {
         this.nativePath = path
         this.opening = this.adopt(path)
           .catch((error) => {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            if (!hasCode(error, 'ENOENT')) {
               this.incomplete = true
               this.adoptionFailed = true
             }
@@ -105,7 +105,7 @@ export class CommandOutput {
           })
       }
       const text = textOf(value)
-      if (!this.source && !object(details.truncation).truncated && text.startsWith(this.prefix)) {
+      if (!this.source && !truncated && text.startsWith(this.prefix)) {
         if (this.writer) {
           this.logs.append(this.writer.fd, Buffer.from(text.slice(this.prefix.length)))
         }
@@ -187,7 +187,8 @@ export class CommandOutput {
     }
     await this.opening
     if (!this.source) {
-      const structured = object(object(value).structuredContent)
+      const structured =
+        isRecord(value) && isRecord(value.structuredContent) ? value.structuredContent : {}
       const output =
         typeof structured.output === 'string' && structured.truncated !== true
           ? structured.output

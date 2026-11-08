@@ -13,6 +13,7 @@ import {
 } from './vendor/mcode-child-bash/child-bash-lifecycle.ts'
 import { CommandJournal, CommandLogs } from './command-journal.ts'
 import { CommandOutput } from './command-output.ts'
+import { assertNever, isRecord } from './guards.ts'
 
 interface Run {
   id: string
@@ -37,15 +38,15 @@ interface Receipt {
   text: string
   release(): void
 }
-const object = (value: unknown): Record<string, unknown> =>
-  value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-const textOf = (value: unknown): string =>
-  Array.isArray(object(value).content)
-    ? (object(value).content as unknown[])
-        .filter((part) => object(part).type === 'text')
-        .map((part) => String(object(part).text ?? ''))
-        .join('\n')
-    : ''
+const textOf = (value: unknown): string => {
+  if (!isRecord(value) || !Array.isArray(value.content)) {
+    return ''
+  }
+  return value.content
+    .filter((part): part is Record<string, unknown> => isRecord(part) && part.type === 'text')
+    .map((part) => String(part.text ?? ''))
+    .join('\n')
+}
 function reply(value: Record<string, unknown>, isError = false) {
   const text = JSON.stringify(value)
   return {
@@ -307,7 +308,8 @@ export async function createChildCommands(options: {
             error ??= failure
           }
         }
-        const structured = object(object(result).structuredContent)
+        const structured =
+          isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : {}
         const faults: unknown[] = []
         try {
           if (controller.signal.aborted) {
@@ -522,7 +524,9 @@ export async function createChildCommands(options: {
         quarantined &&
         !(
           event.toolName === 'bash_task' &&
-          ['list', 'output', 'stop'].includes(String(object(event.input).action))
+          ['list', 'output', 'stop'].includes(
+            String(isRecord(event.input) ? event.input.action : undefined)
+          )
         )
       ) {
         return {
@@ -541,52 +545,60 @@ export async function createChildCommands(options: {
       outputSchema: Type.Object({}, { additionalProperties: true }),
       async execute(id, input, signal, _update, ctx) {
         current()
-        if (input.action === 'start') {
-          return start(input, ctx, id)
-        }
-        if (input.action === 'list') {
-          const rows = input.command_id
-            ? { items: [await owned(input.command_id, true)] }
-            : await service.list({ cursor: input.cursor, limit: 100 })
-          return reply({
-            commands: rows.items
-              .filter(
-                (task) =>
-                  (isTerminalTaskStatus(task.status) && !running.has(task.taskId)) ||
-                  task.metadata?.parentTurnId === options.current()?.id
-              )
-              .map((task) => ({
+        switch (input.action) {
+          case 'start':
+            return start(input, ctx, id)
+          case 'list': {
+            const rows = input.command_id
+              ? { items: [await owned(input.command_id, true)] }
+              : await service.list({ cursor: input.cursor, limit: 100 })
+            return reply({
+              commands: rows.items
+                .filter(
+                  (task) =>
+                    (isTerminalTaskStatus(task.status) && !running.has(task.taskId)) ||
+                    task.metadata?.parentTurnId === options.current()?.id
+                )
+                .map((task) => ({
+                  command_id: task.taskId,
+                  status: task.status,
+                  turn_id: task.metadata?.parentTurnId,
+                  ...(task.status === 'lost' ||
+                  (isTerminalTaskStatus(task.status) && running.has(task.taskId))
+                    ? { cleanup_pending: true }
+                    : {}),
+                  ...(task.lastError ? { error_code: task.lastError.code } : {})
+                })),
+              ...('nextCursor' in rows && rows.nextCursor ? { next_cursor: rows.nextCursor } : {})
+            })
+          }
+          case 'output': {
+            if (!input.command_id) {
+              throw new Error('command_id is required')
+            }
+            return output(id, { ...input, command_id: input.command_id }, signal)
+          }
+          case 'stop': {
+            if (!input.command_id) {
+              throw new Error('command_id is required')
+            }
+            const task = await service.stop(input.command_id, 'Stopped by owning child')
+            return reply(
+              {
                 command_id: task.taskId,
                 status: task.status,
-                turn_id: task.metadata?.parentTurnId,
                 ...(task.status === 'lost' ||
                 (isTerminalTaskStatus(task.status) && running.has(task.taskId))
                   ? { cleanup_pending: true }
                   : {}),
-                ...(task.lastError ? { error_code: task.lastError.code } : {})
-              })),
-            ...('nextCursor' in rows && rows.nextCursor ? { next_cursor: rows.nextCursor } : {})
-          })
+                ...(task.lastError ? { error: task.lastError } : {})
+              },
+              task.lastError?.code === 'TASK_STOP_FAILED'
+            )
+          }
+          default:
+            return assertNever(input.action, 'Unsupported bash_task action')
         }
-        if (!input.command_id) {
-          throw new Error('command_id is required')
-        }
-        if (input.action === 'output') {
-          return output(id, { ...input, command_id: input.command_id }, signal)
-        }
-        const task = await service.stop(input.command_id, 'Stopped by owning child')
-        return reply(
-          {
-            command_id: task.taskId,
-            status: task.status,
-            ...(task.status === 'lost' ||
-            (isTerminalTaskStatus(task.status) && running.has(task.taskId))
-              ? { cleanup_pending: true }
-              : {}),
-            ...(task.lastError ? { error: task.lastError } : {})
-          },
-          task.lastError?.code === 'TASK_STOP_FAILED'
-        )
       }
     })
     pi.on('tool_result', (event) => {

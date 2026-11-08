@@ -68,11 +68,11 @@ export async function childMcpFactory(
     config =
       !projectTrusted &&
       (await sameFile(resolve(agentDir, 'mcp.json'), resolve(cwd, '.pi/mcp.json')))
-        ? ({ servers: [], errors: [] } as LoadedMcpConfig)
+        ? { servers: [], errors: [] }
         : load({ agentDir, cwd, projectTrusted })
   }
   const servers = normalizeSelector(profile.mcpServers)
-  const tools = normalizeSelector(profile.tools ?? [])!
+  const tools = normalizeSelector(profile.tools ?? [])
   const explicitMcp = (profile.tools ?? []).some(isSelectorMcp)
   const extensionFiles = await localPaths(
     (profile.extensions ?? []).filter((entry) => !isResourceName(entry)),
@@ -159,61 +159,55 @@ export async function childMcpFactory(
     name: 'task-agents-mcp',
     factory: async (pi) => {
       await snapshot(pi)
-      return factory(
-        new Proxy(pi, {
-          get(target, property, receiver) {
-            if (property === 'getMcpServers') {
-              return () => visible
-            }
-            if (property === 'registerCommand') {
-              return () => {}
-            }
-            if (property === 'on') {
-              return ((
-                event: string,
-                handler: (event: unknown, ctx: ExtensionContext) => unknown
-              ) => {
-                if (!['session_start', 'mcp_servers_change'].includes(event)) {
-                  return target.on(event as never, handler as never)
-                }
-                return target.on(
-                  event as never,
-                  (async (value: unknown, ctx: ExtensionContext) => {
-                    await snapshot(target)
-                    return handler(value, ctx)
-                  }) as never
-                )
-              }) as ExtensionAPI['on']
-            }
-            if (property === 'registerTool') {
-              return ((definition) => {
-                const owner = [...files, ...visible].find(
-                  (entry) =>
-                    entry.config.enabled !== false &&
-                    namespace(entry.name) ===
-                      normalizedSelectorName(definition.namespace?.name ?? '')
-                )
-                const name = normalizedSelectorName(definition.name)
-                if (owner) {
-                  owners.set(name, owner.name)
-                } else {
-                  owners.delete(name)
-                }
-                const keep =
-                  (!isSelectorMcp(definition.name) || !!owner) && allowed(definition.name)
-                target.registerTool({
-                  ...definition,
-                  ...(keep ? {} : { exposure: 'hidden' as const })
-                })
-                if (keep && definition.exposure !== 'hidden' && explicitMcp && tools.has(name)) {
-                  target.setActiveTools([...target.getActiveTools(), definition.name])
-                }
-              }) as ExtensionAPI['registerTool']
-            }
-            return Reflect.get(target, property, receiver)
+      const proxyHandler: ProxyHandler<ExtensionAPI> = {
+        get(target, property, receiver) {
+          if (property === 'getMcpServers') {
+            return () => visible
           }
-        })
-      )
+          if (property === 'registerCommand') {
+            return () => {}
+          }
+          if (property === 'on') {
+            return (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+              if (!['session_start', 'mcp_servers_change'].includes(event)) {
+                return Reflect.apply(target.on, target, [event, handler])
+              }
+              return Reflect.apply(target.on, target, [
+                event,
+                async (value: unknown, ctx: ExtensionContext) => {
+                  await snapshot(target)
+                  return handler(value, ctx)
+                }
+              ])
+            }
+          }
+          if (property === 'registerTool') {
+            return (definition: Parameters<ExtensionAPI['registerTool']>[0]) => {
+              const owner = [...files, ...visible].find(
+                (entry) =>
+                  entry.config.enabled !== false &&
+                  namespace(entry.name) === normalizedSelectorName(definition.namespace?.name ?? '')
+              )
+              const name = normalizedSelectorName(definition.name)
+              if (owner) {
+                owners.set(name, owner.name)
+              } else {
+                owners.delete(name)
+              }
+              const keep = (!isSelectorMcp(definition.name) || !!owner) && allowed(definition.name)
+              target.registerTool({
+                ...definition,
+                ...(keep ? {} : { exposure: 'hidden' as const })
+              })
+              if (keep && definition.exposure !== 'hidden' && explicitMcp && tools.has(name)) {
+                target.setActiveTools([...target.getActiveTools(), definition.name])
+              }
+            }
+          }
+          return Reflect.get(target, property, receiver)
+        }
+      }
+      return factory(new Proxy(pi, proxyHandler))
     }
   }
   const exposures = new Set(

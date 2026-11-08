@@ -83,11 +83,11 @@ export function createChildMessageWindow<T extends object>(manager: SessionManag
         ) {
           continue
         }
-        const edit = edits.get(entry.id)
-        if (edit?.replacement === null) {
+        const replacement = edits.get(entry.id)?.replacement
+        if (replacement === null) {
           continue
         }
-        const content = edit ? edit.replacement!.content : entry.message.content
+        const content = replacement ? replacement.content : entry.message.content
         const text =
           typeof content === 'string'
             ? content
