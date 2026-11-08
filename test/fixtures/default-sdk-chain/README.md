@@ -1,8 +1,8 @@
 # Default SDK chain regressions
 
-`scenarios.mjs` runs the production TaskEngine and default Pi child factory with
-owned temporary sessions. Only the model responses are scripted; no model service,
-user credentials, or deployment service is used.
+`scenarios.mjs` runs the production TaskEngine and default Pi child factory in
+owned temporary sessions, with scripted model responses and an injected child-abort
+failure. No model service, user credentials, or deployment service is used.
 
 The cases cover independent history, returned and thrown failures, cancellation,
 terminal output, and request replay. Native tools come from the Pi SDK. The parent
