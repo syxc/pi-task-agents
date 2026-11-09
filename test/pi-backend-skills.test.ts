@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Skill } from '@earendil-works/pi-coding-agent'
 import type { AgentProfile } from '../src/types.ts'
-import { fixture } from './pi-backend-test-helpers.ts'
+import { answer, fixture, tool } from './pi-backend-test-helpers.ts'
 
 const skill = (name: string, filePath: string, disableModelInvocation = false): Skill => ({
   name,
@@ -16,7 +16,10 @@ const skill = (name: string, filePath: string, disableModelInvocation = false): 
 })
 
 function skillSearchTool(f: Awaited<ReturnType<typeof fixture>>) {
-  const tool = f.options().customTools?.find((candidate) => candidate.name === 'task_skill_search')
+  const tool = f
+    .session()
+    .extensionRunner.getAllRegisteredTools()
+    .find((candidate) => candidate.definition.name === 'task_skill_search')?.definition
   assert.ok(tool)
   return tool
 }
@@ -313,4 +316,63 @@ test('initially empty Skill display does not add search without a readable hidde
   const child = await f.child({ skills: [], initialSkills: [] })
   assert.ok(!f.session().getCallableToolNames().includes('task_skill_search'))
   await child.dispose()
+})
+
+test('Skills discovered during extension binding remain searchable and readable', async (t) => {
+  const f = await fixture(t)
+  const skillDir = join(f.root, 'late-skill')
+  const skillPath = join(skillDir, 'SKILL.md')
+  const extension = join(f.root, 'discover.mjs')
+  await mkdir(skillDir)
+  await writeFile(
+    extension,
+    `import { writeFileSync } from 'node:fs';
+export default pi => {
+  pi.on('resources_discover', () => {
+    writeFileSync(${JSON.stringify(skillPath)}, '---\\nname: late-skill\\ndescription: A dynamically discovered Skill\\n---\\nLATE_SKILL_BODY\\n');
+    return { skillPaths: [${JSON.stringify(skillDir)}] };
+  });
+};`
+  )
+  let resolved: AgentProfile | undefined
+  const child = await f.child(
+    { skills: [skillDir], extensions: [extension], initialSkills: [] },
+    undefined,
+    async (profile) => {
+      resolved = profile
+    }
+  )
+  const canonicalSkillPath = await realpath(skillPath)
+  assert.deepEqual(resolved?.skillSnapshot, ['late-skill'])
+  assert.ok(f.session().getCallableToolNames().includes('task_skill_search'))
+  assert.ok(resolved?.toolInventory?.includes('task_skill_search'))
+  assert.ok(!resolved?.nativeToolSnapshot?.includes('task_skill_search'))
+
+  let requests = 0
+  f.script((step, context) => {
+    requests = step
+    if (step === 1) {
+      return tool('task_skill_search', { query: 'late-skill' })
+    }
+    const result = context.messages.findLast((message) => message.role === 'toolResult')
+    assert.ok(result && !result.isError)
+    const content = result.content[0]
+    assert.ok(content?.type === 'text')
+    if (step === 2) {
+      const page = JSON.parse(content.text)
+      assert.deepEqual(page.skills, [
+        {
+          name: 'late-skill',
+          description: 'A dynamically discovered Skill',
+          path: canonicalSkillPath
+        }
+      ])
+      return tool('read', { path: page.skills[0].path })
+    }
+    assert.equal(step, 3)
+    assert.match(content.text, /LATE_SKILL_BODY/)
+    return answer('done')
+  })
+  await child.prompt('Discover the authorized Skill and read its body.')
+  assert.equal(requests, 3)
 })

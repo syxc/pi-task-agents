@@ -474,7 +474,9 @@ export function createPiChildFactory({
           return liveSkill && !liveSkill.disableModelInvocation ? [liveSkill] : []
         })
       }
+      let registerSkillSearch: (() => void) | undefined
       const skillsContext: ExtensionFactory = (pi) => {
+        registerSkillSearch = () => pi.registerTool(taskSkillSearchTool)
         pi.on('before_agent_start', (event) => {
           const allowedNow = new Map(
             currentSearchableSkills().map((skill) => [skillIdentity(skill), skill])
@@ -638,29 +640,18 @@ export function createPiChildFactory({
           extraTools.add(name)
         }
       }
-      const canReadSkillFiles =
+      const canReadSkillFiles = () =>
         allow('read') ||
         (allow('bash') && !extraTools.has('bash') && (!shared || shared.native.has('bash')))
-      canSearchSkills =
+      const reserveSkillSearch =
         profile.initialSkills !== undefined &&
-        currentSearchableSkills().some(
-          (skill) => !profile.initialSkills?.includes(skill.name.trim().normalize('NFKC'))
-        ) &&
-        canReadSkillFiles &&
+        canReadSkillFiles() &&
         !configuredTools.some((tool) => tool.name === 'task_skill_search') &&
         !pluginNames.includes('task_skill_search') &&
         !profile.disallowedTools?.some(
           (name) => normalizedSelectorName(name) === 'task_skill_search'
         )
-      if (canSearchSkills) {
-        extraTools.add('task_skill_search')
-        tools.push('task_skill_search')
-      }
-      const plugins = [
-        ...pluginNames,
-        ...configuredTools.map((tool) => tool.name),
-        ...(canSearchSkills ? ['task_skill_search'] : [])
-      ]
+      const plugins = [...pluginNames, ...configuredTools.map((tool) => tool.name)]
       if (commands && plugins.includes('bash_task')) {
         throw new Error('Configured tool conflicts with the owned bash_task control')
       }
@@ -682,14 +673,15 @@ export function createPiChildFactory({
         modelRuntime: steering.scopeRuntime(runtime),
         model,
         thinkingLevel,
-        tools: sdkToolSelection(tools, plugins, allow, discovery, mcpEnabled),
+        // Pi freezes this allowlist at construction, before extensions discover their Skills.
+        tools: [
+          ...sdkToolSelection(tools, plugins, allow, discovery, mcpEnabled),
+          ...(reserveSkillSearch ? ['task_skill_search'] : [])
+        ],
         excludeTools,
-        customTools:
-          configuredTools.length || canSearchSkills
-            ? [...configuredTools, ...(canSearchSkills ? [taskSkillSearchTool] : [])].filter(
-                (tool) => allow(tool.name)
-              )
-            : undefined,
+        customTools: configuredTools.length
+          ? configuredTools.filter((tool) => allow(tool.name))
+          : undefined,
         settingsManager: settings,
         resourceLoader: loader,
         sessionManager: manager
@@ -1070,8 +1062,26 @@ export function createPiChildFactory({
         }
         await commands?.ready()
         checkCanceled()
-        for (const name of pluginToolNames(loader, resources.extensions.sources)) {
+        const loadedPluginNames = pluginToolNames(loader, resources.extensions.sources)
+        for (const name of loadedPluginNames) {
           extraTools.add(name)
+        }
+        // bindExtensions discovers additional Skills; decide before freezing the tool inventory.
+        canSearchSkills =
+          reserveSkillSearch &&
+          canReadSkillFiles() &&
+          currentSearchableSkills().some(
+            (skill) => !profile.initialSkills?.includes(skill.name.trim().normalize('NFKC'))
+          ) &&
+          !loadedPluginNames.includes('task_skill_search')
+        if (canSearchSkills) {
+          if (!registerSkillSearch) {
+            throw new Error('Child Skill extension did not initialize')
+          }
+          extraTools.add('task_skill_search')
+          tools.push('task_skill_search')
+          policy = childToolPolicy(profile, tools, extraTools, (name) => serverFor(name))
+          registerSkillSearch()
         }
         if (session.getCallableToolNames().some((name) => !allow(name))) {
           throw new Error('Pi exposed tools outside the child allowlist')
