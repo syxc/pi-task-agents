@@ -802,7 +802,7 @@ test('replacement extension instances reclaim detached engines without cross-ses
 })
 
 test('admission snapshots the current inherited model and thinking, and reload continuation does not drift', async (t) => {
-  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
   const agentDir = await mkdtemp(join(tmpdir(), 'controller-models-'))
   t.after(() => rm(agentDir, { recursive: true, force: true }))
   let thinking = 'high'
@@ -824,6 +824,7 @@ test('admission snapshots the current inherited model and thinking, and reload c
     childFactory: () => {
       factoryCalls++
       return async ({ profile, sessionPath, onProfileResolved }) => {
+        await writeFile(sessionPath, '')
         await onProfileResolved?.({ ...profile, skillSnapshot: [] })
         dispatched.push({ profile, sessionPath })
         return {

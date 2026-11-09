@@ -33,8 +33,8 @@
 | 独立子会话，不复制父对话 | `LR/api/local-task-runner.ts`、子会话共享契约 | `pi-backend.ts`、`child-session-file.ts` | 对应实现；`pi-backend.test.ts` 覆盖独立历史与续接 |
 | 队列、并发占用、取消排队任务 | `LR/background-task/runner.ts` | `engine.ts`、`engine-admission.ts` | Pi 适配；每个父会话默认并发 4，可配置 1 至 10；`config.test.ts`、`engine.test.ts` 覆盖上限、排队、调度、取消和清理占槽 |
 | 已准入请求去重，持久化先于执行 | `LR/api/local-task-append.ts` | `engine-admission.ts`、`engine-append.ts` | 对应实现；`engine.test.ts` 覆盖提交前后崩溃、去重回执和补偿 |
-| 运行中 append 合并到原 Turn，排队时不重复派发 | `LR/api/local-task-append.ts`、steering service | `engine-append.ts`、`child-steering.ts` | 对应实现；`engine.test.ts`、`task-lineage.test.ts` |
-| 闲置 append 新建任务、沿用子历史及权限快照 | `LR/api/local-task-append-lifecycle.ts` | `engine.ts`、`engine-session-safety.ts` | 对应实现；续接、冻结 profile、重启和历史权限回归 |
+| 运行中 append 合并到原 Turn，排队时不重复派发 | `LR/api/local-task-append.ts`、steering service | `engine-append.ts`、`child-steering.ts` | 对应实现；Pi 将排队任务的续接内容并入尚未派发的首个 prompt，仍只产生一个 Turn 和一个最终结果；`engine.test.ts`、`task-lineage.test.ts` |
+| 闲置 append 新建任务、沿用子历史及权限快照 | `LR/api/local-task-append-lifecycle.ts` | `engine.ts`、`engine-session-safety.ts`、`child-session-file.ts` | 对应实现；`engine.test.ts`、`task-lineage.test.ts` 覆盖续接、冻结 profile、重启和历史权限；子会话文件缺失时拒绝续接（`TASK_CHILD_NOT_FOUND`），不静默重建历史 |
 | 续接来源及 append 执行模式可追溯 | `LR/api/local-task-append-lifecycle.ts`、`AT/local-task-control.ts` | `types.ts`、`engine.ts`、`store.ts`、`tool-result-control.ts` | 对应实现；`task-lineage.test.ts` 覆盖生产、查询、重启及固定上游查询源码对照；不为旧记录补造关系 |
 | 闲置同步 send 不排队、不混入另一 Turn | `AT/local-mavis.ts` 的 session send | `engine.ts`、`task_send` | Pi 适配；仅本 owner 的子会话，不提供通用 Mavis 会话管理；busy、重放及通知回归见 `engine.test.ts` |
 | 任务 ID 与 Turn ID 可逆映射 | `LR/background-task/turn-id.ts` | `vendor/mcode-adapters/task-turn-id.ts` | 对应实现；`engine.test.ts` 覆盖固定上游源码和 opaque ID |

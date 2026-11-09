@@ -48,7 +48,7 @@ if (version.status !== 0) {
 
 console.log(
   `Real-model e2e: pi ${version.stdout.trim()}, provider openai-codex, ` +
-    `models gpt-6.1-sol/gpt-6-luna, ${selected.length} file(s)`
+    `models gpt-6.1-terra/gpt-6-luna, ${selected.length} file(s)`
 )
 console.log(`Files: ${selected.join(', ')}`)
 let child

@@ -131,6 +131,9 @@ async function setup(
   const rootDir = await mkdtemp(fileURLToPath(new URL('../.engine-test-', import.meta.url)))
   const children: MockChild[] = []
   const createChild = async (args: CreateChildOptions): Promise<MockChild> => {
+    // Mirror the real backend: creating a child establishes its session file,
+    // which later continuations must reuse rather than recreate.
+    await writeFile(args.sessionPath, '')
     const child: MockChild = {
       ...args,
       calls: [],
@@ -262,6 +265,24 @@ test('running append steers once, idle append creates a task and reuses session 
   await waitFor(() => children[0].calls.length === 2)
   assert.equal(children.length, 1)
   assert.equal(children[0].calls[1].text, 'continue')
+})
+
+test('idle continuation refuses a missing child session instead of recreating history', async (t) => {
+  const { engine, children } = await setup(t)
+  const first = await engine.start(input(), profile)
+  await waitFor(() => children[0]?.calls.length)
+  await finish(engine, children[0])
+  await rm(first.childSessionPath)
+  for (const continuation of [
+    () => engine.append(first.task_id, 'background continuation'),
+    () => engine.send(first.session_id, 'synchronous continuation')
+  ]) {
+    // oxlint-disable-next-line no-await-in-loop -- Both continuations must be refused against the same missing file.
+    await assert.rejects(continuation(), { code: 'TASK_CHILD_NOT_FOUND', status: 404 })
+  }
+  assert.equal(children.length, 1)
+  assert.equal(children[0].calls.length, 1)
+  assert.equal((await engine.query()).length, 1)
 })
 
 test('cancel waits for abort and prompt settlement before admitting another task', async (t) => {
@@ -403,8 +424,12 @@ test('dead owner pending task becomes lost and can resume the same child JSONL p
   await engine.close()
   const script = `
     import { TaskEngine } from ${JSON.stringify(new URL('../src/engine.ts', import.meta.url).href)};
+    import { writeFileSync } from 'node:fs';
     const engine = new TaskEngine({rootDir: process.argv[1], parentId:'parent', cwd:process.argv[1],
-      createChild: async ({sessionPath}) => ({sessionPath, prompt:()=>new Promise(()=>{}), abort:async()=>{}, dispose:async()=>{}})});
+      createChild: async ({sessionPath}) => {
+        writeFileSync(sessionPath, '');
+        return {sessionPath, prompt:()=>new Promise(()=>{}), abort:async()=>{}, dispose:async()=>{}};
+      }});
     await engine.init();
     await engine.start({agent_name:'worker',description:'crash',prompt:'run',run_in_background:true}, ${JSON.stringify(profile)}, {requestId:'crash'});
   `
@@ -1881,10 +1906,12 @@ test('regression: uncommitted admission is invisible to completion pump and ambi
     assert.equal(replay.task_id, candidate.task_id)
     assert.equal(replay.status, 'lost')
     assert.equal(children.length, 1, 'uncertain durable admission never restarts automatically')
-    const recovery = await restored.append(replay.task_id, 'explicit recovery')
-    await waitFor(() => children[1]?.calls.length)
-    assert.equal(children[1].calls[0].text, 'explicit recovery')
-    await restored.stop(recovery.task_id)
+    // The uncertain row was never dispatched, so it has no child history to continue.
+    await assert.rejects(restored.append(replay.task_id, 'explicit recovery'), {
+      code: 'TASK_CHILD_NOT_FOUND',
+      status: 404
+    })
+    assert.equal(children.length, 1)
   } finally {
     await restored.close()
   }
@@ -2061,6 +2088,8 @@ test('regression: profile snapshot persistence failure never prompts and seals t
     factoryCalls++
     await readyToResolve.promise
     assert.ok(args.onProfileResolved)
+    // The real backend creates the session file before resolving its profile.
+    await writeFile(args.sessionPath, '')
     await args.onProfileResolved({
       ...args.profile,
       skills: ['resolved-skill'],
@@ -3412,11 +3441,14 @@ test('regression: idle append persistence failure does not invent an admitted tu
 async function crashSteeringReservation(rootDir: string, phase: 'before' | 'after') {
   const script = `
     import { TaskEngine } from ${JSON.stringify(new URL('../src/engine.ts', import.meta.url).href)};
-    import { readFile } from 'node:fs/promises';
+    import { readFile, writeFile } from 'node:fs/promises';
     const steers = [];
     const engine = new TaskEngine({ rootDir: process.argv[1], parentId: 'parent', cwd: process.argv[1],
-      createChild: async ({ sessionPath }) => ({ sessionPath, prompt: () => new Promise(() => {}),
-        steer: async (text) => { steers.push(text); }, abort: async () => {}, dispose: async () => {} }) });
+      createChild: async ({ sessionPath }) => {
+        await writeFile(sessionPath, '');
+        return { sessionPath, prompt: () => new Promise(() => {}),
+          steer: async (text) => { steers.push(text); }, abort: async () => {}, dispose: async () => {} };
+      } });
     await engine.init();
     const task = await engine.start({ description: 'crash window', prompt: 'original prompt', run_in_background: true },
       ${JSON.stringify(profile)});

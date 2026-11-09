@@ -1,10 +1,21 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
-import { prepareSession } from '../src/child-session-file.ts'
+import { assertSessionFile, prepareSession } from '../src/child-session-file.ts'
+
+test('missing child sessions are reported as not found without masking other I/O errors', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-child-session-assert-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await assert.rejects(assertSessionFile(join(root, 'missing.jsonl')), {
+    code: 'TASK_CHILD_NOT_FOUND',
+    status: 404
+  })
+  await symlink(join(root, 'loop'), join(root, 'loop'))
+  await assert.rejects(assertSessionFile(join(root, 'loop', 'child.jsonl')), { code: 'ELOOP' })
+})
 
 test('a crashed trailing child session record is skipped and repaired on resume', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'pi-child-session-'))

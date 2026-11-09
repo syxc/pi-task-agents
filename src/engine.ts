@@ -20,6 +20,7 @@ import {
   type TaskTerminalOutcome
 } from './engine-terminal.ts'
 import { SessionSafety } from './engine-session-safety.ts'
+import { assertSessionFile } from './child-session-file.ts'
 import {
   captureTaskExecutionContext,
   runWithoutTaskExecutionContext
@@ -398,6 +399,7 @@ export class TaskEngine {
     }
     if (previous) {
       profile = this.safety.continuation(previous)
+      await assertSessionFile(previous.childSessionPath)
     }
     const id = this.domain.createId()
     const sessionId = previous?.session_id ?? randomUUID()

@@ -131,7 +131,7 @@ test(
         [
           'Call the task tool exactly once with agent_name "worker", description "stop target", run_in_background true, and prompt:',
           '"Run bash with the command sleep 45, wait for it to finish, then reply exactly STOP_TARGET_DONE. Do not use other tools."',
-          'After it returns, call task_stop with that task_id and reason "e2e stop".',
+          'After it returns, run bash with the command sleep 5 so the child starts generating, then call task_stop with that task_id and reason "e2e stop".',
           'After it returns, call task_output with that task_id and offset 0.',
           'Then reply exactly STOP_FLOW_DONE. Do not call other tools.'
         ].join(' ')

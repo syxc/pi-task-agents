@@ -9,10 +9,10 @@ import { isRecord, type JsonRecord } from './support.ts'
 export const E2E_ENABLED = process.env.PI_E2E === '1'
 
 export const E2E_PROVIDER = 'openai-codex'
-export const E2E_SOL = 'gpt-6.1-sol'
+export const E2E_TERRA = 'gpt-6.1-terra'
 export const E2E_LUNA = 'gpt-6-luna'
 
-const APPROVED_MODELS = new Set([E2E_SOL, E2E_LUNA])
+const APPROVED_MODELS = new Set([E2E_TERRA, E2E_LUNA])
 const EXTENSION_PATH = fileURLToPath(new URL('../../src/extension.ts', import.meta.url))
 const BUILTIN_ROLES = ['explore', 'worker', 'verifier', 'mavis'] as const
 
