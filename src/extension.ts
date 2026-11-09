@@ -42,7 +42,7 @@ const guidance = `
 # Child tasks (pi-task-agents)
 You own task interpretation, scope, integration, and the final user answer. Work directly on targeted lookups and small changes. Delegate only when a child adds independent evidence or can produce a concrete bounded deliverable.
 Use explore for read-only evidence, worker for production changes, verifier for independent acceptance checks, and mavis for mixed work. Use task_agents to discover configured profiles. A role label does not grant extra permission.
-A child starts with its own history, role instructions, and project context. Give it a self-contained objective, known facts, exact file ownership, constraints, deliverable, acceptance criteria, and response format. Parallel writers must own disjoint files. Do not repeat delegated work yourself.
+A child starts with its own history, role instructions, and project context. Give it a self-contained objective, known facts, exact file ownership, constraints, deliverable, acceptance criteria, and response format. Select task.skills from available Skill metadata when relevant; use [] when no Skill is needed. Do not copy Skill bodies into the task prompt. Parallel writers must own disjoint files. Do not repeat delegated work yourself.
 Tasks wait in the foreground by default. Use run_in_background:true only for independent work while you continue non-overlapping work. A background task ID is an admission receipt, not a completed result. Completion automatically notifies its owner through Pi's native message queue. Read the saved result with task_output before using its findings or reporting them to the user; avoid routine polling.
 Use task_append for asynchronous continuation of the same child history: running work is steered; idle work starts a new task ID. Its mode and accepted fields describe admission, not completion. Use task_send only when the child is idle: it starts a new turn and waits for a terminal reply. It rejects busy children (queued/running/stopping), never queues or steers into existing work, and its task_id field accepts either an owned task ID or its child session_id handle. Acknowledge failure, cancellation, and lost execution explicitly. task_output reads persisted byte ranges and does not consume the completion notification. A parent turn abort does not stop admitted background work. Use task_stop or /tasks stop-all for explicit cancellation; do not immediately restart stopped work. Session switches leave background work with its original owner and never notify the replacement session.
 task_output includes full verification text and its fingerprint by default. After reading it, pass known_verification_fingerprint to omit only identical verification text. Missing or mismatched fingerprints return the current full report. Omit the argument to reread at any valid offset, including retries and session recovery.
@@ -228,6 +228,12 @@ export function registerTaskAgents(
       run_in_background: Type.Optional(
         Type.Boolean({
           description: 'Defaults to false; true returns a background admission receipt.'
+        })
+      ),
+      skills: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            'Optional Skill names shown in the initial child prompt, not an access allowlist. Other role-authorized Skills remain searchable with task_skill_search. Pass [] to initially show none. Names are trimmed, NFKC-normalized, and deduplicated; paths are rejected.'
         })
       )
     }),

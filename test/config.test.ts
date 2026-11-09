@@ -355,6 +355,13 @@ test('input model and Pi thinking overrides produce independent frozen profiles'
     () => resolveProfile(config, { agent_name: 'worker', run_in_background: 1 }),
     /expected a boolean/
   )
+  assert.deepEqual(
+    resolveProfile(config, { agent_name: 'worker', skills: ['  Ａ ', 'A', 'B'] }).initialSkills,
+    ['A', 'B']
+  )
+  for (const skills of [null, [''], ['../escape'], ['..'], ['C:skill'], ['skill\\path']]) {
+    assert.throws(() => resolveProfile(config, { agent_name: 'worker', skills }), /input\.skills/)
+  }
   assert.throws(
     () => resolveProfile(config, { agent_name: 'worker', prompt: 5 }),
     /expected a string/

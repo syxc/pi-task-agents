@@ -39,7 +39,8 @@ const taskKeys: readonly string[] = [
   'effort',
   'prompt',
   'description',
-  'run_in_background'
+  'run_in_background',
+  'skills'
 ]
 
 function own(value: object, key: PropertyKey): boolean {
@@ -318,12 +319,20 @@ function mergeRole(base: AgentProfile, override: RoleOptions): AgentProfile {
 }
 
 function checkEffective(role: AgentProfile, name: string): void {
-  const { name: _ignored, skillSnapshot, nativeToolSnapshot, toolInventory, ...options } = role
+  const {
+    name: _ignored,
+    initialSkills,
+    skillSnapshot,
+    nativeToolSnapshot,
+    toolInventory,
+    ...options
+  } = role
   checkRole(
     role.effort === undefined ? options : { ...options, thinking: undefined },
     'roles.' + name
   )
   for (const [field, value] of Object.entries({
+    initialSkills,
     skillSnapshot,
     nativeToolSnapshot,
     toolInventory
@@ -479,6 +488,31 @@ export function resolveProfile(config: TaskAgentsConfig, input: unknown): AgentP
   if (own(input, 'run_in_background') && typeof input.run_in_background !== 'boolean') {
     fail('input.run_in_background', 'expected a boolean')
   }
+  let initialSkills: string[] | undefined
+  if (own(input, 'skills')) {
+    if (
+      !Array.isArray(input.skills) ||
+      input.skills.some((skillName) => typeof skillName !== 'string')
+    ) {
+      fail('input.skills', 'expected an array of Skill names')
+    }
+    initialSkills = [
+      ...new Set(input.skills.map((skillName) => skillName.trim().normalize('NFKC')))
+    ]
+    if (
+      initialSkills.some(
+        (skillName) =>
+          !skillName ||
+          skillName === '.' ||
+          skillName === '..' ||
+          skillName.includes('/') ||
+          skillName.includes('\\') ||
+          skillName.includes(':')
+      )
+    ) {
+      fail('input.skills', 'expected nonempty Skill names, not paths')
+    }
+  }
   const base = config.roles[name]
   const profile: AgentProfile = {
     ...base,
@@ -486,6 +520,7 @@ export function resolveProfile(config: TaskAgentsConfig, input: unknown): AgentP
     effort: requestedEffort ?? (requestedModel ? undefined : base.effort),
     thinking: requestedEffort !== undefined || requestedModel ? undefined : base.thinking,
     tools: [...base.tools],
+    ...(initialSkills !== undefined ? { initialSkills } : {}),
     ...(base.extensions ? { extensions: [...base.extensions] } : {}),
     ...(base.skills ? { skills: [...base.skills] } : {}),
     ...(base.mcpServers ? { mcpServers: [...base.mcpServers] } : {}),

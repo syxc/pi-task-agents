@@ -3,12 +3,15 @@ import { chmod } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type * as PiSdkModule from '@earendil-works/pi-coding-agent'
+import { Type, type Static } from 'typebox'
 import type {
   AgentSessionEvent,
+  Skill,
   ExtensionFactory,
   InlineExtension,
   CreateAgentSessionOptions,
-  ModelRuntime
+  ModelRuntime,
+  ToolDefinition
 } from '@earendil-works/pi-coding-agent'
 import type {
   AgentProfile,
@@ -48,6 +51,7 @@ import { createToolFileObservation } from './tool-file-observation.ts'
 import { createChildCommands } from './child-commands.ts'
 import type { ParentRuntimeSnapshot } from './parent-runtime.ts'
 import { selectParentTools } from './child-parent-tools.ts'
+import { searchAuthorizedSkills } from './skill-context.ts'
 
 type PiSdk = Pick<
   typeof PiSdkModule,
@@ -130,6 +134,10 @@ function redact(text: unknown): string {
       '$1[redacted]'
     )
 }
+function skillIdentity(skill: Pick<Skill, 'name' | 'filePath'>): string {
+  return `${skill.name.trim().normalize('NFKC')}\0${resolve(skill.filePath)}`
+}
+
 function safeError(error: unknown): ChildError {
   const result: ChildError = new Error(redact(error instanceof Error ? error.message : error))
   if (isRecord(error) && typeof error.name === 'string' && error.name) {
@@ -391,6 +399,7 @@ export function createPiChildFactory({
       let current: ChildRun | undefined
       const steering = createChildSteering(() => current)
       const messages = createChildMessageWindow<ChildRun>(manager)
+      let childLoadedSkills: Skill[] = []
       const configuredTools = [...(shared?.tools ?? []), ...(customTools ?? [])].filter((tool) =>
         roleAllowsTool(profile.name, tool.name)
       )
@@ -434,13 +443,81 @@ export function createPiChildFactory({
       let serverFor: (name: string) => string | undefined = shared?.serverFor ?? (() => undefined)
       let policy = childToolPolicy(profile, tools, extraTools, (name) => serverFor(name))
       const sharedNames = shared && new Set(shared.tools.map((tool) => tool.name))
+      let canSearchSkills = false
       const allow = (name: string): boolean =>
         policy(name) &&
         (!sharedNames ||
           sharedNames.has(name) ||
+          (name === 'task_skill_search' && canSearchSkills) ||
           ['codemode', 'tool_search'].includes(name) ||
           (name === 'bash_task' && canManageCommands)) &&
         (normalizedSelectorName(name) !== 'codemode' || isCodemodeEnabled?.() === true)
+      const creationHostSkills = new Set(resources.skills.inherited.map(skillIdentity))
+      const currentSearchableSkills = (): Skill[] => {
+        const currentHost = (resourceHost?.getSkills().skills ?? []).filter(
+          (skill) => projectTrusted || skill.sourceInfo.scope !== 'project'
+        )
+        const currentHostByIdentity = new Map(
+          currentHost.map((skill) => [skillIdentity(skill), skill])
+        )
+        return childLoadedSkills.flatMap((skill) => {
+          const identity = skillIdentity(skill)
+          if (
+            skill.disableModelInvocation ||
+            (skillCeiling && !skillCeiling.has(normalizedSelectorName(skill.name)))
+          ) {
+            return []
+          }
+          const liveSkill = creationHostSkills.has(identity)
+            ? currentHostByIdentity.get(identity)
+            : skill
+          return liveSkill && !liveSkill.disableModelInvocation ? [liveSkill] : []
+        })
+      }
+      const skillsContext: ExtensionFactory = (pi) => {
+        pi.on('before_agent_start', (event) => {
+          const allowedNow = new Map(
+            currentSearchableSkills().map((skill) => [skillIdentity(skill), skill])
+          )
+          event.systemPromptOptions.skills = (event.systemPromptOptions.skills ?? []).flatMap(
+            (skill) => {
+              if (
+                profile.initialSkills !== undefined &&
+                !profile.initialSkills.includes(skill.name.trim().normalize('NFKC'))
+              ) {
+                return []
+              }
+              const currentSkill = allowedNow.get(skillIdentity(skill))
+              return currentSkill ? [currentSkill] : []
+            }
+          )
+        })
+      }
+      const taskSkillSearchSchema = Type.Object(
+        {
+          query: Type.Optional(Type.String()),
+          offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 }))
+        },
+        { additionalProperties: false }
+      )
+      const taskSkillSearchTool: ToolDefinition<typeof taskSkillSearchSchema> = {
+        name: 'task_skill_search',
+        label: 'task_skill_search',
+        description:
+          'Search and list authorized Skills by name or description. Returns metadata only; use the available file-reading tool on a returned exact path to inspect SKILL.md.',
+        parameters: taskSkillSearchSchema,
+        execute: async (_id, params: Static<typeof taskSkillSearchSchema>) => {
+          const page = searchAuthorizedSkills(
+            currentSearchableSkills(),
+            params.query,
+            params.offset
+          )
+          return {
+            content: [{ type: 'text', text: JSON.stringify(page) }],
+            details: undefined
+          }
+        }
+      }
       const guard: ExtensionFactory = (pi) => {
         pi.on('tool_call', (event) => {
           if (!allow(event.toolName)) {
@@ -450,6 +527,7 @@ export function createPiChildFactory({
       }
       const factories: InlineExtension[] = [
         guard,
+        skillsContext,
         fileObservation.extension,
         ...(commands ? [commands.extension] : [])
       ]
@@ -521,7 +599,10 @@ export function createPiChildFactory({
             'Use only provided tools. When codemode is enabled, batch independent calls and filter bulky results when useful; prefer direct tools for a single simple call.',
             'Return a concise handoff with results, relevant paths, validation and blockers/risks. Do not repeat the briefing or raw logs unless needed as evidence.',
             'Report evidence and validation honestly; never claim checks you did not run.',
-            profile.instructions ?? ''
+            profile.instructions ?? '',
+            profile.initialSkills !== undefined && (allow('read') || allow('bash'))
+              ? 'When available, use task_skill_search to find metadata for other authorized Skills. Use the available native file-reading tool on a returned exact path only when needed; do not scan Skill directories.'
+              : ''
           ].filter(Boolean),
         skillsOverride: (base) => {
           const skills = [
@@ -537,33 +618,51 @@ export function createPiChildFactory({
                 )
               : [])
           ]
-          return {
-            ...base,
-            skills: [
-              ...new Map(
-                skills
-                  .filter(
-                    (skill) => !skillCeiling || skillCeiling.has(normalizedSelectorName(skill.name))
-                  )
-                  .map((skill) => [skill.name, skill])
-              ).values()
-            ]
-          }
+          childLoadedSkills = [
+            ...new Map(
+              skills
+                .filter(
+                  (skill) => !skillCeiling || skillCeiling.has(normalizedSelectorName(skill.name))
+                )
+                .map((skill) => [skill.name, skill])
+            ).values()
+          ]
+          return { ...base, skills: childLoadedSkills }
         }
       })
       await loader.reload()
       checkCanceled()
-      const plugins = [
-        ...pluginToolNames(loader, resources.extensions.sources),
-        ...configuredTools.map((tool) => tool.name)
-      ]
-      if (commands && plugins.includes('bash_task')) {
-        throw new Error('Configured tool conflicts with the owned bash_task control')
-      }
-      for (const name of plugins) {
+      const pluginNames = pluginToolNames(loader, resources.extensions.sources)
+      for (const name of [...pluginNames, ...configuredTools.map((tool) => tool.name)]) {
         if (!shared?.native.has(name)) {
           extraTools.add(name)
         }
+      }
+      const canReadSkillFiles =
+        allow('read') ||
+        (allow('bash') && !extraTools.has('bash') && (!shared || shared.native.has('bash')))
+      canSearchSkills =
+        profile.initialSkills !== undefined &&
+        currentSearchableSkills().some(
+          (skill) => !profile.initialSkills?.includes(skill.name.trim().normalize('NFKC'))
+        ) &&
+        canReadSkillFiles &&
+        !configuredTools.some((tool) => tool.name === 'task_skill_search') &&
+        !pluginNames.includes('task_skill_search') &&
+        !profile.disallowedTools?.some(
+          (name) => normalizedSelectorName(name) === 'task_skill_search'
+        )
+      if (canSearchSkills) {
+        extraTools.add('task_skill_search')
+        tools.push('task_skill_search')
+      }
+      const plugins = [
+        ...pluginNames,
+        ...configuredTools.map((tool) => tool.name),
+        ...(canSearchSkills ? ['task_skill_search'] : [])
+      ]
+      if (commands && plugins.includes('bash_task')) {
+        throw new Error('Configured tool conflicts with the owned bash_task control')
       }
       const excludeTools = [...taskChildBlockedTools]
       if (!allow('codemode')) {
@@ -585,9 +684,12 @@ export function createPiChildFactory({
         thinkingLevel,
         tools: sdkToolSelection(tools, plugins, allow, discovery, mcpEnabled),
         excludeTools,
-        customTools: configuredTools.length
-          ? configuredTools.filter((tool) => allow(tool.name))
-          : undefined,
+        customTools:
+          configuredTools.length || canSearchSkills
+            ? [...configuredTools, ...(canSearchSkills ? [taskSkillSearchTool] : [])].filter(
+                (tool) => allow(tool.name)
+              )
+            : undefined,
         settingsManager: settings,
         resourceLoader: loader,
         sessionManager: manager
@@ -974,7 +1076,21 @@ export function createPiChildFactory({
         if (session.getCallableToolNames().some((name) => !allow(name))) {
           throw new Error('Pi exposed tools outside the child allowlist')
         }
-        const names = [...new Set(loader.getSkills().skills.map((skill) => skill.name))]
+        const loadedSkills = loader.getSkills().skills
+        const names = [...new Set(loadedSkills.map((skill) => skill.name))]
+        if (
+          profile.initialSkills !== undefined &&
+          profile.skillSnapshot === undefined &&
+          profile.initialSkills.some(
+            (name) =>
+              !loadedSkills.some(
+                (skill) =>
+                  skill.name.trim().normalize('NFKC') === name && !skill.disableModelInvocation
+              )
+          )
+        ) {
+          throw new Error('Requested initial Skill is not authorized or no longer available')
+        }
         skillCeiling = normalizeSelector(names)
         const facts = observedToolFacts(session, allow, extraTools)
         policy = childToolPolicy(

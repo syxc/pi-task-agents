@@ -37,6 +37,26 @@ export function normalizeTaskInput(input: TaskInput): TaskInput {
     throw new Error('Task prompt must be a string')
   }
   const result = { ...input, description }
+  if (input.skills !== undefined) {
+    if (!Array.isArray(input.skills) || input.skills.some((name) => typeof name !== 'string')) {
+      throw new Error('Task skills must be an array of Skill names')
+    }
+    const skills = [...new Set(input.skills.map((name) => name.trim().normalize('NFKC')))]
+    if (
+      skills.some(
+        (name) =>
+          !name ||
+          name === '.' ||
+          name === '..' ||
+          name.includes('/') ||
+          name.includes('\\') ||
+          name.includes(':')
+      )
+    ) {
+      throw new Error('Task skills must contain names, not paths')
+    }
+    result.skills = skills
+  }
   for (const field of ['model', 'effort', 'agent_name'] as const) {
     const value = input[field]?.trim()
     if (value === '') {

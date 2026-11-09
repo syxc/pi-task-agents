@@ -30,6 +30,25 @@ pi install git:github.com/syxc/pi-task-agents
 
 `description` 须为空白归一化后 1 至 50 个 Unicode 码点；`prompt` 允许为空，但仍应提供自包含的简报。`task_append` 的内容不能为空白；父 turn abort 不影响已准入的异步续接。
 
+## 按任务选择 Skills
+
+父会话已拥有 Skills 目录，可按派工目标通过 `task.skills` 选择首批展示的 Skill 名称，避免每个子会话重复接收完整目录。只传名称，不复制正文或自行拼接路径：
+
+```json
+{
+  "agent_name": "explore",
+  "description": "定位失败原因",
+  "skills": ["hunt"],
+  "prompt": "只读调查指定错误，按适用 Skill 返回原因、证据与验证结果。"
+}
+```
+
+名称必须来自当前角色已获准的 Skills。省略 `task.skills` 保持原来的完整目录；`task.skills: []` 表示初始不展示任何 Skill，并不关闭其他已授权 Skills。它与角色配置的 `skills: []` 不同，后者仍关闭该角色的 Skills。
+
+有未展示的已授权 Skills、子会话有原生文件读取能力且查阅工具未被禁用时，子会话提供 `task_skill_search` 查询其完整名称、描述与路径；再用原生 `read` 或获准的原生 Bash 读取适用的 `SKILL.md`。查询为空可分页查看目录，结果保留总数和后续页信息，不预加载正文。禁止模型自动调用的 Skills 不参与搜索，也不能作为首批选择。未知或不在角色范围内的首批名称会报错，不静默扩权。
+
+首批选择随子会话保存，续接沿用；搜索仍受当前资源和创建时权限上界限制。该功能不删除项目约定、不修改父对话的目录，也不改变 MCP、工具或已有任务的权限。
+
 ## 结果与通知
 
 ### 结果读取
@@ -217,6 +236,7 @@ pnpm run pack
 - `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `pnpm run lint`、`pnpm run lint:type-aware`、`pnpm run lint:markdown`、`pnpm run format:check`；`pnpm run format` 仅格式化自有代码与配置，不改上游锁定源码。
 - `test`：默认离线，不包含 `test/e2e`。直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试；固定版本的 `typescript-fixture` 仅用于动态编译上游原文 fixture，不替代项目类型检查。
 - `test:e2e`：运行 `pnpm test:e2e`，或追加文件名片段选择[真实模型场景](test/e2e/)（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-sol` 和 `gpt-6-luna`，每次消耗真实额度。在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；`PI_E2E_KEEP=1` 可保留现场。每个场景检查父/子 token、费用、消息数与耗时预算，可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整阈值。MCP 与第三方 provider 不在真实模型覆盖范围内。
+- `test:e2e skills-context`：仅用 `openai-codex/gpt-6-luna`、`high` 对父子会话做 Skills A/B。100 项受控目录下，直接读取、代码实现和未预选依赖发现各跑两轮，并交替测试顺序。比较首请求输入、缓存读取、父子累计 token、工具调用和耗时，同时检查实际 Skill 读取与代码行为。设置 `PI_E2E_REPORT_DIR=/path/to/new-report-dir` 可保留不含认证的 JSON 指标；结果不等于本机所有 Skills 或任意任务的收益保证。
 - `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证。内部使用 Node 随附的 `npm pack --ignore-scripts`，避免 pnpm 打包时移除清单末尾换行而导致提取包格式检查失败；npm 不用于依赖安装。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
 
 离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收。真实模型和第三方业务验收须另行授权；`pnpm test:e2e` 以及 `scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度。
