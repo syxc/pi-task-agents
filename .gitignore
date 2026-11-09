@@ -5,3 +5,4 @@ artifacts/
 .DS_Store
 .codegraph/
 .zvec-grep/
+.auto/
