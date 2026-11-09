@@ -194,7 +194,34 @@ export async function readContextTrace(path: string): Promise<ContextTrace> {
     }
   }
   assert.ok(sawSystem, 'child has no persisted system message')
-  assert.ok(trace.firstPromptTokens > 0, 'child reported no first-request input')
+  if (!(trace.firstPromptTokens > 0)) {
+    const attempts = rows.flatMap((row) => {
+      if (!isRecord(row) || !isRecord(row.message) || row.message.role !== 'assistant') {
+        return []
+      }
+      const message = row.message
+      const usage = isRecord(message.usage) ? message.usage : {}
+      return [
+        {
+          stopReason:
+            ['stop', 'length', 'toolUse', 'error', 'aborted'].find(
+              (value) => value === message.stopReason
+            ) ?? 'other',
+          hasErrorMessage:
+            typeof message.errorMessage === 'string' && message.errorMessage.length > 0,
+          usage: Object.fromEntries(
+            ['input', 'output', 'cacheRead', 'cacheWrite'].flatMap((key) => {
+              const value = usage[key]
+              return typeof value === 'number' && Number.isFinite(value) ? [[key, value]] : []
+            })
+          )
+        }
+      ]
+    })
+    assert.fail(
+      `child reported no first-request input; assistant_attempts=${JSON.stringify(attempts)}`
+    )
+  }
   assert.ok(trace.thinkingLevels.includes('high'), 'child did not use high thinking')
   return trace
 }

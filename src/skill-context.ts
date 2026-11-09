@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, normalize, relative } from 'node:path'
+import { dirname, isAbsolute, join, normalize, relative } from 'node:path'
 import { formatSkillsForPrompt, type Skill } from '@earendil-works/pi-coding-agent'
 
 export const compactSkillCatalogHeader = 'Skill metadata (pi-task-agents):'
@@ -25,7 +25,8 @@ export function compactSkillCatalog(
       index = roots.length
       roots.push(root)
     }
-    return [skill.name, skill.description, index, relative(root, skill.filePath)]
+    const path = relative(root, skill.filePath)
+    return [skill.name, skill.description, index, path === join(skill.name, 'SKILL.md') ? '' : path]
   })
   // JSON escapes prevent metadata from closing the surrounding prompt section.
   const json = JSON.stringify({ roots, skills: rows }).replace(/[<>&]/gu, (character) => {
@@ -38,7 +39,7 @@ export function compactSkillCatalog(
       ? "Load a skill's file when the task matches its description."
       : `Use ${reader} to load a skill's file when the task matches its description.`,
     "Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.",
-    'Catalog JSON rows are [name, complete description, zero-based root index, file path]. Join roots[index] and file path; a null index means the path is already exact.',
+    'Catalog JSON rows are [name, complete description, zero-based root index, file path]. Join roots[index] and file path; an empty relative path means name/SKILL.md. A null index means the path is already exact.',
     json
   ].join('\n')
   return text.length < formatSkillsForPrompt([...skills], reader).trim().length ? text : undefined
