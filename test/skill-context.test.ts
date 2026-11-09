@@ -40,6 +40,11 @@ test('compact Skill catalogs preserve names, complete descriptions and exact pat
       filePath: 'odd/../path.md'
     }),
     Object.freeze({
+      name: 'root-directory-path',
+      description: 'An explicit empty relative path is not an omitted canonical path',
+      filePath: sep
+    }),
+    Object.freeze({
       name: 'disabled',
       description: 'Do not advertise',
       filePath: '/hidden/SKILL.md',
@@ -51,13 +56,15 @@ test('compact Skill catalogs preserve names, complete descriptions and exact pat
   assert.doesNotMatch(text, /<\/skills>|<system>/u)
   const data = JSON.parse(text.split('\n').at(-1) ?? '') as {
     roots: string[]
-    skills: Array<[string, string, number | null, string]>
+    skills: Array<[string, string, (number | null)?, string?]>
   }
-  const decoded = data.skills.map(([name, description, root, path]) => ({
-    name,
-    description,
-    path: root === null ? path : join(data.roots[root] ?? '', path || join(name, 'SKILL.md'))
-  }))
+  const decoded = data.skills.map(
+    ([name, description, root = 0, path = join(name, 'SKILL.md')]) => ({
+      name,
+      description,
+      path: root === null ? path : join(data.roots[root] ?? '', path)
+    })
+  )
   assert.deepEqual(
     decoded,
     input
@@ -69,8 +76,20 @@ test('compact Skill catalogs preserve names, complete descriptions and exact pat
       }))
   )
   assert.equal(input.at(-1)?.disableModelInvocation, true)
-  assert.equal(data.roots.length, 2)
-  assert.equal(data.skills.filter((row) => row[3] === '').length, skills.length)
+  assert.equal(data.roots.length, 3)
+  assert.equal(data.skills.filter((row) => row.length === 2).length, Math.ceil(skills.length / 2))
+  assert.equal(data.skills.filter((row) => row.length === 3).length, Math.floor(skills.length / 2))
+  const explicitRows = data.skills.map(([name, description, root = 0, path]) => [
+    name,
+    description,
+    root,
+    path ?? ''
+  ])
+  assert.ok(JSON.stringify(data.skills).length < JSON.stringify(explicitRows).length)
+  assert.match(text, /Omitted trailing fields use these defaults/)
+  const rootRow = data.skills.find((row) => row[0] === 'root-directory-path')
+  assert.equal(rootRow?.length, 4)
+  assert.equal(rootRow?.[3], '')
   assert.equal(
     data.skills.find((row) => row[0] === 'display-name')?.[3],
     join('actual-directory', 'SKILL.md')
