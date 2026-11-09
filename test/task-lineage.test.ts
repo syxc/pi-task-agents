@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
@@ -25,16 +25,19 @@ const input = { agent_name: 'worker', description: 'Owned task', prompt: 'First 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'pi-task-lineage-'))
   // oxlint-disable-next-line unicorn/consistent-function-scoping -- Each fixture owns a distinct child factory across its reopen operations.
-  const createChild = async ({ sessionPath }) => ({
-    sessionPath,
-    prompt: async () => ({
-      text: 'done',
-      outcome: { kind: 'returned' as const, status: 'succeeded' as const }
-    }),
-    steer: async () => {},
-    abort: async () => {},
-    dispose: async () => {}
-  })
+  const createChild = async ({ sessionPath }) => {
+    await writeFile(sessionPath, '')
+    return {
+      sessionPath,
+      prompt: async () => ({
+        text: 'done',
+        outcome: { kind: 'returned' as const, status: 'succeeded' as const }
+      }),
+      steer: async () => {},
+      abort: async () => {},
+      dispose: async () => {}
+    }
+  }
   const open = async () =>
     new TaskEngine({
       rootDir: root,
@@ -103,21 +106,24 @@ test('steered and queued appends keep the admitted task lineage instead of inven
   const held = new Promise<void>((resolve) => {
     release = resolve
   })
-  engine.createChild = async ({ sessionPath }) => ({
-    sessionPath,
-    async prompt() {
-      await held
-      return {
-        text: 'merged',
-        outcome: { kind: 'returned', status: 'succeeded' }
-      }
-    },
-    async steer() {},
-    async abort() {
-      release()
-    },
-    async dispose() {}
-  })
+  engine.createChild = async ({ sessionPath }) => {
+    await writeFile(sessionPath, '')
+    return {
+      sessionPath,
+      async prompt() {
+        await held
+        return {
+          text: 'merged',
+          outcome: { kind: 'returned', status: 'succeeded' }
+        }
+      },
+      async steer() {},
+      async abort() {
+        release()
+      },
+      async dispose() {}
+    }
+  }
   const first = await engine.start({ ...input, run_in_background: true }, profile)
   try {
     const appended = await engine.append(first.task_id, 'Join running turn')

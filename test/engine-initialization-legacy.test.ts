@@ -65,6 +65,7 @@ for (const status of ['running', 'stopping', 'lost'] as const) {
     })
     row.childSessionPath = join(engine.store.dir, 'owned.jsonl')
     await mkdir(engine.store.dir, { recursive: true })
+    await writeFile(row.childSessionPath, '')
     await writeFile(engine.store.file, JSON.stringify(state))
     await engine.init()
     try {

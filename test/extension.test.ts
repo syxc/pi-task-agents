@@ -110,6 +110,12 @@ function fixture() {
       return this.result
     }
     async append(id, content, options) {
+      if (!this.tasks.some((task) => task.task_id === id.trim())) {
+        throw Object.assign(new Error(`Local background task not found: ${id.trim()}`), {
+          code: 'TASK_NOT_FOUND',
+          status: 404
+        })
+      }
       this.appended = { id, content, options }
       return this.result
     }
@@ -210,6 +216,13 @@ test('task declaration and parent guidance describe foreground default and allow
     assert.match(guidance.systemPrompt, /child session_id handle/)
     assert.match(guidance.systemPrompt, /rejects busy children \(queued\/running\/stopping\)/)
     assert.match(guidance.systemPrompt, /task_append.*running work is steered/)
+    assert.match(guidance.systemPrompt, /honor that exact reference/)
+    assert.match(guidance.systemPrompt, /Never require explore or verifier/)
+    assert.match(guidance.systemPrompt, /single final answer/)
+    assert.match(guidance.systemPrompt, /fresh context/)
+    assert.match(f.tools.get('task_append').description, /single final answer/)
+    assert.match(f.tools.get('task_append').description, /original task ID/)
+    assert.match(f.tools.get('task_append').description, /nothing is delivered twice/)
     assert.match(f.tools.get('task_send').description, /task ID or the child session_id handle/)
     assert.match(
       f.tools.get('task_send').description,
@@ -822,7 +835,7 @@ test('coded admission failures remain structured error results', async () => {
 })
 
 test('real engine adapter waits by default, continues the same child and enforces owner isolation offline', async (t) => {
-  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
   const agentDir = await mkdtemp(join(tmpdir(), 'extension-adapter-'))
   t.after(() => rm(agentDir, { recursive: true, force: true }))
   const tools = new Map(),
@@ -853,6 +866,7 @@ test('real engine adapter waits by default, continues the same child and enforce
     childFactory:
       () =>
       async ({ sessionPath }) => {
+        await writeFile(sessionPath, '')
         const child = {
           sessionPath,
           prompts: [],

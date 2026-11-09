@@ -597,7 +597,7 @@ export function createPiChildFactory({
             'You do not inherit the parent conversation. Use the supplied briefing and your own child-session history only.',
             'Do not delegate or create/control Agent tasks, manage parent todos or goals, or schedule independent future work.',
             'Do not ask the end user questions. Return the exact blocker and the smallest question the parent must resolve.',
-            'Read authorized Memory sources when needed. Write only to an explicitly available child-owned Memory store; never modify User, shared project, or another Agent Memory. Otherwise return durable findings to the parent.',
+            'Read authorized Memory sources when needed. Write only durable, reusable facts to an explicitly available child-owned Memory store, never transient task progress; never modify User, shared project, or another Agent Memory. Otherwise return durable findings to the parent.',
             'Use only provided tools. When codemode is enabled, batch independent calls and filter bulky results when useful; prefer direct tools for a single simple call.',
             'Return a concise handoff with results, relevant paths, validation and blockers/risks. Do not repeat the briefing or raw logs unless needed as evidence.',
             'Report evidence and validation honestly; never claim checks you did not run.',

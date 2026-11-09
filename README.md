@@ -16,12 +16,12 @@ pi install git:github.com/syxc/pi-task-agents
 
 ## 任务工具
 
-派工简报须包含背景、文件所有权、交付物和验收条件。子会话不复制父对话；报告应保留结论、必要证据和风险，避免无关日志与简报复述。
+派工简报须包含背景、文件所有权、交付物和验收条件。用户明确指定角色时沿用该名称；不要让 explore 或 verifier 以创建或修改项目文件作为验收条件。子会话不复制父对话；报告应保留结论、必要证据和风险，避免无关日志与简报复述。
 
 | 工具 | 行为 |
 | --- | --- |
 | task | 创建子任务。默认前台等待；`run_in_background:true` 返回后台准入回执。可覆盖 `model`、`effort` |
-| task_append | 异步续接。运行中 steer 到同一任务 ID；闲置时创建新任务 ID，沿用子历史和冻结 profile |
+| task_append | 异步续接。运行中 steer 到同一任务 ID，并入该 Turn 的单一最终结果；闲置时创建新任务 ID，沿用同一子会话的历史和冻结 profile。延续同一线索时复用子会话，独立工作才新建任务 |
 | task_send | 仅在子会话闲置时同步续接；接受本 owner 的任务 ID 或子 `session_id`，busy 时拒绝且不排队 |
 | task_query | 查询本父会话拥有的任务；列表按创建时间倒序，最多返回最新 100 条，可按状态过滤 |
 | task_output | 读取持久输出；UTF-8 字节偏移、自动游标、最长 30 秒等待，默认每页 64 KiB |
@@ -70,7 +70,7 @@ pi install git:github.com/syxc/pi-task-agents
 
 ## 续接与查询
 
-续接保留子历史、角色及权限上界。运行中的 `task_append` 合并到当前 Turn；闲置续接创建新任务 ID，并记录 `parent_task_id` 和执行模式。后台 append 标为 `append`，旧记录不补推来源。查询保留失败或停止原因。
+续接保留子历史、角色及权限上界。运行中的 `task_append` 合并到当前 Turn；排队任务并入尚未派发的首个 prompt；闲置续接创建新任务 ID，并记录 `parent_task_id` 和执行模式。后台 append 标为 `append`，旧记录不补推来源。查询保留失败或停止原因。
 
 - 查看：`/tasks list`、`/tasks roles`、`/tasks show <id>`。状态栏显示运行数、有效并发上限和排队数；任务区域优先显示状态和任务身份，空间允许时显示目标、耗时及活动。
 - 停止：`/tasks stop <id>`、`/tasks stop-all`。
@@ -237,7 +237,7 @@ pnpm run pack
 
 - `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `pnpm run lint`、`pnpm run lint:type-aware`、`pnpm run lint:markdown`、`pnpm run format:check`；`pnpm run format` 仅格式化自有代码与配置，不改上游锁定源码。
 - `test`：默认离线，不包含 `test/e2e`。直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试；固定版本的 `typescript-fixture` 仅用于动态编译上游原文 fixture，不替代项目类型检查。
-- `test:e2e`：运行 `pnpm test:e2e`，或追加文件名片段选择[真实模型场景](test/e2e/)（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-sol` 和 `gpt-6-luna`，每次消耗真实额度。在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；`PI_E2E_KEEP=1` 可保留现场。每个场景检查父/子 token、费用、消息数与耗时预算，可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整阈值。MCP 与第三方 provider 不在真实模型覆盖范围内。
+- `test:e2e`：运行 `pnpm test:e2e`，或追加文件名片段选择[真实模型场景](test/e2e/)（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-terra` 和 `gpt-6-luna`，每次消耗真实额度。在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；`PI_E2E_KEEP=1` 可保留现场。每个场景检查父/子 token、费用、消息数与耗时预算，可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整阈值。MCP 与第三方 provider 不在真实模型覆盖范围内。
 - `test:e2e skills-context`：仅用 `openai-codex/gpt-6-luna`、`high` 对父子会话做 Skills A/B。100 项受控目录下，直接读取、代码实现和未预选依赖发现各跑两轮，并交替测试顺序。Node 22 下整文件超时为 50 分钟，单场景仍为 8 分钟。比较首请求输入、缓存读取、父子累计 token、工具调用和耗时，同时检查实际 Skill 读取与代码行为。设置 `PI_E2E_REPORT_DIR=/path/to/new-report-dir` 可保留不含认证的 JSON 指标；结果不等于本机所有 Skills 或任意任务的收益保证。
 - `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证。内部使用 Node 随附的 `npm pack --ignore-scripts`，避免 pnpm 打包时移除清单末尾换行而导致提取包格式检查失败；npm 不用于依赖安装。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
 

@@ -2,6 +2,7 @@ import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, open, stat } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import type { SessionManager } from '@earendil-works/pi-coding-agent'
+import { hasCode } from './guards.ts'
 
 const leases = new Set<string>()
 
@@ -15,6 +16,22 @@ export async function acquireSessionLease(path: string): Promise<() => void> {
   leases.add(key)
   return () => {
     leases.delete(key)
+  }
+}
+
+/** A continuation must reuse existing child history, never recreate a deleted session. */
+export async function assertSessionFile(path: string): Promise<void> {
+  const info = await lstat(path).catch((error: unknown) => {
+    if (hasCode(error, 'ENOENT') || hasCode(error, 'ENOTDIR')) {
+      return undefined
+    }
+    throw error
+  })
+  if (!info?.isFile()) {
+    throw Object.assign(new Error(`Task child session not found: ${path}`), {
+      code: 'TASK_CHILD_NOT_FOUND',
+      status: 404
+    })
   }
 }
 

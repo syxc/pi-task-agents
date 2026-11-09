@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -33,6 +33,7 @@ async function fixture(t: TestContext) {
     failCleanup = false
   const createChild: CreateChild = async ({ sessionPath, profile: actual }) => {
     calls++
+    await writeFile(sessionPath, '')
     const saved = JSON.parse(await readFile(engine.store.file, 'utf8'))
     assert.equal(saved.tasks.at(-1).ownedCommandCleanupPending, true)
     assert.deepEqual(actual.tools, [])

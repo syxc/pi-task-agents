@@ -78,6 +78,8 @@ test('shared delegated contract tells every role to return blockers and respect 
     assert.match(prompt, /schedul/i)
     assert.match(prompt, /Memory|memory/)
     assert.match(prompt, /child-owned/i)
+    assert.match(prompt, /durable, reusable/)
+    assert.match(prompt, /transient task progress/)
     assert.match(prompt, /When codemode is enabled/)
     assert.match(prompt, /prefer direct tools for a single simple call/)
     assert.match(prompt, /concise handoff/)
