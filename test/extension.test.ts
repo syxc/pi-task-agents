@@ -195,6 +195,7 @@ test('task declaration and parent guidance describe foreground default and allow
   try {
     const task = f.tools.get('task')
     assert.match(task.description, /Default is foreground/)
+    assert.match(task.parameters.properties.agent_name.description, /needs no preflight/)
     assert.equal(task.parameters.properties.prompt.minLength, undefined)
     assert.equal(task.parameters.properties.description.maxLength, undefined)
     assert.match(task.parameters.properties.description.description, /1-50 Unicode/)
@@ -203,6 +204,8 @@ test('task declaration and parent guidance describe foreground default and allow
       f.ctx
     )
     assert.match(guidance.systemPrompt, /foreground by default/)
+    assert.match(guidance.systemPrompt, /Do not call task_agents as routine preflight/)
+    assert.match(guidance.systemPrompt, /this task needs profile facts you lack/)
     assert.match(guidance.systemPrompt, /task_send/)
     assert.match(guidance.systemPrompt, /child session_id handle/)
     assert.match(guidance.systemPrompt, /rejects busy children \(queued\/running\/stopping\)/)
