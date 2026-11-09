@@ -30,6 +30,7 @@ import {
   stopResult
 } from './tool-result-control.ts'
 import { renderRoles, roleOverview } from './task-presentation.ts'
+import { compactSkillCatalog, compactSkillCatalogHeader } from './skill-context.ts'
 import type { TaskOutput, TaskSummary } from './types.ts'
 export type { TaskToolResult } from './tool-result-common.ts'
 
@@ -465,6 +466,29 @@ export function registerTaskAgents(
     await controller.ensure(ctx)
     if (event.messageType === 'user' && !ctx.signal?.aborted && epoch === controller.cancelEpoch) {
       controller.resume()
+    }
+    const promptOptions = event.systemPromptOptions
+    if (
+      promptOptions &&
+      promptOptions.forceSystemPrompt === undefined &&
+      (promptOptions.sections.skills === undefined ||
+        promptOptions.sections.skills.startsWith(compactSkillCatalogHeader))
+    ) {
+      const readers = ['read', 'bash'] as const
+      const reader =
+        readers.find(
+          (name) =>
+            promptOptions.selectedTools.includes(name) && !promptOptions.hiddenTools?.includes(name)
+        ) ??
+        (readers.some((name) => promptOptions.selectedTools.includes(name))
+          ? 'indirect'
+          : undefined)
+      const catalog = reader ? compactSkillCatalog(promptOptions.skills, reader) : undefined
+      if (catalog) {
+        promptOptions.sections.skills = catalog
+      } else {
+        delete promptOptions.sections.skills
+      }
     }
     return { systemPrompt: event.systemPrompt + guidance }
   })

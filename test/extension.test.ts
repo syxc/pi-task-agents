@@ -5,6 +5,46 @@ import { join } from 'node:path'
 import { registerTaskAgents, toolResult } from '../src/extension.ts'
 import * as config from '../src/config.ts'
 
+test('compact parent Skill presentation keeps resource metadata and other owners intact', async () => {
+  const f = fixture()
+  try {
+    const allowed = Array.from({ length: 24 }, (_, index) => ({
+      name: `owned-${index}`,
+      description: `Complete description ${index}`,
+      filePath: `/authorized/owned-${index}/SKILL.md`
+    }))
+    const options = {
+      skills: allowed,
+      selectedTools: ['read'],
+      hiddenTools: [],
+      sections: {} as Record<string, string>
+    }
+    const run = (value: typeof options & { forceSystemPrompt?: string }) =>
+      f.handlers.get('before_agent_start')(
+        { messageType: 'user', systemPrompt: 'base', systemPromptOptions: value },
+        f.ctx
+      )
+    await run(options)
+    assert.equal(options.skills, allowed)
+    assert.ok(options.sections.skills?.includes('Catalog JSON rows'))
+    const opaque = { ...options, forceSystemPrompt: 'custom', sections: {} }
+    await run(opaque)
+    assert.deepEqual(opaque.sections, {})
+    const external = { ...options, sections: { skills: 'external owner' } }
+    await run(external)
+    assert.equal(external.sections.skills, 'external owner')
+    const unreadable = { ...options, selectedTools: ['write'], sections: {} }
+    await run(unreadable)
+    assert.deepEqual(unreadable.sections, {})
+    options.skills = []
+    await run(options)
+    assert.equal(options.sections.skills, undefined)
+    assert.equal(allowed.length, 24)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('a full output page is preserved when the engine has advanced its byte cursor', () => {
   const output = 'a'.repeat(65536)
   const result = toolResult({
