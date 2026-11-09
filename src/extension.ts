@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Type, type Static, type TProperties, type TSchema } from 'typebox'
 import { Check } from 'typebox/value'
 import {
@@ -30,10 +31,12 @@ import {
   stopResult
 } from './tool-result-control.ts'
 import { renderRoles, roleOverview } from './task-presentation.ts'
-import { compactSkillCatalog, compactSkillCatalogHeader } from './skill-context.ts'
+import { compactSkillCatalog } from './skill-context.ts'
 import type { TaskOutput, TaskSummary } from './types.ts'
 export type { TaskToolResult } from './tool-result-common.ts'
 
+const catalogFingerprint = (text: string) =>
+  createHash('sha256').update(text, 'utf16le').digest('hex')
 const nonempty = () => Type.String({ minLength: 1 })
 const statuses = [...ACTIVE_TASK_STATUSES, ...TERMINAL_TASK_STATUSES]
 const statusSchema = Type.Union(statuses.map((value) => Type.Literal(value)))
@@ -133,6 +136,8 @@ export function registerTaskAgents(
     ...dependencies
   })
   const outputProjector = new OutputProjector()
+  // A shared prefix does not prove ownership after another extension changes the text.
+  const ownedSkillCatalogs = new Set<string>()
   const ancestry = new TaskCallAncestry()
   pi.on('tool_call', (event, ctx) => ancestry.observe(event, ctx))
   // agent_end is not a drain boundary: detached native calls may still be in permission hooks.
@@ -472,7 +477,7 @@ export function registerTaskAgents(
       promptOptions &&
       promptOptions.forceSystemPrompt === undefined &&
       (promptOptions.sections.skills === undefined ||
-        promptOptions.sections.skills.startsWith(compactSkillCatalogHeader))
+        ownedSkillCatalogs.has(catalogFingerprint(promptOptions.sections.skills)))
     ) {
       const readers = ['read', 'bash'] as const
       const reader =
@@ -485,6 +490,7 @@ export function registerTaskAgents(
           : undefined)
       const catalog = reader ? compactSkillCatalog(promptOptions.skills, reader) : undefined
       if (catalog) {
+        ownedSkillCatalogs.add(catalogFingerprint(catalog))
         promptOptions.sections.skills = catalog
       } else {
         delete promptOptions.sections.skills

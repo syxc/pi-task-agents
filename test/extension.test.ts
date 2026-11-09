@@ -27,6 +27,13 @@ test('compact parent Skill presentation keeps resource metadata and other owners
     await run(options)
     assert.equal(options.skills, allowed)
     assert.ok(options.sections.skills?.includes('Catalog JSON rows'))
+    const amended = {
+      ...options,
+      sections: { skills: `${options.sections.skills}\nExternal policy must remain.` }
+    }
+    const amendedText = amended.sections.skills
+    await run(amended)
+    assert.equal(amended.sections.skills, amendedText)
     const opaque = { ...options, forceSystemPrompt: 'custom', sections: {} }
     await run(opaque)
     assert.deepEqual(opaque.sections, {})
@@ -36,6 +43,10 @@ test('compact parent Skill presentation keeps resource metadata and other owners
     const unreadable = { ...options, selectedTools: ['write'], sections: {} }
     await run(unreadable)
     assert.deepEqual(unreadable.sections, {})
+    const refreshed = { ...options, sections: { ...options.sections }, skills: [] }
+    await run(refreshed)
+    assert.equal(refreshed.sections.skills, undefined)
+    assert.ok(options.sections.skills)
     options.skills = []
     await run(options)
     assert.equal(options.sections.skills, undefined)
