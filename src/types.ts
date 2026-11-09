@@ -22,6 +22,8 @@ export interface AgentProfile {
   readonly skills?: readonly string[]
   /** Internal creation-time Skill names, intersected with current trusted discovery on restore. */
   readonly skillSnapshot?: readonly string[]
+  /** Initial prompt display selection; does not restrict the authorized Skill ceiling. */
+  readonly initialSkills?: readonly string[]
   /** Accepted extension identities only; never persisted executable factories. */
   readonly extensionSnapshot?: readonly string[]
   /** Legacy switch: false disables MCP; omission inherits trusted host servers. */
@@ -38,6 +40,8 @@ export interface TaskInput {
   model?: string
   effort?: string
   run_in_background?: boolean
+  /** Skill names shown in the initial child prompt; omitted preserves role defaults. */
+  skills?: string[]
 }
 
 export interface TaskQuery {

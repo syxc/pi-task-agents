@@ -27,6 +27,8 @@ export interface EnvironmentOptions {
   parentModel?: string
   /** Child role model id; null keeps roles unset so children inherit the parent model. */
   childModel?: string | null
+  /** Parent and inherited-child thinking; existing scenarios keep their off default. */
+  parentThinking?: 'off' | 'high'
   maxConcurrency?: number
   skills?: readonly SkillFixture[]
   sessionId?: string
@@ -213,7 +215,7 @@ export async function createEnvironment(options: EnvironmentOptions = {}): Promi
         '--model',
         model,
         '--thinking',
-        'off',
+        options.parentThinking ?? 'off',
         '--session-dir',
         sessionsDir,
         '--session-id',

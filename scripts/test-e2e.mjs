@@ -51,29 +51,43 @@ console.log(
     `models gpt-6.1-sol/gpt-6-luna, ${selected.length} file(s)`
 )
 console.log(`Files: ${selected.join(', ')}`)
-const child = spawn(
-  process.execPath,
-  [
-    '--test',
-    '--test-concurrency=1',
-    '--test-timeout=300000',
-    ...selected.map((name) => join(e2eDir, name))
-  ],
-  {
-    cwd: project,
-    stdio: 'inherit',
-    env: { ...process.env, PI_E2E: '1' }
+let child
+let interrupted = false
+const interrupt = () => {
+    interrupted = true
+    child?.kill('SIGINT')
+  },
+  terminate = () => {
+    interrupted = true
+    child?.kill('SIGTERM')
   }
-)
-const interrupt = () => child.kill('SIGINT'),
-  terminate = () => child.kill('SIGTERM')
 process.on('SIGINT', interrupt)
 process.on('SIGTERM', terminate)
 try {
-  process.exitCode = await new Promise((resolve, reject) => {
-    child.once('error', reject)
-    child.once('exit', (code) => resolve(code ?? 1))
-  })
+  for (const name of selected) {
+    if (interrupted) {
+      break
+    }
+    // Node 22 bounds the whole file; Skills A/B has six eight-minute pairs.
+    const timeout = name === 'skills-context.test.ts' ? 3_000_000 : 300_000
+    child = spawn(
+      process.execPath,
+      ['--test', '--test-concurrency=1', `--test-timeout=${timeout}`, join(e2eDir, name)],
+      {
+        cwd: project,
+        stdio: 'inherit',
+        env: { ...process.env, PI_E2E: '1' }
+      }
+    )
+    // oxlint-disable-next-line no-await-in-loop -- Keep real-model files and their budgets sequential.
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('exit', (exitCode) => resolve(exitCode ?? 1))
+    })
+    if (interrupted || code !== 0) {
+      process.exitCode = code || 1
+    }
+  }
 } finally {
   process.off('SIGINT', interrupt)
   process.off('SIGTERM', terminate)

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Type, type Static, type TProperties, type TSchema } from 'typebox'
 import { Check } from 'typebox/value'
 import {
@@ -30,9 +31,12 @@ import {
   stopResult
 } from './tool-result-control.ts'
 import { renderRoles, roleOverview } from './task-presentation.ts'
+import { compactSkillCatalog } from './skill-context.ts'
 import type { TaskOutput, TaskSummary } from './types.ts'
 export type { TaskToolResult } from './tool-result-common.ts'
 
+const catalogFingerprint = (text: string) =>
+  createHash('sha256').update(text, 'utf16le').digest('hex')
 const nonempty = () => Type.String({ minLength: 1 })
 const statuses = [...ACTIVE_TASK_STATUSES, ...TERMINAL_TASK_STATUSES]
 const statusSchema = Type.Union(statuses.map((value) => Type.Literal(value)))
@@ -41,8 +45,8 @@ const object = <T extends TProperties>(fields: T) =>
 const guidance = `
 # Child tasks (pi-task-agents)
 You own task interpretation, scope, integration, and the final user answer. Work directly on targeted lookups and small changes. Delegate only when a child adds independent evidence or can produce a concrete bounded deliverable.
-Use explore for read-only evidence, worker for production changes, verifier for independent acceptance checks, and mavis for mixed work. Use task_agents to discover configured profiles. A role label does not grant extra permission.
-A child starts with its own history, role instructions, and project context. Give it a self-contained objective, known facts, exact file ownership, constraints, deliverable, acceptance criteria, and response format. Parallel writers must own disjoint files. Do not repeat delegated work yourself.
+Use explore for read-only evidence, worker for production changes, verifier for independent acceptance checks, and mavis for mixed work. For a known built-in role, call task directly. Do not call task_agents as routine preflight; query it only when this task needs profile facts you lack. A role label does not grant extra permission.
+A child starts with its own history, role instructions, and project context. Give it a self-contained objective, known facts, exact file ownership, constraints, deliverable, acceptance criteria, and response format. Select task.skills from available Skill metadata when relevant; use [] when no Skill is needed. Do not copy Skill bodies into the task prompt. Parallel writers must own disjoint files. Do not repeat delegated work yourself.
 Tasks wait in the foreground by default. Use run_in_background:true only for independent work while you continue non-overlapping work. A background task ID is an admission receipt, not a completed result. Completion automatically notifies its owner through Pi's native message queue. Read the saved result with task_output before using its findings or reporting them to the user; avoid routine polling.
 Use task_append for asynchronous continuation of the same child history: running work is steered; idle work starts a new task ID. Its mode and accepted fields describe admission, not completion. Use task_send only when the child is idle: it starts a new turn and waits for a terminal reply. It rejects busy children (queued/running/stopping), never queues or steers into existing work, and its task_id field accepts either an owned task ID or its child session_id handle. Acknowledge failure, cancellation, and lost execution explicitly. task_output reads persisted byte ranges and does not consume the completion notification. A parent turn abort does not stop admitted background work. Use task_stop or /tasks stop-all for explicit cancellation; do not immediately restart stopped work. Session switches leave background work with its original owner and never notify the replacement session.
 task_output includes full verification text and its fingerprint by default. After reading it, pass known_verification_fingerprint to omit only identical verification text. Missing or mismatched fingerprints return the current full report. Omit the argument to reread at any valid offset, including retries and session recovery.
@@ -132,6 +136,8 @@ export function registerTaskAgents(
     ...dependencies
   })
   const outputProjector = new OutputProjector()
+  // A shared prefix does not prove ownership after another extension changes the text.
+  const ownedSkillCatalogs = new Set<string>()
   const ancestry = new TaskCallAncestry()
   pi.on('tool_call', (event, ctx) => ancestry.observe(event, ctx))
   // agent_end is not a drain boundary: detached native calls may still be in permission hooks.
@@ -206,7 +212,10 @@ export function registerTaskAgents(
     'task',
     'Launch one bounded child agent. Default is foreground: wait for its terminal result. Set run_in_background:true only for independent work; completion then notifies the owner automatically. The child has separate history; provide scope, file ownership and acceptance criteria. Description must contain 1-50 Unicode code points after whitespace normalization. Omit model/effort to use the configured or inherited defaults; set overrides only when explicitly requested. An explicit model resets inherited effort; unavailable settings fail without fallback.',
     object({
-      agent_name: Type.String(),
+      agent_name: Type.String({
+        description:
+          'A known built-in role needs no preflight. Query task_agents only for a needed profile fact that is unknown.'
+      }),
       description: Type.String({
         minLength: 1,
         description:
@@ -228,6 +237,12 @@ export function registerTaskAgents(
       run_in_background: Type.Optional(
         Type.Boolean({
           description: 'Defaults to false; true returns a background admission receipt.'
+        })
+      ),
+      skills: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            'Optional Skill names shown in the initial child prompt, not an access allowlist. Other role-authorized Skills remain searchable with task_skill_search. Pass [] to initially show none. Names are trimmed, NFKC-normalized, and deduplicated; paths are rejected.'
         })
       )
     }),
@@ -459,6 +474,30 @@ export function registerTaskAgents(
     await controller.ensure(ctx)
     if (event.messageType === 'user' && !ctx.signal?.aborted && epoch === controller.cancelEpoch) {
       controller.resume()
+    }
+    const promptOptions = event.systemPromptOptions
+    if (
+      promptOptions &&
+      promptOptions.forceSystemPrompt === undefined &&
+      (promptOptions.sections.skills === undefined ||
+        ownedSkillCatalogs.has(catalogFingerprint(promptOptions.sections.skills)))
+    ) {
+      const readers = ['read', 'bash'] as const
+      const reader =
+        readers.find(
+          (name) =>
+            promptOptions.selectedTools.includes(name) && !promptOptions.hiddenTools?.includes(name)
+        ) ??
+        (readers.some((name) => promptOptions.selectedTools.includes(name))
+          ? 'indirect'
+          : undefined)
+      const catalog = reader ? compactSkillCatalog(promptOptions.skills, reader) : undefined
+      if (catalog) {
+        ownedSkillCatalogs.add(catalogFingerprint(catalog))
+        promptOptions.sections.skills = catalog
+      } else {
+        delete promptOptions.sections.skills
+      }
     }
     return { systemPrompt: event.systemPrompt + guidance }
   })

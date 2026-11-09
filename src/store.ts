@@ -47,6 +47,7 @@ function profile(value: unknown): value is AgentProfile {
       'extensions',
       'skills',
       'skillSnapshot',
+      'initialSkills',
       'extensionSnapshot',
       'nativeToolSnapshot',
       'toolInventory',
@@ -66,6 +67,7 @@ function input(value: unknown): value is TaskInput {
       (key) => value[key] === undefined || typeof value[key] === 'string'
     ) &&
     (value.effort === undefined || nonempty(value.effort)) &&
+    (value.skills === undefined || strings(value.skills)) &&
     (value.run_in_background === undefined || typeof value.run_in_background === 'boolean')
   )
 }

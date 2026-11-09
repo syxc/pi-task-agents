@@ -71,6 +71,7 @@
 | Task 显式模型/思考优先，其次角色配置、父有效选择 | `V2/src/application/session/task-agent-binding-capture.ts` | `config.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；使用 Pi 的 provider/id、thinking 和原生 registry，不复刻 MCode 模型组管理器；见配置和 SDK 选模回归 |
 | 换模型不继承不兼容旧参数，既有子会话不随父切换漂移 | `V2/src/service/model-system/catalog/agent-model-selection.ts` | `resolveProfile`、冻结 profile 与 onProfileResolved | 对应设计；`config.test.ts`、`pi-backend.test.ts`、`engine.test.ts` |
 | Skills、扩展、MCP 按允许范围使用并保留权限上界 | binding capture、最终工具 surface | `parent-tools.ts`、`child-parent-tools.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；最终 Skills 来自官方事件，默认父桥仅转发已核验的官方原生及内置 MCP，不复制工厂或凭据；拒绝普通扩展、同名覆盖及 inline/替代 MCP，不影响父工具。`parent-tools.test.ts`、`runtime-inheritance.test.ts`、`resource-inheritance.test.ts` 覆盖生产链；机制与覆盖细目见 [Pi 运行态适配](pi-runtime-adapter.md) |
+| 初始 Skills 披露与完整资源权限分离 | Pi 任务级适配；参考 MCode 目录披露与权限分离原则 | `task.skills`、`skill-context.ts`、`pi-backend.ts` | 父选择首批目录，未展示项仍可按当前授权与历史上界查阅；不自动暴露 disabled Skills，不改变角色禁用。`pi-backend-skills.test.ts`、`skill-context.test.ts` 覆盖披露、撤销、恢复与分页；`test/e2e/skills-context.test.ts` 提供 Luna/high A/B |
 | 子执行保留必要父原生 Shell 设置 | Pi 宿主执行上下文 | `parent-tools.ts`、`pi-backend.ts` | 默认插件路径复用父 Bash 执行管线；仅为观察复制 `shellPath`/`shellCommandPrefix`。`runtime-inheritance.test.ts` 比较实际父执行、子前台 Bash、受管命令和 native codemode |
 | 原生工具 ceiling 与 Plugin/MCP 来源权限分开 | `V2/.../local-turn-tool-catalog.ts` | `resource-selection.ts`、`resource-tool-inventory.ts` | 对应设计；角色 ceiling、MCP deny、发现与 codemode 回归；外部工具不构成只读沙箱 |
 

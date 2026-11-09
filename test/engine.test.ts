@@ -2161,7 +2161,11 @@ test(
 
 test('regression: restore rejects malformed skillSnapshot bounds and preserves valid snapshots', async (t) => {
   const { engine, children, rootDir, createChild } = await setup(t)
-  const first = await engine.start(input(), { ...profile, skillSnapshot: ['allowed-skill'] })
+  const first = await engine.start(input(), {
+    ...profile,
+    skillSnapshot: ['allowed-skill'],
+    initialSkills: ['chosen-skill']
+  })
   await waitFor(() => children[0]?.calls.length)
   await finish(engine, children[0])
   await engine.close()
@@ -2197,6 +2201,7 @@ test('regression: restore rejects malformed skillSnapshot bounds and preserves v
     await restored.init()
     try {
       assert.deepEqual(restored.task(first.task_id).profile.skillSnapshot, skillSnapshot)
+      assert.deepEqual(restored.task(first.task_id).profile.initialSkills, ['chosen-skill'])
       assert.equal(children.length, 1)
     } finally {
       await restored.close()

@@ -5,6 +5,57 @@ import { join } from 'node:path'
 import { registerTaskAgents, toolResult } from '../src/extension.ts'
 import * as config from '../src/config.ts'
 
+test('compact parent Skill presentation keeps resource metadata and other owners intact', async () => {
+  const f = fixture()
+  try {
+    const allowed = Array.from({ length: 24 }, (_, index) => ({
+      name: `owned-${index}`,
+      description: `Complete description ${index}`,
+      filePath: `/authorized/owned-${index}/SKILL.md`
+    }))
+    const options = {
+      skills: allowed,
+      selectedTools: ['read'],
+      hiddenTools: [],
+      sections: {} as Record<string, string>
+    }
+    const run = (value: typeof options & { forceSystemPrompt?: string }) =>
+      f.handlers.get('before_agent_start')(
+        { messageType: 'user', systemPrompt: 'base', systemPromptOptions: value },
+        f.ctx
+      )
+    await run(options)
+    assert.equal(options.skills, allowed)
+    assert.ok(options.sections.skills?.includes('Catalog JSON rows'))
+    const amended = {
+      ...options,
+      sections: { skills: `${options.sections.skills}\nExternal policy must remain.` }
+    }
+    const amendedText = amended.sections.skills
+    await run(amended)
+    assert.equal(amended.sections.skills, amendedText)
+    const opaque = { ...options, forceSystemPrompt: 'custom', sections: {} }
+    await run(opaque)
+    assert.deepEqual(opaque.sections, {})
+    const external = { ...options, sections: { skills: 'external owner' } }
+    await run(external)
+    assert.equal(external.sections.skills, 'external owner')
+    const unreadable = { ...options, selectedTools: ['write'], sections: {} }
+    await run(unreadable)
+    assert.deepEqual(unreadable.sections, {})
+    const refreshed = { ...options, sections: { ...options.sections }, skills: [] }
+    await run(refreshed)
+    assert.equal(refreshed.sections.skills, undefined)
+    assert.ok(options.sections.skills)
+    options.skills = []
+    await run(options)
+    assert.equal(options.sections.skills, undefined)
+    assert.equal(allowed.length, 24)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('a full output page is preserved when the engine has advanced its byte cursor', () => {
   const output = 'a'.repeat(65536)
   const result = toolResult({
@@ -144,6 +195,7 @@ test('task declaration and parent guidance describe foreground default and allow
   try {
     const task = f.tools.get('task')
     assert.match(task.description, /Default is foreground/)
+    assert.match(task.parameters.properties.agent_name.description, /needs no preflight/)
     assert.equal(task.parameters.properties.prompt.minLength, undefined)
     assert.equal(task.parameters.properties.description.maxLength, undefined)
     assert.match(task.parameters.properties.description.description, /1-50 Unicode/)
@@ -152,6 +204,8 @@ test('task declaration and parent guidance describe foreground default and allow
       f.ctx
     )
     assert.match(guidance.systemPrompt, /foreground by default/)
+    assert.match(guidance.systemPrompt, /Do not call task_agents as routine preflight/)
+    assert.match(guidance.systemPrompt, /this task needs profile facts you lack/)
     assert.match(guidance.systemPrompt, /task_send/)
     assert.match(guidance.systemPrompt, /child session_id handle/)
     assert.match(guidance.systemPrompt, /rejects busy children \(queued\/running\/stopping\)/)

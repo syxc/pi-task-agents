@@ -310,6 +310,9 @@ export class TaskEngine {
       this.assertOpen()
       aborted(signal)
       const effective = { ...cloneJson(profile) }
+      if (input.skills !== undefined) {
+        effective.initialSkills = [...input.skills]
+      }
       if (input.model) {
         effective.model = input.model
       }
