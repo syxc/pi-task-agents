@@ -5,6 +5,21 @@ import test from 'node:test'
 import { SettingsManager } from '@earendil-works/pi-coding-agent'
 import { answer, fixture, tool } from './pi-backend-test-helpers.ts'
 
+function lastCommandReply(f: Awaited<ReturnType<typeof fixture>>) {
+  const message = f
+    .session()
+    .messages.findLast(
+      (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
+    )
+  assert.ok(message && message.role === 'toolResult')
+  return JSON.parse(
+    message.content
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('')
+  )
+}
+
 for (const role of ['worker', 'verifier', 'mavis']) {
   test(
     `${role} owns a native background command and settles its result in the same logical task`,
@@ -95,20 +110,7 @@ test(
     let commandId = '',
       result = '',
       reads = 0
-    const lastReply = () => {
-      const message = f
-        .session()
-        .messages.findLast(
-          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
-        )
-      assert.ok(message && message.role === 'toolResult')
-      return JSON.parse(
-        message.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
-          .join('')
-      )
-    }
+    const lastReply = () => lastCommandReply(f)
     f.script((step, context) => {
       if (step === 1) {
         return tool('bash_task', { action: 'start', command })
@@ -169,20 +171,7 @@ test(
       command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write('x'.repeat(${size}))`)}`
     let id = '',
       calls = 0
-    const previous = () => {
-      const message = f
-        .session()
-        .messages.findLast(
-          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
-        )
-      assert.ok(message && message.role === 'toolResult')
-      return JSON.parse(
-        message.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
-          .join('')
-      )
-    }
+    const previous = () => lastCommandReply(f)
     f.script((step, context) => {
       calls++
       if (step === 1) {
@@ -224,20 +213,7 @@ test(
     let readId = '',
       unreadId = '',
       calls = 0
-    const previous = () => {
-      const message = f
-        .session()
-        .messages.findLast(
-          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
-        )
-      assert.ok(message && message.role === 'toolResult')
-      return JSON.parse(
-        message.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
-          .join('')
-      )
-    }
+    const previous = () => lastCommandReply(f)
     f.script((step, context) => {
       calls++
       if (step === 1) {
@@ -284,20 +260,7 @@ test(
     let id = '',
       calls = 0
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.stdout.write('COMMAND_READY');setInterval(()=>{},1000)")}`
-    const previous = () => {
-      const message = f
-        .session()
-        .messages.findLast(
-          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
-        )
-      assert.ok(message && message.role === 'toolResult')
-      return JSON.parse(
-        message.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
-          .join('')
-      )
-    }
+    const previous = () => lastCommandReply(f)
     f.script((step, context) => {
       calls++
       if (step === 1) {
@@ -344,20 +307,7 @@ test(
     const f = await fixture(t),
       child = await f.child({ name: 'worker', tools: ['bash'] })
     let id = ''
-    const previous = () => {
-      const message = f
-        .session()
-        .messages.findLast(
-          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
-        )
-      assert.ok(message && message.role === 'toolResult')
-      return JSON.parse(
-        message.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
-          .join('')
-      )
-    }
+    const previous = () => lastCommandReply(f)
     f.script((step) => {
       if (step === 1) {
         id = ''
@@ -573,20 +523,7 @@ test(
     const child = await f.child({ name: 'worker', tools: ['bash'], extensions: [extension] })
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify('process.stdout.write(process.env.OWNED_COMMAND_PREFIX)')}`
     let id = ''
-    const previous = () => {
-      const message = f
-        .session()
-        .messages.findLast(
-          (message) => message.role === 'toolResult' && message.toolName === 'bash_task'
-        )
-      assert.ok(message && message.role === 'toolResult')
-      return JSON.parse(
-        message.content
-          .filter((part) => part.type === 'text')
-          .map((part) => part.text)
-          .join('')
-      )
-    }
+    const previous = () => lastCommandReply(f)
     f.script((step) => {
       if (step === 1) {
         return tool('bash_task', { action: 'start', command })

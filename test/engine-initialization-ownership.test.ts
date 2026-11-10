@@ -3,9 +3,9 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import { setTimeout as delay } from 'node:timers/promises'
 import { TaskEngine } from '../src/engine.ts'
 import type { AgentProfile, CreateChild, ChildSession } from '../src/types.ts'
+import { until } from './bounded.ts'
 
 const profile: AgentProfile = {
   name: 'worker',
@@ -17,14 +17,6 @@ const profile: AgentProfile = {
   timeoutMs: 0
 }
 const input = { description: 'ownership', prompt: 'offline', run_in_background: true }
-async function until(check: () => boolean) {
-  const end = Date.now() + 2500
-  while (!check()) {
-    assert.ok(Date.now() < end, 'owned operation deadline')
-    // oxlint-disable-next-line no-await-in-loop -- Bound this fixture's initialization handoff.
-    await delay(5)
-  }
-}
 async function fixture(t: TestContext) {
   const rootDir = await mkdtemp(join(tmpdir(), 'engine-init-ownership-'))
   let calls = 0,

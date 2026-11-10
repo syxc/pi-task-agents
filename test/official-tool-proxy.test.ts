@@ -4,15 +4,16 @@ import test from 'node:test'
 import * as sdk from '@earendil-works/pi-coding-agent'
 import { answer, deferred, fixture, tool } from './pi-backend-test-helpers.ts'
 
-test('official parent tool context runs hooks but is not a durable background delegation handle', async (t) => {
-  const f = await fixture(t)
-  const seen: string[] = []
-  let invoke:
-    | ((name: string, args: unknown) => ReturnType<sdk.ExtensionToolContext['executeTool']>)
-    | undefined
-  let direct: ((id: string, args: object) => Promise<unknown>) | undefined
-  let parentApi: sdk.ExtensionAPI | undefined
-  let firstNestedId = ''
+type ExtensionFactories = NonNullable<
+  ConstructorParameters<typeof sdk.DefaultResourceLoader>[0]['extensionFactories']
+>
+
+async function officialSession(
+  f: Awaited<ReturnType<typeof fixture>>,
+  extensionFactories: ExtensionFactories,
+  tools: string[],
+  sessionManager = sdk.SessionManager.inMemory(f.cwd)
+) {
   const settings = sdk.SettingsManager.inMemory(
     { compaction: { enabled: false }, retry: { enabled: false } },
     { projectTrusted: false }
@@ -25,7 +26,42 @@ test('official parent tool context runs hooks but is not a durable background de
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    extensionFactories: [
+    extensionFactories
+  })
+  await loader.reload()
+  const { session } = await sdk.createAgentSession({
+    cwd: f.cwd,
+    agentDir: f.agentDir,
+    resourceLoader: loader,
+    settingsManager: settings,
+    model: f.model as sdk.CreateAgentSessionOptions['model'],
+    modelRuntime: f.runtime as unknown as sdk.ModelRuntime,
+    sessionManager,
+    tools
+  })
+  await session.bindExtensions({
+    mode: 'json',
+    onError: (error) => {
+      throw new Error(error.error)
+    },
+    abortHandler() {},
+    shutdownHandler() {}
+  })
+  return { session, loader }
+}
+
+test('official parent tool context runs hooks but is not a durable background delegation handle', async (t) => {
+  const f = await fixture(t)
+  const seen: string[] = []
+  let invoke:
+    | ((name: string, args: unknown) => ReturnType<sdk.ExtensionToolContext['executeTool']>)
+    | undefined
+  let direct: ((id: string, args: object) => Promise<unknown>) | undefined
+  let parentApi: sdk.ExtensionAPI | undefined
+  let firstNestedId = ''
+  const { session, loader } = await officialSession(
+    f,
+    [
       {
         name: 'owned-hook-only',
         factory: (pi) =>
@@ -76,30 +112,13 @@ test('official parent tool context runs hooks but is not a durable background de
           })
         }
       }
-    ]
-  })
-  await loader.reload()
+    ],
+    ['owned_outer', 'owned_target'],
+    sdk.SessionManager.create(f.cwd, join(f.root, 'parent'))
+  )
   assert.deepEqual(loader.getExtensions().errors, [])
   f.script((step) => (step === 1 ? tool('owned_outer', {}) : answer('PARENT_FINISHED')))
-  const { session } = await sdk.createAgentSession({
-    cwd: f.cwd,
-    agentDir: f.agentDir,
-    resourceLoader: loader,
-    settingsManager: settings,
-    model: f.model as sdk.CreateAgentSessionOptions['model'],
-    modelRuntime: f.runtime as unknown as sdk.ModelRuntime,
-    sessionManager: sdk.SessionManager.create(f.cwd, join(f.root, 'parent')),
-    tools: ['owned_outer', 'owned_target']
-  })
   try {
-    await session.bindExtensions({
-      mode: 'json',
-      onError: (error) => {
-        throw new Error(error.error)
-      },
-      abortHandler() {},
-      shutdownHandler() {}
-    })
     assert.ok(parentApi)
     assert.equal(
       typeof (parentApi as unknown as { getResources?: unknown }).getResources,
@@ -187,19 +206,9 @@ test('background proxy calls can reuse IDs after the parent agent settles', asyn
   let background:
     | Promise<Awaited<ReturnType<sdk.ExtensionToolContext['executeTool']>>[]>
     | undefined
-  const settings = sdk.SettingsManager.inMemory(
-    { compaction: { enabled: false }, retry: { enabled: false } },
-    { projectTrusted: false }
-  )
-  const loader = new sdk.DefaultResourceLoader({
-    cwd: f.cwd,
-    agentDir: f.agentDir,
-    settingsManager: settings,
-    noExtensions: true,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    extensionFactories: [
+  const { session } = await officialSession(
+    f,
+    [
       (pi) => {
         pi.on('tool_call', (event) => {
           if (event.toolName === 'owned_target' && event.input.value === 'blocked') {
@@ -248,9 +257,9 @@ test('background proxy calls can reuse IDs after the parent agent settles', asyn
           }
         })
       }
-    ]
-  })
-  await loader.reload()
+    ],
+    ['owned_background', 'owned_target']
+  )
   f.script(async (step) => {
     if (step === 1) {
       return tool('owned_background', {})
@@ -258,25 +267,7 @@ test('background proxy calls can reuse IDs after the parent agent settles', asyn
     await firstFinished
     return answer('PARENT_FINISHED')
   })
-  const { session } = await sdk.createAgentSession({
-    cwd: f.cwd,
-    agentDir: f.agentDir,
-    resourceLoader: loader,
-    settingsManager: settings,
-    model: f.model as sdk.CreateAgentSessionOptions['model'],
-    modelRuntime: f.runtime as unknown as sdk.ModelRuntime,
-    sessionManager: sdk.SessionManager.inMemory(f.cwd),
-    tools: ['owned_background', 'owned_target']
-  })
   try {
-    await session.bindExtensions({
-      mode: 'json',
-      onError: (error) => {
-        throw new Error(error.error)
-      },
-      abortHandler() {},
-      shutdownHandler() {}
-    })
     await session.prompt('Start the memory-only background fixture.')
     releaseAfterSettle()
     assert.ok(background)
@@ -319,19 +310,9 @@ for (const afterEnd of [false, true]) {
         hooks = 0,
         settled = false,
         background: Promise<unknown> | undefined
-      const settings = sdk.SettingsManager.inMemory(
-        { compaction: { enabled: false }, retry: { enabled: false } },
-        { projectTrusted: false }
-      )
-      const loader = new sdk.DefaultResourceLoader({
-        cwd: f.cwd,
-        agentDir: f.agentDir,
-        settingsManager: settings,
-        noExtensions: true,
-        noSkills: true,
-        noPromptTemplates: true,
-        noThemes: true,
-        extensionFactories: [
+      const { session, loader } = await officialSession(
+        f,
+        [
           (pi) => {
             pi.on('tool_call', (event) => {
               if (event.toolName === 'owned_inner') {
@@ -386,9 +367,9 @@ for (const afterEnd of [false, true]) {
               }
             })
           }
-        ]
-      })
-      await loader.reload()
+        ],
+        ['owned_background', 'owned_serial', 'owned_inner']
+      )
       assert.deepEqual(loader.getExtensions().errors, [])
       f.script(async (step) => {
         if (step === 1) {
@@ -401,25 +382,7 @@ for (const afterEnd of [false, true]) {
         }
         return answer('PARENT_FINISHED')
       })
-      const { session } = await sdk.createAgentSession({
-        cwd: f.cwd,
-        agentDir: f.agentDir,
-        resourceLoader: loader,
-        settingsManager: settings,
-        model: f.model as sdk.CreateAgentSessionOptions['model'],
-        modelRuntime: f.runtime as unknown as sdk.ModelRuntime,
-        sessionManager: sdk.SessionManager.inMemory(f.cwd),
-        tools: ['owned_background', 'owned_serial', 'owned_inner']
-      })
       try {
-        await session.bindExtensions({
-          mode: 'json',
-          onError: (error) => {
-            throw new Error(error.error)
-          },
-          abortHandler() {},
-          shutdownHandler() {}
-        })
         await session.prompt('Probe the memory-only SDK serial boundary.')
         release.resolve()
         await nestedStarted.promise
@@ -451,19 +414,9 @@ for (const afterEnd of [false, true]) {
 test('system prompt text is not an authoritative parent Skill inventory', async (t) => {
   const f = await fixture(t)
   let captured = ''
-  const settings = sdk.SettingsManager.inMemory(
-    { compaction: { enabled: false }, retry: { enabled: false } },
-    { projectTrusted: false }
-  )
-  const loader = new sdk.DefaultResourceLoader({
-    cwd: f.cwd,
-    agentDir: f.agentDir,
-    settingsManager: settings,
-    noExtensions: true,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    extensionFactories: [
+  const { session, loader } = await officialSession(
+    f,
+    [
       (pi) => {
         pi.on('before_agent_start', (event) => ({
           systemPrompt:
@@ -481,30 +434,13 @@ test('system prompt text is not an authoritative parent Skill inventory', async 
           }
         })
       }
-    ]
-  })
-  await loader.reload()
+    ],
+    ['owned_prompt_probe'],
+    sdk.SessionManager.create(f.cwd, join(f.root, 'parent'))
+  )
   assert.deepEqual(loader.getSkills().skills, [])
   f.script((step) => (step === 1 ? tool('owned_prompt_probe', {}) : answer('PARENT_FINISHED')))
-  const { session } = await sdk.createAgentSession({
-    cwd: f.cwd,
-    agentDir: f.agentDir,
-    resourceLoader: loader,
-    settingsManager: settings,
-    model: f.model as sdk.CreateAgentSessionOptions['model'],
-    modelRuntime: f.runtime as unknown as sdk.ModelRuntime,
-    sessionManager: sdk.SessionManager.create(f.cwd, join(f.root, 'parent')),
-    tools: ['owned_prompt_probe']
-  })
   try {
-    await session.bindExtensions({
-      mode: 'json',
-      onError: (error) => {
-        throw new Error(error.error)
-      },
-      abortHandler() {},
-      shutdownHandler() {}
-    })
     await session.prompt('Run the owned prompt probe.')
     assert.match(captured, /NOT_APPROVED_SKILL\.md/)
     assert.deepEqual(

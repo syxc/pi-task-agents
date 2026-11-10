@@ -89,25 +89,17 @@ export async function readParentMetrics(client: PiRpc): Promise<ParentMetrics> {
 }
 
 async function filesUnder(dir: string): Promise<string[]> {
-  let entries
   try {
-    entries = await readdir(dir, { withFileTypes: true })
+    const entries = await readdir(dir, { recursive: true, withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
   } catch (error) {
     if (errorCode(error) === 'ENOENT') {
       return []
     }
     throw error
   }
-  const nested = await Promise.all(
-    entries.map(async (entry) => {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        return filesUnder(path)
-      }
-      return entry.isFile() ? [path] : []
-    })
-  )
-  return nested.flat()
 }
 
 async function jsonlFiles(dir: string): Promise<string[]> {

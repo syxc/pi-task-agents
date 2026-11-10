@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { TaskEngine } from '../src/engine.ts'
 import { isAccepting, stopOf } from '../src/runtime-phase.ts'
@@ -17,7 +16,7 @@ import {
 import { isTerminalTaskStatus } from '../src/vendor/mcode-background-task/status.ts'
 import { normalizeTaskError } from '../src/vendor/mcode-background-task/errors.ts'
 import { thinkingLevels } from '../src/thinking.ts'
-import { bounded } from './bounded.ts'
+import { bounded, until } from './bounded.ts'
 import type {
   BackgroundTask,
   BackgroundTaskPatch
@@ -184,17 +183,8 @@ async function setup(
   return { engine, children, rootDir, createChild }
 }
 
-async function waitFor(fn: () => unknown | Promise<unknown>): Promise<void> {
-  /* oxlint-disable no-await-in-loop -- Poll one state transition at a time; the delay bounds retries. */
-  for (let i = 0; i < 600; i++) {
-    if (await fn()) {
-      return
-    }
-    await delay(5)
-  }
-  /* oxlint-enable no-await-in-loop */
-  assert.fail('Condition did not become true')
-}
+const waitFor = (fn: () => unknown | Promise<unknown>) =>
+  until(fn, 'Condition did not become true', 3000)
 
 async function finish(engine: TaskEngine, child: MockChild, text = 'done'): Promise<void> {
   const task = (await engine.query()).findLast(

@@ -3,10 +3,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import { setTimeout as delay } from 'node:timers/promises'
 import { TaskEngine } from '../src/engine.ts'
 import { stopOf } from '../src/runtime-phase.ts'
 import type { AgentProfile, ChildSession, CreateChildOptions } from '../src/types.ts'
+import { bounded, until } from './bounded.ts'
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void
@@ -31,29 +31,6 @@ const input = {
   description: 'Initialization ownership',
   prompt: 'offline',
   run_in_background: true
-}
-
-async function bounded<T>(promise: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('operation exceeded test bound')), 2500)
-      })
-    ])
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function until(predicate: () => boolean) {
-  const end = Date.now() + 2500
-  while (!predicate()) {
-    assert.ok(Date.now() < end, 'condition exceeded test bound')
-    // oxlint-disable-next-line no-await-in-loop -- Poll the owned transition with a fixed deadline.
-    await delay(5)
-  }
 }
 
 async function fixture(t: TestContext) {

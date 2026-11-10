@@ -1,19 +1,13 @@
 import assert from 'node:assert/strict'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
 import * as sdk from '@earendil-works/pi-coding-agent'
 import { registerTaskAgents } from '../src/extension.ts'
+import { until } from './bounded.ts'
 import { answer, deferred, fixture, tool } from './pi-backend-test-helpers.ts'
 
-export async function waitFor(condition, message = 'Expected state transition') {
-  // oxlint-disable-next-line no-await-in-loop -- Poll real SDK transitions without replacing admission or dispatch.
-  for (let i = 0; !(await condition()); i++) {
-    assert.ok(i < 600, message)
-    // oxlint-disable-next-line no-await-in-loop -- The delay bounds polling and lets the native pipeline advance.
-    await delay(5)
-  }
-}
+export const waitFor = (condition: () => unknown | Promise<unknown>, message?: string) =>
+  until(condition, message ?? 'Expected state transition', 3000)
 
 export const input = (prompt, background = false) => ({
   agent_name: 'worker',
