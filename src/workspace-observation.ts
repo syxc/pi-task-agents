@@ -1,5 +1,6 @@
 import { lstat, opendir, realpath } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
+import { hasCode } from './guards.ts'
 import { within } from './resource-selection.ts'
 
 export interface WorkspaceSnapshot {
@@ -28,7 +29,7 @@ export async function captureWorkspace(
         // oxlint-disable-next-line no-await-in-loop -- Keep traversal bounded and preserve cancellation and early exits.
         excluded.push(await realpath(directory))
       } catch (error) {
-        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+        if (!hasCode(error, 'ENOENT')) {
           throw error
         }
         excluded.push(resolve(directory))

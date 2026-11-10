@@ -61,6 +61,8 @@ export function summarizeTask(task: TaskSummary): Record<string, unknown> {
 
 export function renderTask(task: TaskSummary): string {
   const mode = executionMode(task)
+  const elapsed = taskElapsed(task)
+  const reason = task.stopError?.message || task.error || task.cancel_reason
   const lineage = [
     ...(task.session_id ? [`session_id=${task.session_id}`] : []),
     ...(task.parent_task_id ? [`parent_task_id=${task.parent_task_id}`] : []),
@@ -72,12 +74,10 @@ export function renderTask(task: TaskSummary): string {
     (task.verification
       ? ` [verdict=${task.verification.modelVerdict ?? 'missing'}; file_change=${task.verification.fileChange}]`
       : '') +
-    (taskElapsed(task) ? ` [elapsed=${taskElapsed(task)}]` : '') +
+    (elapsed ? ` [elapsed=${elapsed}]` : '') +
     (task.activity ? ` ${task.activity}` : '') +
     (task.cleanup_pending ? ' [cleanup pending]' : '') +
-    (task.stopError?.message || task.error || task.cancel_reason
-      ? `: ${task.stopError?.message ?? task.error ?? task.cancel_reason}`
-      : '')
+    (reason ? `: ${reason}` : '')
   )
 }
 

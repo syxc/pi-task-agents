@@ -1,9 +1,8 @@
-import type { BigIntStats } from 'node:fs'
 import { lstat, readFile, realpath, stat } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AgentProfile, ConfigLoadOptions, TaskAgentsConfig } from './types.ts'
-import { isResourceName, isUnavailablePath, within } from './resource-selection.ts'
+import { isResourceName, isUnavailablePath, sameFile, within } from './resource-selection.ts'
 import { DEFAULT_MAX_CONCURRENCY, resolveMaxConcurrency } from './concurrency.ts'
 import { isThinkingLevel, thinkingLevels } from './thinking.ts'
 
@@ -239,26 +238,6 @@ async function resourcePaths(
   return result
 }
 
-async function configFileIdentity(file: string): Promise<BigIntStats | undefined> {
-  try {
-    return await stat(file, { bigint: true })
-  } catch (error: unknown) {
-    if (isUnavailablePath(error)) {
-      return
-    }
-    throw error
-  }
-}
-
-async function sameConfigFile(first: string, second: string): Promise<boolean> {
-  if (first === second) {
-    return true
-  }
-  // File identity covers aliases in either the filename or an ancestor directory.
-  const [left, right] = await Promise.all([configFileIdentity(first), configFileIdentity(second)])
-  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino)
-}
-
 async function readConfig(file: string): Promise<ParsedConfig | undefined> {
   let content: string
   try {
@@ -408,7 +387,8 @@ export async function loadConfig({
   }
   const globalFile = resolve(agentDir, 'task-agents.json')
   const projectFile = resolve(cwd, '.pi/task-agents.json')
-  const aliased = await sameConfigFile(globalFile, projectFile)
+  // File identity covers aliases in either the filename or an ancestor directory.
+  const aliased = await sameFile(globalFile, projectFile)
   // An untrusted alias is skipped entirely; a trusted alias is one configuration layer, not two.
   const files = [
     ...(!aliased || projectTrusted ? [globalFile] : []),

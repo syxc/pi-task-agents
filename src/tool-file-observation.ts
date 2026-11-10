@@ -42,6 +42,17 @@ export function createToolFileObservation(options: {
   let state: Observation | undefined
   let canonicalRoot: Promise<string> | undefined
   const active = () => (state && state.id === options.current()?.id ? state : undefined)
+  function observedScope(name: string): Observation | undefined {
+    const scope = active()
+    if (
+      !scope ||
+      (readonlyTools.has(name) && options.isBuiltin(name)) ||
+      options.isProgramTool(name)
+    ) {
+      return
+    }
+    return scope
+  }
   function targets(
     name: string,
     args: Record<string, unknown>
@@ -148,12 +159,8 @@ export function createToolFileObservation(options: {
     }
   }
   async function before(id: string, name: string, input: unknown): Promise<void> {
-    const scope = active()
-    if (
-      !scope ||
-      (readonlyTools.has(name) && options.isBuiltin(name)) ||
-      options.isProgramTool(name)
-    ) {
+    const scope = observedScope(name)
+    if (!scope) {
       return
     }
     const args = isRecord(input) ? input : {}
@@ -228,12 +235,8 @@ export function createToolFileObservation(options: {
     scope.calls.set(id, { paths: selected, targets: JSON.stringify(extracted) })
   }
   async function after(id: string, name: string, input: unknown, failed: boolean): Promise<void> {
-    const scope = active()
-    if (
-      !scope ||
-      (readonlyTools.has(name) && options.isBuiltin(name)) ||
-      options.isProgramTool(name)
-    ) {
+    const scope = observedScope(name)
+    if (!scope) {
       return
     }
     const capture = scope.calls.get(id)
@@ -277,15 +280,14 @@ export function createToolFileObservation(options: {
   }
   return {
     extension,
-    begin(id: string, workspace?: WorkspaceSnapshot) {
+    begin(id: string) {
       state = {
         id,
         before: new Map(),
         after: new Map(),
         calls: new Map(),
         notes: new Set(),
-        errors: new Set(),
-        ...(workspace ? { workspace: Promise.resolve(workspace) } : {})
+        errors: new Set()
       }
     },
     baseline(id: string, workspace: WorkspaceSnapshot) {

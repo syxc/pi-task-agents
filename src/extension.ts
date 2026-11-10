@@ -517,6 +517,8 @@ export function registerTaskAgents(
     await controller.flush()
   })
 
+  const sendStatus = (content: Parameters<typeof pi.sendMessage>[0]['content']) =>
+    pi.sendMessage({ customType: 'pi-task-agents:status', display: true, content })
   pi.registerCommand('tasks', {
     description: 'Child tasks: list | roles | show <id> | stop <id> | stop-all | resume',
     async handler(args, ctx) {
@@ -525,11 +527,7 @@ export function registerTaskAgents(
       let result
       if (command === 'stop-all') {
         const tasks = await controller.stopAll('User requested stop-all')
-        pi.sendMessage({
-          customType: 'pi-task-agents:status',
-          display: true,
-          content: [{ type: 'text', text: renderStopAll(tasks) }]
-        })
+        sendStatus([{ type: 'text', text: renderStopAll(tasks) }])
         return
       } else if ((command === 'stop' || command === 'show') && id) {
         try {
@@ -538,16 +536,12 @@ export function registerTaskAgents(
               ? await engine.stop(id, 'User requested cancellation')
               : await engine.output(id, { offset: 0, limitBytes: 65536 })
         } catch (error) {
-          pi.sendMessage({
-            customType: 'pi-task-agents:status',
-            display: true,
-            content: [
-              {
-                type: 'text',
-                text: `Task ${command} failed: ${error instanceof Error ? error.message : String(error)}`
-              }
-            ]
-          })
+          sendStatus([
+            {
+              type: 'text',
+              text: `Task ${command} failed: ${error instanceof Error ? error.message : String(error)}`
+            }
+          ])
           return
         }
       } else if (command === 'resume') {
@@ -555,28 +549,16 @@ export function registerTaskAgents(
         await controller.flush()
         result = { status: 'notifications resumed' }
       } else if (command === 'roles') {
-        pi.sendMessage({
-          customType: 'pi-task-agents:status',
-          display: true,
-          content: [{ type: 'text', text: renderRoles(controller.config.roles) }]
-        })
+        sendStatus([{ type: 'text', text: renderRoles(controller.config.roles) }])
         return
       } else if (command === 'list') {
-        pi.sendMessage({
-          customType: 'pi-task-agents:status',
-          display: true,
-          content: queryResult(await engine.query()).content
-        })
+        sendStatus(queryResult(await engine.query()).content)
         return
       } else {
         ctx.ui.notify('Usage: /tasks list|roles|show <id>|stop <id>|stop-all|resume', 'warning')
         return
       }
-      pi.sendMessage({
-        customType: 'pi-task-agents:status',
-        display: true,
-        content: toolResult(result).content
-      })
+      sendStatus(toolResult(result).content)
     }
   })
   return controller

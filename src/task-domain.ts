@@ -8,11 +8,7 @@ import {
   canTransitionTaskStatus,
   isTerminalTaskStatus
 } from './vendor/mcode-background-task/status.ts'
-import type {
-  TaskOutputReadOptions,
-  TaskOutputReadResult,
-  TaskOutputRef
-} from './vendor/mcode-background-task/types.ts'
+import type { TaskOutputReadOptions } from './vendor/mcode-background-task/types.ts'
 import type { TaskRecord, TaskState, TaskStatus } from './types.ts'
 import { utf8Output } from './utf8-output.ts'
 
@@ -46,13 +42,12 @@ export class TaskDomain {
     task.finished_at = new Date().toISOString()
   }
 
-  async readOutput(taskId: string, options: TaskOutputReadOptions): Promise<TaskOutputReadResult> {
+  async readOutput(
+    taskId: string,
+    options: TaskOutputReadOptions
+  ): Promise<{ content: string; nextOffset: number; truncated: boolean }> {
     const task = this.task(taskId)
-    return {
-      ...utf8Output(Buffer.from(task.output), options.offset ?? 0, options.limitBytes),
-      summary: task.final_text,
-      outputRef: this.outputRef(task)
-    }
+    return utf8Output(Buffer.from(task.output), options.offset ?? 0, options.limitBytes)
   }
 
   private task(id: string): TaskRecord {
@@ -61,14 +56,5 @@ export class TaskDomain {
       throw new TaskNotFoundError(id)
     }
     return task
-  }
-
-  private outputRef(task: TaskRecord): TaskOutputRef {
-    return {
-      taskId: task.task_id,
-      kind: 'session_transcript',
-      uri: task.childSessionPath,
-      offset: Buffer.byteLength(task.output)
-    }
   }
 }

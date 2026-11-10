@@ -12,7 +12,7 @@ import {
   waitForChildBashTaskChange
 } from './vendor/mcode-child-bash/child-bash-lifecycle.ts'
 import { CommandJournal, CommandLogs } from './command-journal.ts'
-import { CommandOutput } from './command-output.ts'
+import { CommandOutput, textOf } from './command-output.ts'
 import { assertNever, isRecord } from './guards.ts'
 
 interface Run {
@@ -37,15 +37,6 @@ interface Receipt {
   automatic: boolean
   text: string
   release(): void
-}
-const textOf = (value: unknown): string => {
-  if (!isRecord(value) || !Array.isArray(value.content)) {
-    return ''
-  }
-  return value.content
-    .filter((part): part is Record<string, unknown> => isRecord(part) && part.type === 'text')
-    .map((part) => String(part.text ?? ''))
-    .join('\n')
 }
 function reply(value: Record<string, unknown>, isError = false) {
   const text = JSON.stringify(value)
@@ -103,6 +94,8 @@ export async function createChildCommands(options: {
   await journal.restore()
   const logs = new CommandLogs(options.sessionPath),
     running = new Map<string, Execution>()
+  const pendingCleanup = (task: BackgroundTask): boolean =>
+    task.status === 'lost' || (isTerminalTaskStatus(task.status) && running.has(task.taskId))
   const receipts = new Map<string, Receipt[]>(),
     cursors = new Map<string, number>()
   const readTails = new Map<string, Promise<unknown>>()
@@ -348,14 +341,11 @@ export async function createChildCommands(options: {
           throw new AggregateError(faults, 'Command journal commit failed')
         }
       })()
-      execution.done.then(
-        () => {
+      execution.done
+        .finally(() => {
           execution.settled = true
-        },
-        () => {
-          execution.settled = true
-        }
-      )
+        })
+        .catch(() => {})
       return { taskId: task.taskId, abortController: controller }
     },
     stop: stopExecution
@@ -459,8 +449,7 @@ export async function createChildCommands(options: {
       if (signal?.aborted) {
         throw signal.reason ?? new Error('Output read aborted')
       }
-      const cleanupPending =
-        task.status === 'lost' || (isTerminalTaskStatus(task.status) && running.has(task.taskId))
+      const cleanupPending = pendingCleanup(task)
       const incomplete =
         !!task.metadata?.outputIncomplete ||
         cleanupPending ||
@@ -563,10 +552,7 @@ export async function createChildCommands(options: {
                   command_id: task.taskId,
                   status: task.status,
                   turn_id: task.metadata?.parentTurnId,
-                  ...(task.status === 'lost' ||
-                  (isTerminalTaskStatus(task.status) && running.has(task.taskId))
-                    ? { cleanup_pending: true }
-                    : {}),
+                  ...(pendingCleanup(task) ? { cleanup_pending: true } : {}),
                   ...(task.lastError ? { error_code: task.lastError.code } : {})
                 })),
               ...('nextCursor' in rows && rows.nextCursor ? { next_cursor: rows.nextCursor } : {})
@@ -587,10 +573,7 @@ export async function createChildCommands(options: {
               {
                 command_id: task.taskId,
                 status: task.status,
-                ...(task.status === 'lost' ||
-                (isTerminalTaskStatus(task.status) && running.has(task.taskId))
-                  ? { cleanup_pending: true }
-                  : {}),
+                ...(pendingCleanup(task) ? { cleanup_pending: true } : {}),
                 ...(task.lastError ? { error: task.lastError } : {})
               },
               task.lastError?.code === 'TASK_STOP_FAILED'
