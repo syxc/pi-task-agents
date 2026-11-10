@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  E2E_ENABLED,
   E2E_LUNA,
   createEnvironment,
+  e2eOptions,
   finishScenario,
   isRecord,
   requiredString
@@ -11,7 +11,7 @@ import {
 
 test(
   'task_output waits for terminal output and clamps long waits',
-  { skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e', timeout: 240_000 },
+  e2eOptions(240_000),
   async () => {
     const startedAt = Date.now()
     const environment = await createEnvironment({ parentModel: E2E_LUNA })
@@ -67,7 +67,7 @@ test(
 
 test(
   'task_output clamps an expired long wait while the task is still running',
-  { skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e', timeout: 240_000 },
+  e2eOptions(240_000),
   async () => {
     const startedAt = Date.now()
     const environment = await createEnvironment({ parentModel: E2E_LUNA })
@@ -121,7 +121,7 @@ test(
 
 test(
   'task_stop cancels a running child and keeps output readable',
-  { skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e', timeout: 240_000 },
+  e2eOptions(240_000),
   async () => {
     const startedAt = Date.now()
     const environment = await createEnvironment({ parentModel: E2E_LUNA })

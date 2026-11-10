@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { TaskOutputReads } from '../src/engine-output.ts'
+import { bounded } from './bounded.ts'
 
 test('abort after cursor commit does not discard the committed result', async () => {
   const reads = new TaskOutputReads(`cancel-committed-${process.pid}`)
@@ -36,20 +37,12 @@ test('aborting a queued automatic read returns promptly without overtaking its p
     return { next_offset: 2 }
   })
   controller.abort()
-  let deadline: ReturnType<typeof setTimeout> | undefined
   try {
-    await assert.rejects(
-      Promise.race([
-        canceled,
-        new Promise((_, reject) => {
-          deadline = setTimeout(() => reject(new Error('Cancellation did not settle')), 500)
-        })
-      ]),
-      { name: 'AbortError' }
-    )
+    await assert.rejects(bounded(canceled, 500, 'Cancellation did not settle'), {
+      name: 'AbortError'
+    })
     assert.deepEqual(offsets, [0])
   } finally {
-    clearTimeout(deadline)
     release()
   }
   assert.equal((await first).next_offset, 1)

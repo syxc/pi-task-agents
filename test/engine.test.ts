@@ -502,23 +502,16 @@ test('foreground stopping-write failure rejects even when abort failure publishe
     }
     await save(state)
   }
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     controller.abort()
     await waitFor(() => task.status === 'canceled' && engine.waiters.size === 0)
     writing.reject(failure)
     await assert.rejects(
-      Promise.race([
-        starting,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('foreground remained pending')), 1500)
-        })
-      ]),
+      bounded(starting, 1500, 'foreground remained pending'),
       (error) => error === failure
     )
     assert.equal(engine.runtimes.get(task.task_id), runtime)
   } finally {
-    clearTimeout(timer)
     writing.resolve()
     engine.store.save = save
     children[0].abort = abort
@@ -4410,19 +4403,7 @@ for (const stage of [
         await save(state)
       }
     }
-    const boundedClose = async () => {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      try {
-        await Promise.race([
-          engine.close(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('close stayed pending')), 2300)
-          })
-        ])
-      } finally {
-        clearTimeout(timer)
-      }
-    }
+    const boundedClose = () => bounded(engine.close(), 2300, 'close stayed pending')
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         // oxlint-disable-next-line no-await-in-loop -- Both reports must join the same unfinished close write.

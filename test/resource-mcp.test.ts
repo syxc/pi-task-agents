@@ -2,12 +2,12 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import * as sdk from '@earendil-works/pi-coding-agent'
 import { childMcpFactory } from '../src/resource-mcp.ts'
 import { createPiChildFactory } from '../src/pi-backend.ts'
 import type { AgentProfile } from '../src/types.ts'
+import { until } from './bounded.ts'
 
 const profile: AgentProfile = {
   name: 'worker',
@@ -257,18 +257,12 @@ test(
     )
     await assert.rejects(readFile(unselected), { code: 'ENOENT' })
     await child.dispose()
-    /* oxlint-disable no-await-in-loop -- Poll one state transition at a time; the delay bounds retries. */
-    for (let i = 0; i < 50; i++) {
+    await until(async () => {
       try {
-        if ((await readFile(marker, 'utf8')) === 'closed') {
-          break
-        }
+        return (await readFile(marker, 'utf8')) === 'closed'
       } catch {
-        // Keep polling until the marker becomes readable.
+        return false
       }
-      await delay(10)
-    }
-    /* oxlint-enable no-await-in-loop */
-    assert.equal(await readFile(marker, 'utf8'), 'closed')
+    }, 'MCP fixture marker must close')
   }
 )

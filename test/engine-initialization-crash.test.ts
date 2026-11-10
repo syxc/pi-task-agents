@@ -5,11 +5,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { TaskEngine } from '../src/engine.ts'
 import { hasCode } from '../src/guards.ts'
 import type { TaskSummary } from '../src/types.ts'
+import { until as pollUntil } from './bounded.ts'
 
 interface OwnerMessage {
   event: string
@@ -41,19 +41,7 @@ const alive = (pid: number) => {
     throw error
   }
 }
-async function until<T>(read: () => T | Promise<T>, label: string): Promise<NonNullable<T>> {
-  const end = Date.now() + 10000
-  for (;;) {
-    // oxlint-disable-next-line no-await-in-loop -- Observe each owned transition before polling again.
-    const result = await read()
-    if (result) {
-      return result
-    }
-    assert.ok(Date.now() < end, label)
-    // oxlint-disable-next-line no-await-in-loop -- Bound each owned subprocess handshake.
-    await delay(5)
-  }
-}
+const until = <T>(read: () => T | Promise<T>, label: string) => pollUntil(read, label, 10_000)
 async function json(path: string) {
   try {
     return JSON.parse(await readFile(path, 'utf8'))

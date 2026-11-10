@@ -14,6 +14,7 @@ import {
 } from '@earendil-works/pi-tui'
 import { TaskController } from '../src/controller.ts'
 import { taskProgress } from '../src/task-presentation.ts'
+import { bounded } from './bounded.ts'
 
 const task = (patch = {}) => ({
   task_id: 'task0001-long-id',
@@ -547,19 +548,9 @@ test(
           refreshed()
           return [task({ description: 'Recovered state' })]
         }
-        let deadline
-        try {
-          // The production refresh timer is unref'ed; the test must keep Node 22 alive.
-          // oxlint-disable-next-line no-await-in-loop -- Wait for the scheduled retry in this mode.
-          await Promise.race([
-            retry,
-            new Promise((_resolve, reject) => {
-              deadline = setTimeout(() => reject(new Error('Widget refresh timed out')), 10000)
-            })
-          ])
-        } finally {
-          clearTimeout(deadline)
-        }
+        // The production refresh timer is unref'ed; the test must keep Node 22 alive.
+        // oxlint-disable-next-line no-await-in-loop -- Wait for the scheduled retry in this mode.
+        await bounded(retry, 10_000, 'Widget refresh timed out')
         // oxlint-disable-next-line no-await-in-loop -- Allow the successful query continuation to render.
         await new Promise((resolve) => setImmediate(resolve))
         const widget = f.writes.at(-1).value

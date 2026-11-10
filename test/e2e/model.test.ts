@@ -1,16 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  E2E_ENABLED,
   E2E_TERRA,
   createEnvironment,
+  e2eOptions,
   finishScenario,
   readChildMetrics
 } from './harness.ts'
 
 test(
   'children inherit the parent terra model when no role overrides exist',
-  { skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e', timeout: 240_000 },
+  e2eOptions(240_000),
   async () => {
     const startedAt = Date.now()
     const environment = await createEnvironment({

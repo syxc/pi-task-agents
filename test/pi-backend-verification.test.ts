@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFile, rename, writeFile } from 'node:fs/promises'
-import { setTimeout as delay } from 'node:timers/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { TaskEngine } from '../src/engine.ts'
 import { taskResult } from '../src/tool-result-task.ts'
 import { OutputProjector, outputWait, queryResult } from '../src/tool-result-control.ts'
+import { until } from './bounded.ts'
 import { answer, fixture, profile, tool } from './pi-backend-test-helpers.ts'
 import type { ChildFailure, VerificationReport } from '../src/types.ts'
 
@@ -101,21 +101,14 @@ test('background task plus native foreground Bash supports long work and owned c
       },
       { ...profile, tools: ['bash'] }
     )
-    let pid: number | undefined
-    /* oxlint-disable no-await-in-loop -- Poll one state transition at a time; the delay bounds retries. */
-    for (let i = 0; i < 200; i++) {
+    const pid = await until(async () => {
       try {
-        pid = Number(await readFile(marker, 'utf8'))
-        break
+        const value = Number(await readFile(marker, 'utf8'))
+        return Number.isSafeInteger(value) && value > 0 ? value : undefined
       } catch {
-        await delay(5)
+        return undefined
       }
-    }
-    /* oxlint-enable no-await-in-loop */
-    assert.ok(
-      pid !== undefined && Number.isSafeInteger(pid) && pid > 0,
-      'Fresh owned process must become ready'
-    )
+    }, 'Fresh owned process must become ready')
     process.kill(pid, 0)
     const running = await engine.query({ task_id: task.task_id })
     assert.equal(running.status, 'running')
@@ -132,22 +125,17 @@ test('background task plus native foreground Bash supports long work and owned c
       false
     )
     assert.equal((await engine.stop(task.task_id)).status, 'canceled')
-    let alive = true
-    /* oxlint-disable no-await-in-loop -- Poll one state transition at a time; the delay bounds retries. */
-    for (let i = 0; i < 200; i++) {
+    await until(() => {
       try {
         process.kill(pid, 0)
+        return false
       } catch (error) {
         if ((error as { code?: unknown }).code === 'ESRCH') {
-          alive = false
-          break
+          return true
         }
         throw error
       }
-      await delay(5)
-    }
-    /* oxlint-enable no-await-in-loop */
-    assert.equal(alive, false, 'Stopping the task must stop its still-running native Bash process')
+    }, 'Stopping the task must stop its still-running native Bash process')
     assert.equal((await engine.query({ task_id: task.task_id })).activity, undefined)
   } finally {
     await engine.close()

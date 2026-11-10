@@ -11,6 +11,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import { createChildCommands } from '../src/child-commands.ts'
 import { CommandOutput } from '../src/command-output.ts'
+import { bounded, until } from './bounded.ts'
 
 async function fixture(t: TestContext, nativeOutput?: string) {
   const root = await mkdtemp(join(tmpdir(), 'owned-command-scope-'))
@@ -124,13 +125,11 @@ test('duplicate tool-call IDs keep one receipt per output read and do not strand
   result({ toolCallId: 'duplicate-call', content: readSecond.content, isError: false })
   // Each automatic read waits for its own receipt before the next read starts; a
   // receipt replaced by the duplicate ID would block this read forever.
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const next = await Promise.race([
+  const next = await bounded(
     f.call({ action: 'output', command_id: first.command_id }),
-    new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('automatic output read stalled')), 1000)
-    })
-  ]).finally(() => clearTimeout(timer))
+    1000,
+    'automatic output read stalled'
+  )
   assert.equal((next as { status: string }).status, 'succeeded')
 })
 
@@ -171,20 +170,15 @@ test(
     }
     try {
       f.release()
-      let quarantined = false
-      /* oxlint-disable no-await-in-loop -- Poll the observable cleanup state until finalization settles. */
-      for (let attempt = 0; attempt < 200; attempt++) {
+      await until(async () => {
         try {
           await f.commands.ready()
+          return false
         } catch (error) {
           assert.equal((error as { code?: unknown }).code, 'CHILD_CLEANUP_FAILED')
-          quarantined = true
-          break
+          return true
         }
-        await new Promise((resolve) => setTimeout(resolve, 10))
-      }
-      /* oxlint-enable no-await-in-loop */
-      assert.equal(quarantined, true)
+      }, 'cleanup must quarantine')
       // Let the rejected finalization settle before retrying the stop.
       await new Promise((resolve) => setTimeout(resolve, 25))
       await assert.rejects(f.call({ action: 'stop', command_id: row.command_id }), {
