@@ -11,17 +11,22 @@ import { answer } from './pi-backend-test-helpers.ts'
 const project = fileURLToPath(new URL('../', import.meta.url))
 const server = fileURLToPath(new URL('./fixtures/resource-mcp/owned-server.mjs', import.meta.url))
 
-test('declares host-provided peers and pins direct development dependencies', async () => {
+test('declares host-provided peers and development ranges', async () => {
   const manifest = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'))
-  for (const [name, version] of Object.entries({
-    '@earendil-works/pi-coding-agent': '1.5.0',
-    '@earendil-works/pi-ai': '1.5.0',
-    typebox: '1.3.27'
-  })) {
-    assert.equal(manifest.peerDependencies[name], '*', name)
-    assert.equal(manifest.devDependencies[name], version, name)
+  const piPackages = Object.keys({
+    ...manifest.peerDependencies,
+    ...manifest.devDependencies,
+    ...manifest.dependencies
+  }).filter((name) => name.startsWith('@earendil-works/pi-'))
+  assert.ok(piPackages.length > 0)
+  for (const name of piPackages) {
+    assert.equal(manifest.peerDependencies[name], '^1.5.0', name)
+    assert.equal(manifest.devDependencies[name], '^1.5.0', name)
     assert.equal(manifest.dependencies?.[name], undefined, name)
   }
+  assert.equal(manifest.peerDependencies.typebox, '^1.3.27')
+  assert.equal(manifest.devDependencies.typebox, '^1.3.27')
+  assert.equal(manifest.dependencies?.typebox, undefined)
 })
 
 test('MCP adapter uses the supplied host SDK without resolving a peer beside the plugin', async (t) => {

@@ -106,7 +106,7 @@ Pi 适配使用原生 `codemode`，对应 MCode 的 `packages/agent-core/src/too
 
 ## 宿主边界与待验收项
 
-- 默认插件路径支持未修改的官方 Pi 1.5.0，不依赖自定义 SDK 资源快照；父 runtime 替换前须取消并排空旧后台。`host-peer-sdk.test.ts`、`pi-backend-ui-isolation.test.ts` 覆盖无本地 peer 及双子会话 UI 隔离；父实例的工具/权限 hooks 与扩展生命周期机制见[设计不变量](design.md)。
+- 默认插件路径支持未修改的官方 Pi 1.5.0 及以上的 1.x 版本，不依赖自定义 SDK 资源快照；父 runtime 替换前须取消并排空旧后台。`host-peer-sdk.test.ts`、`pi-backend-ui-isolation.test.ts` 覆盖无本地 peer 及双子会话 UI 隔离；父实例的工具/权限 hooks 与扩展生命周期机制见[设计不变量](design.md)。
 - 不复刻 MCode 的完整进程宿主、全局后台调度器、日志控制界面、部署、通用 Mavis 会话管理、Memory 宿主、完整 TUI 或 SQLite 观察运行时；PTC 由 Pi 原生 codemode 承接。这些排除项不缩减 C5/C6 等核心工作流。
 - 准入、permission hooks 和工具门控不能阻止可信第三方扩展自行执行代码，也不是 OS 或网络沙箱。第三方工厂在 SDK 接管之前发生的副作用仍由该工厂负责回滚。
 - 命令输出以当前 Pi 原生 Bash 捕获的输出为边界。仅接收本次原生调用的受校验输出源，并固定 `FileHandle` 身份；历史句柄只读取子会话私有日志，不把任意 URI 当作文件授权。宿主输出格式变化导致无法取得完整输出，或记录、解码不完整时，须明确报告，不能静默返回截取内容并宣称完整。

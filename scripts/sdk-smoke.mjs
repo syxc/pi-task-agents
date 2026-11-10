@@ -31,7 +31,7 @@ const text = (message) =>
           .join('')
       : ''
 
-export async function runSdkSmoke({ session, controller, delivered, errors }) {
+export async function runSdkSmoke({ session, controller, delivered, errors, pi = 'unknown' }) {
   const results = []
   let seq = 0
   async function call(name, params) {
@@ -219,12 +219,13 @@ export async function runSdkSmoke({ session, controller, delivered, errors }) {
   assert.equal(canceled.session_id, pending.sub_session_id)
   results.push({ check: 'accepted task cancellation', status: 'passed' })
   assert.deepEqual(errors, [])
-  return { pi: '1.5.0', results, notifications: delivered.length, status: 'passed' }
+  return { pi, results, notifications: delivered.length, status: 'passed' }
 }
 
 async function main() {
   // Imports and all live SDK/authentication setup stay behind the executable entry point.
   const {
+    VERSION,
     createAgentSession,
     DefaultResourceLoader,
     ModelRuntime,
@@ -312,7 +313,7 @@ async function main() {
     shutdownHandler: () => {}
   })
   try {
-    const report = await runSdkSmoke({ session, controller, delivered, errors })
+    const report = await runSdkSmoke({ session, controller, delivered, errors, pi: VERSION })
     await writeFile(join(run, 'report.json'), JSON.stringify(report, null, 2) + '\n', {
       mode: 0o600
     })

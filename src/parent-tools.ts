@@ -1,12 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
-import {
-  VERSION,
-  type ExtensionAPI,
-  type ExtensionContext,
-  type ExtensionToolContext,
-  type Skill,
-  type ToolDefinition
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionToolContext,
+  Skill,
+  ToolDefinition
 } from '@earendil-works/pi-coding-agent'
 import { inheritedShellSettings, type ParentRuntimeSnapshot } from './parent-runtime.ts'
 import { isRecord } from './guards.ts'
@@ -37,8 +36,8 @@ const nativeLeaves = new Set(['read', 'write', 'edit', 'bash', 'powershell', 'gr
 /** The trusted host's provenance, not a tool's name or reachability hints, identifies audited code. */
 function verifiedLeaf(tool: ReturnType<ExtensionAPI['getAllTools']>[number]): boolean {
   // These implementations never call executeTool or retain a delegated context.
-  // Re-audit before accepting another SDK version or built-in implementation.
-  if (VERSION !== '1.5.0' || tool.sourceInfo.source !== 'builtin') {
+  // Re-audit before accepting another built-in implementation.
+  if (tool.sourceInfo.source !== 'builtin') {
     return false
   }
   if (tool.sourceInfo.path === 'builtin:' + tool.name) {
