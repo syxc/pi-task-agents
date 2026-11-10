@@ -227,7 +227,7 @@ pnpm test
 pnpm run pack
 ```
 
-开发工具和 Pi 依赖版本见 [package.json](package.json) 与 [pnpm-lock.yaml](pnpm-lock.yaml)，其中 `packageManager` 固定 pnpm 版本，Pi SDK 与 `pi-ai` 同版锁定。[pnpm-workspace.yaml](pnpm-workspace.yaml) 将 `markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
+开发工具和 Pi 依赖版本见 [package.json](package.json) 与 [pnpm-lock.yaml](pnpm-lock.yaml)，其中 `packageManager` 固定 pnpm 版本，Pi SDK 使用 `^1.5.0`、typebox 使用 `^1.3.27` 的兼容区间（允许小版本与补丁升级，阻止大版本升级）；锁文件记录当前安装快照。[pnpm-workspace.yaml](pnpm-workspace.yaml) 将 `markdownlint-cli2` 的传递依赖 `markdownlint` 暂覆盖为修复 ReDoS 的 0.42.1，上游更新后应复核并移除此覆盖。
 
 - `check`：strict 类型、包清单、vendor 哈希、Oxlint、类型感知 lint、Markdown 和 Oxfmt。可分别运行 `pnpm run lint`、`pnpm run lint:type-aware`、`pnpm run lint:markdown`、`pnpm run format:check`；`pnpm run format` 仅格式化自有代码与配置，不改上游锁定源码。
 - `test`：默认离线，不包含 `test/e2e`。直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试；固定版本的 `typescript-fixture` 仅用于动态编译上游原文 fixture，不替代项目类型检查。
