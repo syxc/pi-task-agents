@@ -4,13 +4,9 @@ import test from 'node:test'
 import * as sdk from '@earendil-works/pi-coding-agent'
 import { answer, deferred, fixture, tool } from './pi-backend-test-helpers.ts'
 
-type ExtensionFactories = NonNullable<
-  ConstructorParameters<typeof sdk.DefaultResourceLoader>[0]['extensionFactories']
->
-
 async function officialSession(
   f: Awaited<ReturnType<typeof fixture>>,
-  extensionFactories: ExtensionFactories,
+  extensionFactories: sdk.InlineExtension[],
   tools: string[],
   sessionManager = sdk.SessionManager.inMemory(f.cwd)
 ) {
@@ -39,14 +35,19 @@ async function officialSession(
     sessionManager,
     tools
   })
-  await session.bindExtensions({
-    mode: 'json',
-    onError: (error) => {
-      throw new Error(error.error)
-    },
-    abortHandler() {},
-    shutdownHandler() {}
-  })
+  try {
+    await session.bindExtensions({
+      mode: 'json',
+      onError: (error) => {
+        throw new Error(error.error)
+      },
+      abortHandler() {},
+      shutdownHandler() {}
+    })
+  } catch (error) {
+    await session.dispose()
+    throw error
+  }
   return { session, loader }
 }
 

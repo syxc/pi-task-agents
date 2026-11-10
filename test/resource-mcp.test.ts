@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import * as sdk from '@earendil-works/pi-coding-agent'
+import { hasCode } from '../src/guards.ts'
 import { childMcpFactory } from '../src/resource-mcp.ts'
 import { createPiChildFactory } from '../src/pi-backend.ts'
 import type { AgentProfile } from '../src/types.ts'
@@ -260,7 +261,10 @@ test(
     await until(async () => {
       try {
         return (await readFile(marker, 'utf8')) === 'closed'
-      } catch {
+      } catch (error) {
+        if (!hasCode(error, 'ENOENT')) {
+          throw error
+        }
         return false
       }
     }, 'MCP fixture marker must close')
