@@ -1,6 +1,6 @@
 # 设计不变量与宿主适配
 
-默认实现支持未修改的官方 Pi 1.5.0，不替换安装、修改 SDK、包装全局 prototype 或另建宿主。本文记录改动时必须维持的契约、机制与官方宿主限制；用户操作见 [README](../README.md)，MCode 对照与验收见[核心功能对照](mcode-parity.md)。
+默认实现支持未修改的官方 Pi 1.5.0 及以上的 1.x 版本，不替换安装、修改 SDK、包装全局 prototype 或另建宿主。本文记录改动时必须维持的契约、机制与官方宿主限制；用户操作见 [README](../README.md)，MCode 对照与验收见[核心功能对照](mcode-parity.md)。
 
 ## 职责划分
 
@@ -8,12 +8,12 @@ Pi SDK 提供子会话、模型、工具执行和消息队列；插件 Engine �
 
 ## 来源审核与授权边界
 
-[`src/parent-tools.ts`](../src/parent-tools.ts) 从父运行态读取可调用工具及来源元数据，不重扫目录、不还原扩展工厂或 MCP 配置。转发范围限于已核验的官方 Pi 1.5.0 实现：
+[`src/parent-tools.ts`](../src/parent-tools.ts) 从父运行态读取可调用工具及来源元数据，不重扫目录、不还原扩展工厂或 MCP 配置。转发范围限于来源已核验的官方 Pi 内置实现（Pi 1.5.0 及以上的 1.x 版本）：
 
 - `builtin:<tool>`：`read/write/edit/bash/powershell/grep/find/ls`。
 - `builtin:mcp`：MCP 工具及 `list_mcp_resources/list_mcp_resource_templates/read_mcp_resource`，复用父连接，不复制凭据或重启服务器。
 
-审核同时要求 `sourceInfo.source === 'builtin'`、对应路径和已核验实现范围；名称、namespace、annotations 或 `reachesTools` 本身不能证明安全。普通扩展、同名覆盖、替代 MCP 适配器和 inline MCP 工厂均不转发，角色配置不能重开，父工具不受影响。未知 SDK 版本关闭转发；升级后须重新审核并回归。
+审核同时要求 `sourceInfo.source === 'builtin'`、对应路径和已核验实现范围；名称、namespace、annotations 或 `reachesTools` 本身不能证明安全。普通扩展、同名覆盖、替代 MCP 适配器和 inline MCP 工厂均不转发，角色配置不能重开，父工具不受影响。版本下限由 peerDependencies 声明；1.x 内的小版本和补丁升级不改变来源元数据时无需改插件，大版本或来源语义变化时须重新审核并回归。
 
 授权逐层取交集：父当前可调用工具 → 角色工具、来源和服务器选择 → 保存的历史上界 → 每次调用的实时检查。父停用或替换工具后，旧快照不能继续调用；续接须重新绑定当前父会话，不复活被排除资源。按服务器限制 MCP 时，聚合资源调用须显式指定允许的 `server`。
 
@@ -23,7 +23,7 @@ Skills 来自 `before_agent_start` 的可变选项，在 `agent_start` 复制最
 
 ## 串行队列与 signal 限制
 
-官方 1.5.0 的两个机制决定了默认桥不能转发任意扩展：
+官方 Pi 的两个机制决定了默认桥不能转发任意扩展（核验于 1.5.0）：
 
 - `core/nested-tool-calls.js` 在进入工具管线前等待串行队列；`core/agent-session.js` 在 `agent_end` 前清除嵌套 scope。在途扩展随后嵌套串行工具可能丢失持锁祖先、等待自己，且尚未到达 `tool_call` hook。
 - `core/extensions/runner.js` 用 `options.signal ?? signal` 创建 context，允许替换继承信号。`pi-agent-core` 虽在全部权限 hooks 后检查 signal，独立信号仍可能漏掉后续 hook 等待期间的上层取消。

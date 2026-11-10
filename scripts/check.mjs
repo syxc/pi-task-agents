@@ -8,16 +8,20 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 assert.equal(manifest.type, 'module')
 assert.deepEqual(manifest.pi.extensions, ['./src/extension.ts'])
-for (const name of [
-  '@earendil-works/pi-coding-agent',
-  '@earendil-works/pi-ai',
-  '@earendil-works/pi-tui',
-  'typebox'
-]) {
-  assert.equal(manifest.peerDependencies[name], '*')
-  assert.ok(manifest.devDependencies[name])
-  assert.equal(manifest.dependencies?.[name], undefined)
+for (const name of Object.keys({
+  ...manifest.peerDependencies,
+  ...manifest.devDependencies,
+  ...manifest.dependencies
+})) {
+  if (!name.startsWith('@earendil-works/pi-')) {
+    continue
+  }
+  assert.equal(manifest.peerDependencies[name], '^1.5.0', name)
+  assert.equal(manifest.devDependencies[name], '^1.5.0', name)
+  assert.equal(manifest.dependencies?.[name], undefined, name)
 }
+assert.equal(manifest.peerDependencies.typebox, '^1.3.27')
+assert.equal(manifest.devDependencies.typebox, '^1.3.27')
 for (const entry of manifest.files) {
   // eslint-disable-next-line no-await-in-loop -- Keep resource checks ordered and stop at the first invalid manifest entry.
   assert.ok(await stat(resolve(root, entry)))
