@@ -45,9 +45,29 @@ if (version.status !== 0) {
   console.error(`Pi CLI is not runnable: ${version.stderr?.trim() || pi}`)
   process.exit(1)
 }
+const host = version.stdout.trim()
+let pinned
+try {
+  pinned = JSON.parse(
+    await readFile(
+      join(project, 'node_modules/@earendil-works/pi-coding-agent/package.json'),
+      'utf8'
+    )
+  ).version
+} catch {
+  // Copies without installed dependencies cannot resolve the pinned SDK; skip the check.
+}
+// A newer host rejects parent tool provenance, so every child would run without tools.
+if (pinned && host !== pinned) {
+  console.error(
+    `Pi CLI ${pi} reports ${host}, but this checkout targets SDK ${pinned}. ` +
+      'Run through pnpm so node_modules/.bin/pi is used, or set PI_E2E_PI to the matching CLI.'
+  )
+  process.exit(1)
+}
 
 console.log(
-  `Real-model e2e: pi ${version.stdout.trim()}, provider openai-codex, ` +
+  `Real-model e2e: pi ${host}, provider openai-codex, ` +
     `models gpt-6.1-terra/gpt-6-luna, ${selected.length} file(s)`
 )
 console.log(`Files: ${selected.join(', ')}`)
