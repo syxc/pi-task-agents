@@ -43,8 +43,6 @@ pi install git:github.com/syxc/pi-task-agents
 }
 ```
 
-父会话目录较大时，完整名称、描述与路径可改用共享路径前缀的紧凑表示；省略的行尾字段按明确默认值恢复：根索引为 `0`，文件路径为 `name/SKILL.md`。非规范路径保留显式字段，不会删去条目或修改传给子会话的资源元数据。已有自定义目录表示，以及 `forceSystemPrompt` 覆盖的提示词，不参与这种改写。
-
 名称必须来自当前角色已获准的 Skills。省略 `task.skills` 保持原来的完整目录；`task.skills: []` 表示初始不展示任何 Skill，并不关闭其他已授权 Skills。它与角色配置的 `skills: []` 不同，后者仍关闭该角色的 Skills。
 
 有未展示的已授权 Skills、子会话有原生文件读取能力且查阅工具未被禁用时，子会话提供 `task_skill_search` 查询其完整名称、描述与路径；再用原生 `read` 或获准的原生 Bash 读取适用的 `SKILL.md`。查询为空可分页查看目录，结果保留总数和后续页信息，不预加载正文。禁止模型自动调用的 Skills 不参与搜索，也不能作为首批选择。未知或不在角色范围内的首批名称会报错，不静默扩权。
@@ -78,15 +76,11 @@ pi install git:github.com/syxc/pi-task-agents
 
 TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任务行。图形客户端可选择不显示这些信息，此时通过 `/tasks list` 或 `task_query` 查询。
 
-### 初始化与清理
+### 清理与恢复
 
-任务超时包含子会话初始化。调用子会话工厂前，插件先持久化初始化所有权标记；落盘失败则不调用工厂。初始化完成并交接给 active 任务后，先持久化清除标记再派发提示；取消中的初始化只在原工厂确证清理后清除。清除标记不表示会话已无存活资源，后续仍沿用 active 任务和原生命令清理契约。
-
-初始化尚未派发提示就超时且清理未确认时，插件先持久化失败输出，再通知父会话；迟到的纯清理回执不重复追加失败文本。已派发的提示仍等待 SDK 结算后交付，以保留迟到结果；清理未确认不代表执行已经结束。
-
-清理或停止未及时确认时，停止会报告 `cleanup_pending` 或错误，并保留并发名额。带未确认标记的 owner 重启后长期隔离：结果仍可通过 `task_query`、`task_output` 读取，但不能继续派工，`close()` 会报错并保留 owner 锁。重建 child、空 `dispose()`、新 session 或其他 owner 的清理不能解除隔离，也不提供人工解除入口。清理确认必须成功落盘，失败时保留锁并在关闭重试时补写回执。插件不能强制终止不配合的 SDK 初始化。
-
-没有该标记的旧快照保持原有 active/lost 恢复语义；插件无法补推历史初始化是否发生，也不把缺少标记当作资源已清理的证明。隔离按 owner 生效，切换 owner 不会清除旧标记，也不能作为原工作已安全恢复的依据。
+- 停止或关闭未及时确认时报告 `cleanup_pending` 或错误，并保留并发名额；带未确认标记的 owner 重启后仍可读取历史和输出，但不能继续派工，也没有人工解除入口。隔离按 owner 生效，切换 owner 不会清除旧标记。
+- 初始化在派发提示前超时且清理未确认时，父会话会收到失败通知；迟到的纯清理回执不重复追加失败文本。
+- 插件不能强制终止不配合的 SDK 初始化；机制与恢复语义见[设计不变量](docs/design.md#准入所有权与恢复)。
 
 ## 角色与权限
 
@@ -113,7 +107,7 @@ TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任�
 
 - 范围：覆盖各适用角色的实际工具调用及嵌套 codemode，保存已知目标首次调用前和最后调用后的元数据。Verifier 另保留工作区前后快照；目标不明的 Bash 也可在预算内补充工作区元数据。不读取内容、不跟随符号链接，排除 `.git`、`node_modules` 和 Agent 状态目录。
 - 路径：write/edit 按 Pi 规则解析别名；Shell 保留字面空格、纳入非空原生前缀。未解析的父目录遍历及复合命令影响保留不确定性；动态、范围外、排除或不完整目标报告 `uncertain`。
-- 上限：工作区单次扫描 20,000 个目录项，循环预算 1 秒；每次工具捕获最多 64 个目标，每轮最多 256 个不同目标。返回最多 200 条去重后的变化路径，优先保留直接观察到差异的工具目标，再以工作区变化补足，选取后按路径排序；目录变化也计入，列表被截断时保留 `changed_files_truncated`。
+- 上限：观察在固定预算内进行，优先保留直接观察到差异的工具目标，再以工作区变化补足；列表被截断时保留 `changed_files_truncated`。预算、采集失败与不确定性的实现约束见[设计不变量](docs/design.md#文件观察预算)。
 - 解释：采集失败报告 `recording_failed`，不伪造空的已确认变化列表，也不改判模型执行失败。`no_observed_change` 仅表示范围内未见元数据差异，不证明没有瞬时写入或内容变化；并发变化不归因于某个子 Agent。
 
 ## 配置
@@ -181,7 +175,7 @@ TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任�
 
 来源和名称须同时符合核验范围；普通扩展、同名覆盖、替代 MCP 适配器和 inline MCP 工厂不转发，角色配置也不能重新开启。未知 SDK 版本关闭父工具转发，升级后须重新核验并回归。
 
-拒绝任意扩展转发是为了避免嵌套排队与独立取消信号引发跨 Turn 死锁或取消竞态，权限 hook 不足以阻断。官方叶子实现、工具桥机制与证据见 [Pi 运行态适配](docs/pi-runtime-adapter.md)。
+拒绝转发任意扩展的根因是官方宿主的串行队列与 signal 继承机制，权限 hook 不足以阻断；机制、证据与验证范围见[设计不变量](docs/design.md#串行队列与-signal-限制)。
 
 此保证依赖未修改的官方宿主及来源元数据，不是同进程恶意扩展沙箱；自定义宿主伪标 `builtin`、篡改元数据或 SDK 不在保证内。直接使用底层 SDK backend 的嵌入程序可显式提供独立资源加载器，由调用方承担信任与生命周期责任，不代表默认父工具桥开放这些能力。
 
@@ -239,7 +233,7 @@ pnpm run pack
 - `test`：默认离线，不包含 `test/e2e`。直接对未修改的官方 SDK 回归，包含隔离 bundled CLI 的默认派工和权限拒绝测试；固定版本的 `typescript-fixture` 仅用于动态编译上游原文 fixture，不替代项目类型检查。
 - `test:e2e`：运行 `pnpm test:e2e`，或追加文件名片段选择[真实模型场景](test/e2e/)（如 `pnpm test:e2e control append`）。前置条件：本机 `pi` CLI 可执行；`openai-codex` provider 的 `apiKey` 为环境变量引用且变量已设置。只使用 `gpt-6.1-terra` 和 `gpt-6-luna`，每次消耗真实额度。在 `mkdtemp` 隔离的 HOME、agent dir、workspace 和 session 中运行，结束后删除；`PI_E2E_KEEP=1` 可保留现场。每个场景检查父/子 token、费用、消息数与耗时预算，可用 `PI_E2E_MAX_PARENT_TOKENS`、`PI_E2E_MAX_CHILD_TOKENS`、`PI_E2E_MAX_COST_USD`、`PI_E2E_MAX_ASSISTANT_MESSAGES`、`PI_E2E_MAX_SCENARIO_MS` 调整阈值。MCP 与第三方 provider 不在真实模型覆盖范围内。
 - `test:e2e skills-context`：仅用 `openai-codex/gpt-6-luna`、`high` 对父子会话做 Skills A/B。100 项受控目录下，直接读取、代码实现和未预选依赖发现各跑两轮，并交替测试顺序。Node 22 下整文件超时为 50 分钟，单场景仍为 8 分钟。比较首请求输入、缓存读取、父子累计 token、工具调用和耗时，同时检查实际 Skill 读取与代码行为。设置 `PI_E2E_REPORT_DIR=/path/to/new-report-dir` 可保留不含认证的 JSON 指标；结果不等于本机所有 Skills 或任意任务的收益保证。
-- `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证。内部使用 Node 随附的 `npm pack --ignore-scripts`，避免 pnpm 打包时移除清单末尾换行而导致提取包格式检查失败；npm 不用于依赖安装。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
+- `pack`：运行 `pnpm run pack`（不是 pnpm 内置的 `pnpm pack`），在 `artifacts/` 生成当前包版本的 `.tgz`，包含源码、测试、开发脚本及 pnpm override 配置，不含依赖、任务历史或认证；打包后自动解包校验入口。根锁文件不打包；提取包的 frozen 开发验证须另提供同版本仓库的 `pnpm-lock.yaml`。
 
 离线测试和本地 stdio MCP 只证明受控路径，不代表真实模型、第三方业务 MCP、其他 SDK 版本或平台已验收。真实模型和第三方业务验收须另行授权；`pnpm test:e2e` 以及 `scripts/sdk-smoke.mjs`、`scripts/rpc-smoke.mjs` 使用本机模型认证并消耗额度。
 
@@ -250,5 +244,5 @@ pnpm run pack
 ## 文档
 
 - [MCode 核心功能对照](docs/mcode-parity.md)：验收基线、契约对照与上游同步。
-- [Pi 运行态适配](docs/pi-runtime-adapter.md)：工具桥、调度与取消边界。
+- [设计不变量](docs/design.md)：宿主限制、工具桥、准入与所有权、生命周期。
 - [CHANGELOG](CHANGELOG.md)、[LICENSE](LICENSE)。

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 await mkdir(new URL('../artifacts/', import.meta.url), { recursive: true })
+// Use npm pack: pnpm strips the manifest's trailing newline and breaks the extracted format check.
 const packed = spawnSync(
   'npm',
   ['pack', '--ignore-scripts', '--json', '--pack-destination', 'artifacts'],

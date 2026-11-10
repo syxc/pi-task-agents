@@ -1,6 +1,6 @@
 # MCode 子 Agent 核心功能对照
 
-本文对照 MCode `3c21163c85a9684030cb147bfef48c6284fa3c46`，记录子 Agent 核心契约在 Pi 中的实现与证据，不证明整个 MCode 宿主等价。安装和操作见 [README](../README.md)，工具桥机制见 [Pi 运行态适配](pi-runtime-adapter.md)。
+本文对照 MCode `3c21163c85a9684030cb147bfef48c6284fa3c46`，记录子 Agent 核心契约在 Pi 中的实现与证据，不证明整个 MCode 宿主等价。安装和操作见 [README](../README.md)，工具桥机制见[设计不变量](design.md)。
 
 “对应实现”表示行为已有生产调用链及回归；“Pi 适配”允许接口和结构不同，但保留核心工作流；“已接入”表示受管命令和文件观察等适配链路已接通。未满足项标为“待实现”或“部分实现”，不能作为适配边界排除。
 
@@ -70,7 +70,7 @@
 | --- | --- | --- | --- |
 | Task 显式模型/思考优先，其次角色配置、父有效选择 | `V2/src/application/session/task-agent-binding-capture.ts` | `config.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；使用 Pi 的 provider/id、thinking 和原生 registry，不复刻 MCode 模型组管理器；见配置和 SDK 选模回归 |
 | 换模型不继承不兼容旧参数，既有子会话不随父切换漂移 | `V2/src/service/model-system/catalog/agent-model-selection.ts` | `resolveProfile`、冻结 profile 与 onProfileResolved | 对应设计；`config.test.ts`、`pi-backend.test.ts`、`engine.test.ts` |
-| Skills、扩展、MCP 按允许范围使用并保留权限上界 | binding capture、最终工具 surface | `parent-tools.ts`、`child-parent-tools.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；最终 Skills 来自官方事件，默认父桥仅转发已核验的官方原生及内置 MCP，不复制工厂或凭据；拒绝普通扩展、同名覆盖及 inline/替代 MCP，不影响父工具。`parent-tools.test.ts`、`runtime-inheritance.test.ts`、`resource-inheritance.test.ts` 覆盖生产链；机制与覆盖细目见 [Pi 运行态适配](pi-runtime-adapter.md) |
+| Skills、扩展、MCP 按允许范围使用并保留权限上界 | binding capture、最终工具 surface | `parent-tools.ts`、`child-parent-tools.ts`、`controller.ts`、`pi-backend.ts` | Pi 适配；最终 Skills 来自官方事件，默认父桥仅转发已核验的官方原生及内置 MCP，不复制工厂或凭据；拒绝普通扩展、同名覆盖及 inline/替代 MCP，不影响父工具。`parent-tools.test.ts`、`runtime-inheritance.test.ts`、`resource-inheritance.test.ts` 覆盖生产链；机制与覆盖细目见[设计不变量](design.md) |
 | 初始 Skills 披露与完整资源权限分离 | Pi 任务级适配；参考 MCode 目录披露与权限分离原则 | `task.skills`、`skill-context.ts`、`pi-backend.ts` | 父选择首批目录，未展示项仍可按当前授权与历史上界查阅；不自动暴露 disabled Skills，不改变角色禁用。`pi-backend-skills.test.ts`、`skill-context.test.ts` 覆盖披露、撤销、恢复与分页；`test/e2e/skills-context.test.ts` 提供 Luna/high A/B |
 | 子执行保留必要父原生 Shell 设置 | Pi 宿主执行上下文 | `parent-tools.ts`、`pi-backend.ts` | 默认插件路径复用父 Bash 执行管线；仅为观察复制 `shellPath`/`shellCommandPrefix`。`runtime-inheritance.test.ts` 比较实际父执行、子前台 Bash、受管命令和 native codemode |
 | 原生工具 ceiling 与 Plugin/MCP 来源权限分开 | `V2/.../local-turn-tool-catalog.ts` | `resource-selection.ts`、`resource-tool-inventory.ts` | 对应设计；角色 ceiling、MCP deny、发现与 codemode 回归；外部工具不构成只读沙箱 |
@@ -106,7 +106,7 @@ Pi 适配使用原生 `codemode`，对应 MCode 的 `packages/agent-core/src/too
 
 ## 宿主边界与待验收项
 
-- 默认插件路径支持未修改的官方 Pi 1.5.0，不依赖自定义 SDK 资源快照；父 runtime 替换前须取消并排空旧后台。`host-peer-sdk.test.ts`、`pi-backend-ui-isolation.test.ts` 覆盖无本地 peer 及双子会话 UI 隔离；父实例的工具/权限 hooks 与扩展生命周期机制见 [Pi 运行态适配](pi-runtime-adapter.md)。
+- 默认插件路径支持未修改的官方 Pi 1.5.0，不依赖自定义 SDK 资源快照；父 runtime 替换前须取消并排空旧后台。`host-peer-sdk.test.ts`、`pi-backend-ui-isolation.test.ts` 覆盖无本地 peer 及双子会话 UI 隔离；父实例的工具/权限 hooks 与扩展生命周期机制见[设计不变量](design.md)。
 - 不复刻 MCode 的完整进程宿主、全局后台调度器、日志控制界面、部署、通用 Mavis 会话管理、Memory 宿主、完整 TUI 或 SQLite 观察运行时；PTC 由 Pi 原生 codemode 承接。这些排除项不缩减 C5/C6 等核心工作流。
 - 准入、permission hooks 和工具门控不能阻止可信第三方扩展自行执行代码，也不是 OS 或网络沙箱。第三方工厂在 SDK 接管之前发生的副作用仍由该工厂负责回滚。
 - 命令输出以当前 Pi 原生 Bash 捕获的输出为边界。仅接收本次原生调用的受校验输出源，并固定 `FileHandle` 身份；历史句柄只读取子会话私有日志，不把任意 URI 当作文件授权。宿主输出格式变化导致无法取得完整输出，或记录、解码不完整时，须明确报告，不能静默返回截取内容并宣称完整。
