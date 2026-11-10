@@ -38,7 +38,7 @@ export function inheritedShellSettings(
   for (const key of ['shellPath', 'shellCommandPrefix'] as const) {
     if (settings[key] !== undefined) {
       if (typeof settings[key] !== 'string') {
-        // oxlint-disable-next-line unicorn/prefer-type-error -- Preserve the existing public Error type during this lint-only change.
+        // oxlint-disable-next-line unicorn/prefer-type-error -- Preserve the existing public Error type.
         throw new Error('Invalid inherited native shell setting: ' + key)
       }
       native[key] = settings[key]

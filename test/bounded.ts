@@ -18,7 +18,7 @@ export async function bounded<T>(
   }
 }
 
-/** Polls one transition at a time; the deadline keeps a stuck fixture inside the test bound. */
+/** Polls the predicate until truthy; the deadline keeps a stuck fixture inside the test bound. */
 export async function until<T>(
   check: () => T | Promise<T>,
   label = 'Condition',
@@ -26,7 +26,7 @@ export async function until<T>(
 ): Promise<NonNullable<T>> {
   const end = Date.now() + timeoutMs
   for (;;) {
-    // oxlint-disable-next-line no-await-in-loop -- Observe each transition before polling again.
+    // oxlint-disable-next-line no-await-in-loop -- Re-check only after the previous predicate resolves.
     const result = await check()
     if (result) {
       return result as NonNullable<T>
