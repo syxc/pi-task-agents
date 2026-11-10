@@ -30,6 +30,23 @@ const aborted = () =>
 
 const noop = () => {}
 
+/** Preserve only validated native shell settings across the parent runtime boundary. */
+export function inheritedShellSettings(
+  settings: ReturnType<ExtensionAPI['getSettings']>
+): ParentRuntimeSnapshot['settings'] {
+  const native: ParentRuntimeSnapshot['settings'] = {}
+  for (const key of ['shellPath', 'shellCommandPrefix'] as const) {
+    if (settings[key] !== undefined) {
+      if (typeof settings[key] !== 'string') {
+        // oxlint-disable-next-line unicorn/prefer-type-error -- Preserve the existing public Error type.
+        throw new Error('Invalid inherited native shell setting: ' + key)
+      }
+      native[key] = settings[key]
+    }
+  }
+  return native
+}
+
 /** Capture approved runtime data only; factories and MCP config must never enter task persistence. */
 export async function captureParentRuntime(
   pi: ParentRuntimeAPI,
@@ -79,23 +96,12 @@ export async function captureParentRuntime(
       !excluded.has(entry.resolvedPath) &&
       !excluded.has(entry.sourceInfo.path)
   )
-  const settings = api.getSettings()
-  const native: ParentRuntimeSnapshot['settings'] = {}
-  for (const key of ['shellPath', 'shellCommandPrefix'] as const) {
-    if (settings[key] !== undefined) {
-      if (typeof settings[key] !== 'string') {
-        // oxlint-disable-next-line unicorn/prefer-type-error -- Preserve the existing public Error type during this lint-only change.
-        throw new Error('Invalid inherited native shell setting: ' + key)
-      }
-      native[key] = settings[key]
-    }
-  }
   return {
     resources: {
       getExtensions: () => ({ extensions }),
       getSkills: () => ({ skills: snapshot.skills })
     },
     mcp: snapshot.mcp,
-    settings: native
+    settings: inheritedShellSettings(api.getSettings())
   }
 }

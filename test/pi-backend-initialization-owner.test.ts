@@ -6,24 +6,8 @@ import test from 'node:test'
 import { TaskController } from '../src/controller.ts'
 import { getOwner } from '../src/controller-owners.ts'
 import { TaskEngine } from '../src/engine.ts'
+import { bounded } from './bounded.ts'
 import { answer, deferred, fixture, profile } from './pi-backend-test-helpers.ts'
-
-async function bounded<T>(promise: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error('native owner operation exceeded test bound')),
-          2500
-        )
-      })
-    ])
-  } finally {
-    clearTimeout(timer)
-  }
-}
 
 test('native startup cancellation retains the controller owner and real leases until shutdown is confirmed', async (t) => {
   const f = await fixture(t),

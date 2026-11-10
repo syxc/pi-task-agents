@@ -30,6 +30,7 @@ import { isRecord } from './guards.ts'
 import { freeze } from './engine-helpers.ts'
 import {
   childToolPolicy,
+  mcpResources,
   normalizedSelectorName,
   normalizeSelector,
   taskChildBlockedTools,
@@ -660,12 +661,7 @@ export function createPiChildFactory({
         excludeTools.push('codemode')
       }
       if (!mcpEnabled) {
-        excludeTools.push(
-          'mcp__*',
-          'list_mcp_resources',
-          'list_mcp_resource_templates',
-          'read_mcp_resource'
-        )
+        excludeTools.push('mcp__*', ...mcpResources)
       }
       const { session } = await api.createAgentSession({
         cwd: workDir,

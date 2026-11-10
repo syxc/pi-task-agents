@@ -1,12 +1,18 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import type { TestOptions } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { PiRpc } from './rpc.ts'
 import { isRecord, type JsonRecord } from './support.ts'
 
 /** Real-model e2e coverage is opt-in; the offline suite must never spend tokens. */
 export const E2E_ENABLED = process.env.PI_E2E === '1'
+
+export const e2eOptions = (timeout: number): TestOptions => ({
+  skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e',
+  timeout
+})
 
 export const E2E_PROVIDER = 'openai-codex'
 export const E2E_TERRA = 'gpt-6.1-terra'

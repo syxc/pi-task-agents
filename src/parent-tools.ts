@@ -8,9 +8,9 @@ import {
   type Skill,
   type ToolDefinition
 } from '@earendil-works/pi-coding-agent'
-import type { ParentRuntimeSnapshot } from './parent-runtime.ts'
+import { inheritedShellSettings, type ParentRuntimeSnapshot } from './parent-runtime.ts'
 import { isRecord } from './guards.ts'
-import { taskChildBlockedTools } from './resource-selection.ts'
+import { mcpResources, taskChildBlockedTools } from './resource-selection.ts'
 import { taskExecutionBinding, type ParentToolBinding } from './task-execution-context.ts'
 
 export type ParentTool = ToolDefinition & {
@@ -33,11 +33,6 @@ type Dispatch = (ctx: ExtensionToolContext) => ReturnType<ToolDefinition['execut
 const abortError = () =>
   Object.assign(new Error('Parent tool admission canceled'), { name: 'AbortError' })
 const nativeLeaves = new Set(['read', 'write', 'edit', 'bash', 'powershell', 'grep', 'find', 'ls'])
-const mcpLeaves = new Set([
-  'list_mcp_resources',
-  'list_mcp_resource_templates',
-  'read_mcp_resource'
-])
 
 /** The trusted host's provenance, not a tool's name or reachability hints, identifies audited code. */
 function verifiedLeaf(tool: ReturnType<ExtensionAPI['getAllTools']>[number]): boolean {
@@ -51,7 +46,7 @@ function verifiedLeaf(tool: ReturnType<ExtensionAPI['getAllTools']>[number]): bo
   }
   return (
     tool.sourceInfo.path === 'builtin:mcp' &&
-    (mcpLeaves.has(tool.name) ||
+    (mcpResources.includes(tool.name) ||
       (tool.name.startsWith('mcp__') && tool.namespace?.name.startsWith('mcp__') === true))
   )
 }
@@ -330,17 +325,6 @@ export function createParentTools(pi: ExtensionAPI) {
             )
         }
       })
-      const settings = pi.getSettings()
-      const native: ParentRuntimeSnapshot['settings'] = {}
-      for (const key of ['shellPath', 'shellCommandPrefix'] as const) {
-        if (settings[key] !== undefined) {
-          if (typeof settings[key] !== 'string') {
-            // oxlint-disable-next-line unicorn/prefer-type-error -- Preserve the existing public Error type during this lint-only change.
-            throw new Error('Invalid inherited native shell setting: ' + key)
-          }
-          native[key] = settings[key]
-        }
-      }
       return {
         tools,
         resources: {
@@ -348,7 +332,7 @@ export function createParentTools(pi: ExtensionAPI) {
           getSkills: () => ({ skills: structuredClone(skills) })
         },
         mcp: null,
-        settings: native
+        settings: inheritedShellSettings(pi.getSettings())
       }
     }
   }

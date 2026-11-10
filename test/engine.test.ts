@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { TaskEngine } from '../src/engine.ts'
 import { isAccepting, stopOf } from '../src/runtime-phase.ts'
@@ -17,7 +16,7 @@ import {
 import { isTerminalTaskStatus } from '../src/vendor/mcode-background-task/status.ts'
 import { normalizeTaskError } from '../src/vendor/mcode-background-task/errors.ts'
 import { thinkingLevels } from '../src/thinking.ts'
-import { bounded } from './bounded.ts'
+import { bounded, until } from './bounded.ts'
 import type {
   BackgroundTask,
   BackgroundTaskPatch
@@ -184,17 +183,8 @@ async function setup(
   return { engine, children, rootDir, createChild }
 }
 
-async function waitFor(fn: () => unknown | Promise<unknown>): Promise<void> {
-  /* oxlint-disable no-await-in-loop -- Poll one state transition at a time; the delay bounds retries. */
-  for (let i = 0; i < 600; i++) {
-    if (await fn()) {
-      return
-    }
-    await delay(5)
-  }
-  /* oxlint-enable no-await-in-loop */
-  assert.fail('Condition did not become true')
-}
+const waitFor = (fn: () => unknown | Promise<unknown>) =>
+  until(fn, 'Condition did not become true', 3000)
 
 async function finish(engine: TaskEngine, child: MockChild, text = 'done'): Promise<void> {
   const task = (await engine.query()).findLast(
@@ -512,23 +502,16 @@ test('foreground stopping-write failure rejects even when abort failure publishe
     }
     await save(state)
   }
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     controller.abort()
     await waitFor(() => task.status === 'canceled' && engine.waiters.size === 0)
     writing.reject(failure)
     await assert.rejects(
-      Promise.race([
-        starting,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('foreground remained pending')), 1500)
-        })
-      ]),
+      bounded(starting, 1500, 'foreground remained pending'),
       (error) => error === failure
     )
     assert.equal(engine.runtimes.get(task.task_id), runtime)
   } finally {
-    clearTimeout(timer)
     writing.resolve()
     engine.store.save = save
     children[0].abort = abort
@@ -4420,19 +4403,7 @@ for (const stage of [
         await save(state)
       }
     }
-    const boundedClose = async () => {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      try {
-        await Promise.race([
-          engine.close(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('close stayed pending')), 2300)
-          })
-        ])
-      } finally {
-        clearTimeout(timer)
-      }
-    }
+    const boundedClose = () => bounded(engine.close(), 2300, 'close stayed pending')
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         // oxlint-disable-next-line no-await-in-loop -- Both reports must join the same unfinished close write.

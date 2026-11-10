@@ -1,6 +1,11 @@
 import type { AgentSession, ResourceLoader } from '@earendil-works/pi-coding-agent'
 import type { AgentProfile } from './types.ts'
-import { isSelectorMcp, normalizedSelectorName, roleAllowsTool } from './resource-selection.ts'
+import {
+  isSelectorMcp,
+  mcpResources,
+  normalizedSelectorName,
+  roleAllowsTool
+} from './resource-selection.ts'
 
 /** Remove forbidden configured definitions, not their extension or permission hooks. */
 export function filterConfiguredToolDefinitions(
@@ -42,14 +47,7 @@ export function sdkToolSelection(
       [...requested.map(normalizedSelectorName), ...pluginTools, ...discovery]
         .filter((name) => /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name) && allow(name))
         .concat(
-          mcp
-            ? [
-                'mcp__*',
-                'list_mcp_resources',
-                'list_mcp_resource_templates',
-                'read_mcp_resource'
-              ].filter((name) => name === 'mcp__*' || allow(name))
-            : []
+          mcp ? ['mcp__*', ...mcpResources].filter((name) => name === 'mcp__*' || allow(name)) : []
         )
     )
   ]

@@ -58,19 +58,19 @@ export async function prepareSession(
     await handle.chmod(0o600)
     const text = await handle.readFile('utf8')
     if (text.trim()) {
-      const entries: unknown[] = []
+      let header: unknown
       for (const line of text.split('\n')) {
         if (!line.trim()) {
           continue
         }
         try {
-          entries.push(JSON.parse(line))
+          header = JSON.parse(line)
+          break
         } catch {
           // Pi skips torn or malformed JSONL records and repairs a missing final
           // newline on open; mirror that so a crashed append stays resumable.
         }
       }
-      const header = entries[0]
       if (
         !header ||
         typeof header !== 'object' ||

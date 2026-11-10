@@ -3,9 +3,9 @@ import test, { after } from 'node:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  E2E_ENABLED,
   E2E_LUNA,
   createEnvironment,
+  e2eOptions,
   finishScenario,
   isRecord,
   readChildMetrics,
@@ -171,7 +171,7 @@ for (const round of [0, 1]) {
   for (const scenario of skillCases(round)) {
     test(
       `Skills context A/B ${scenario.name} round ${round + 1} with luna high`,
-      { skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e', timeout: 480_000 },
+      e2eOptions(480_000),
       async () => {
         // Reverse order in the second round so one arm does not always run against warmer caches.
         const firstMode = round === 0 ? 'inherited' : 'selected'

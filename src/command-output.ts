@@ -15,7 +15,7 @@ import { basename, dirname, join } from 'node:path'
 import { readCommandFd, type CommandLogs } from './command-journal.ts'
 import { hasCode, isRecord } from './guards.ts'
 
-const textOf = (value: unknown): string => {
+export const textOf = (value: unknown): string => {
   if (!isRecord(value) || !Array.isArray(value.content)) {
     return ''
   }

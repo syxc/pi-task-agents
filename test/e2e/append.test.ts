@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  E2E_ENABLED,
   E2E_LUNA,
   createEnvironment,
+  e2eOptions,
   finishScenario,
   notificationTaskIds,
   readChildMetrics,
@@ -13,7 +13,7 @@ import {
 
 test(
   'task_append activates an idle child and notifies on completion',
-  { skip: E2E_ENABLED ? false : 'set PI_E2E=1 to run real-model e2e', timeout: 240_000 },
+  e2eOptions(240_000),
   async () => {
     const startedAt = Date.now()
     const environment = await createEnvironment({ parentModel: E2E_LUNA })

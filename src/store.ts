@@ -4,7 +4,7 @@ import {
   readFile,
   readdir,
   rename,
-  unlink,
+  rm,
   chmod,
   type FileHandle
 } from 'node:fs/promises'
@@ -215,11 +215,7 @@ export class TaskStore {
           throw new Error('Parent already has an active task owner')
         }
         // oxlint-disable-next-line no-await-in-loop -- Recover stale locks in order before reading task state.
-        await unlink(path).catch((error: unknown) => {
-          if (!hasCode(error, 'ENOENT')) {
-            throw error
-          }
-        })
+        await rm(path, { force: true })
       }
       let loaded: unknown
       try {
@@ -275,11 +271,7 @@ export class TaskStore {
         await rename(temporary, this.file)
       } finally {
         await handle?.close()
-        await unlink(temporary).catch((error: unknown) => {
-          if (!hasCode(error, 'ENOENT')) {
-            throw error
-          }
-        })
+        await rm(temporary, { force: true })
       }
     })
     this.tail = operation.catch(() => {})
@@ -289,11 +281,7 @@ export class TaskStore {
   async close(): Promise<void> {
     await this.tail
     if (this.lockPath) {
-      await unlink(this.lockPath).catch((error: unknown) => {
-        if (!hasCode(error, 'ENOENT')) {
-          throw error
-        }
-      })
+      await rm(this.lockPath, { force: true })
       this.lockPath = undefined
     }
   }

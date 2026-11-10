@@ -97,7 +97,6 @@ export class TaskEngine {
   readonly runtimes: Map<string, TaskRuntime>
   readonly sessions: Map<string, SessionRuntime>
   readonly waiters: Set<() => void>
-  readonly operations: Map<string, Promise<TaskSummary>>
   state?: TaskState
   private readonly domain: TaskDomain
   private readonly admission = new TaskAdmissions()
@@ -135,7 +134,6 @@ export class TaskEngine {
     this.runtimes = new Map()
     this.sessions = new Map()
     this.waiters = new Set()
-    this.operations = this.admission.operations
     this.domain = new TaskDomain(() => this.getState())
   }
 
@@ -218,6 +216,15 @@ export class TaskEngine {
     } catch (error) {
       // A falsy rejection must not bypass the owner's storage-error latch.
       throw error || new Error('Task persistence failed', { cause: error })
+    }
+  }
+
+  private async persistLatch(): Promise<void> {
+    try {
+      await this.persist()
+    } catch (error) {
+      this.latchStorageError(error)
+      throw error
     }
   }
 
@@ -586,12 +593,7 @@ export class TaskEngine {
           task.ownedCommandCleanupPending = true
         }
         // A failed ownership write must never reach the factory.
-        try {
-          await this.persist()
-        } catch (error) {
-          this.latchStorageError(error)
-          throw error
-        }
+        await this.persistLatch()
         this.changed(task)
         aborted(runtime.controller.signal)
         if (!session.child) {
@@ -606,12 +608,7 @@ export class TaskEngine {
                 throw this.storageError
               }
               resolvedProfile(task, profile)
-              try {
-                await this.persist()
-              } catch (error) {
-                this.latchStorageError(error)
-                throw error
-              }
+              await this.persistLatch()
               aborted(runtime.controller.signal)
             },
             onOwnedCommandStarted: async () => {
@@ -622,12 +619,7 @@ export class TaskEngine {
               }
               this.assertDispatch()
               active.ownedCommandCleanupPending = true
-              try {
-                await this.persist()
-              } catch (error) {
-                this.latchStorageError(error)
-                throw error
-              }
+              await this.persistLatch()
             },
             onOutput: () => {
               if (session.active) {
@@ -694,12 +686,7 @@ export class TaskEngine {
         // keeps its lease until the original child has actually been disposed instead.
         delete task.ownedCommandCleanupPending
         initializingChild = false
-        try {
-          await this.persist()
-        } catch (error) {
-          this.latchStorageError(error)
-          throw error
-        }
+        await this.persistLatch()
       }
       if (!stopOf(runtime.phase) && !this.closed) {
         const prompting = child.prompt(task.input.prompt, { turnId: task.sub_turn_id })
@@ -1152,8 +1139,8 @@ export class TaskEngine {
           start++
         }
         const result = await this.domain.readOutput(taskId, { offset: start, limitBytes })
-        const end = result.nextOffset ?? start
-        const truncated = result.truncated ?? false
+        const end = result.nextOffset
+        const truncated = result.truncated
         return {
           ...this.summary(task),
           output: result.content,
