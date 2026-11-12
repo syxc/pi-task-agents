@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TaskController, RESULT_TYPE } from '../src/controller.ts'
+import { TaskController, PROGRESS_TYPE, RESULT_TYPE } from '../src/controller.ts'
+import { TaskEngine } from '../src/engine.ts'
 import { taskWidget } from '../src/task-presentation.ts'
 import { OutputProjector, outputWait } from '../src/tool-result-control.ts'
 import {
@@ -18,7 +19,7 @@ import {
   stripTerminalSequences,
   visibleWidth
 } from '@earendil-works/pi-tui'
-import { bounded } from './bounded.ts'
+import { bounded, until } from './bounded.ts'
 
 function widgetHost(width = 80) {
   const writes = []
@@ -65,7 +66,7 @@ const runtimeAPI = {
   captureResources: async () => ({ extensions: [], skills: [], mcp: null })
 }
 
-function fixture(entries = [], roles = {}) {
+function fixture(entries = [], roles = {}, agentDir = '/agent', options = {}) {
   const sent = []
   const engines = []
   const factories = []
@@ -111,16 +112,67 @@ function fixture(entries = [], roles = {}) {
     sessionManager: { getSessionId: () => 'parent-a', getEntries: () => entries }
   }
   const controller = new TaskController(pi, {
-    agentDir: '/agent',
+    agentDir,
     Engine,
     configLoader: async () => ({ maxConcurrency: 4, roles, diagnostics: [] }),
     childFactory: (options) => {
       factories.push(options)
       return () => {}
-    }
+    },
+    ...options
   })
   return { controller, ctx, engines, sent, entries, pi, factories, Engine }
 }
+test('headless warnings and task failures are logged once per failure state without task content', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'task-controller-diagnostics-'))
+  const f = fixture([], {}, root)
+  try {
+    await f.controller.ensure(f.ctx)
+    f.controller.warn(new Error('password="top secret" configuration warning'))
+    f.controller.reportError(new Error('tool rejected'), 'task_failed_to_admit')
+    const task = {
+      parent_id: 'parent-a',
+      task_id: 'failed-task',
+      session_id: 'child-a',
+      agent_name: 'worker',
+      status: 'failed',
+      error: 'initial Skill unavailable',
+      input: { prompt: 'private prompt' },
+      output: 'private output'
+    }
+    f.engines[0].options.onChange(task)
+    f.engines[0].options.onChange(task)
+    f.engines[0].options.onChange({
+      ...task,
+      stopError: { code: 'CHILD_CLEANUP_FAILED', message: 'cleanup failed' }
+    })
+    const directory = join(root, 'task-agents', 'logs')
+    const records = (
+      await Promise.all(
+        (await readdir(directory))
+          .filter((name) => name.endsWith('.jsonl'))
+          .map((name) => readFile(join(directory, name), 'utf8'))
+      )
+    )
+      .join('')
+      .trim()
+      .split('\n')
+      .map(JSON.parse)
+    assert.deepEqual(
+      records.map((record) => record.event),
+      ['controller_warning', 'task_failed_to_admit', 'task_failed', 'task_cleanup_failed']
+    )
+    assert.equal(records[0].level, 'warning')
+    assert.equal(records[2].task_id, task.task_id)
+    assert.equal(records[2].parent_id, task.parent_id)
+    assert.equal(records[3].error.code, 'CHILD_CLEANUP_FAILED')
+    assert.doesNotMatch(JSON.stringify(records), /top secret|private prompt|private output/)
+  } finally {
+    await f.controller.shutdown()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('codemode authority follows the attached native parent and is not captured from a stale owner', async () => {
   const f = fixture()
   let active = []
@@ -2025,6 +2077,290 @@ test('delivery turns are capped per minute and deferred terminals merge into the
     await f.controller.shutdown()
   }
 })
+
+async function realProgressFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'controller-real-progress-'))
+  const result = deferred()
+  const children = []
+  const f = fixture([], {}, root, {
+    Engine: TaskEngine,
+    childFactory:
+      () =>
+      async ({ sessionPath }) => {
+        await writeFile(sessionPath, '')
+        const child = {
+          sessionPath,
+          prompt: () => result.promise,
+          async steer() {},
+          async abort() {
+            result.resolve({ text: '', outcome: { kind: 'returned', status: 'aborted' } })
+          },
+          async dispose() {}
+        }
+        children.push(child)
+        return child
+      }
+  })
+  Object.assign(f.ctx, {
+    cwd: root,
+    mode: 'rpc',
+    hasUI: true,
+    ui: { setStatus() {}, setWidget() {}, notify() {} }
+  })
+  const engine = await f.controller.ensure(f.ctx)
+  t.after(async () => {
+    result.resolve({ text: 'cleanup', outcome: { kind: 'returned', status: 'succeeded' } })
+    await bounded(f.controller.shutdown(), 10000, 'real progress owner shutdown')
+    await rm(root, { recursive: true, force: true })
+  })
+  const task = await engine.start(
+    { description: 'real progress', prompt: 'local mock', run_in_background: true },
+    { name: 'worker', instructions: '', tools: [], skills: [], timeoutMs: 0 }
+  )
+  await until(
+    () => children.length === 1 && engine.runtimes.get(task.task_id)?.phase.kind === 'running'
+  )
+  // The running phase can precede prompt dispatch by a durable lease write.
+  await engine.runtimes.get(task.task_id).started
+  return { ...f, root, engine, task, result, child: children[0] }
+}
+
+test('terminal persistence failure wakes waiters and logs EIO without publishing GUI success', async (t) => {
+  const f = await realProgressFixture(t)
+  const runtime = f.engine.runtimes.get(f.task.task_id)
+  const original = f.engine.store.save.bind(f.engine.store)
+  const fault = Object.assign(new Error('terminal save failed'), { code: 'EIO' })
+  f.engine.store.save = async (state) => {
+    if (state.tasks.some((task) => task.status === 'succeeded')) {
+      throw fault
+    }
+    return original(state)
+  }
+  try {
+    const waking = f.engine.waitUntil(
+      () => f.engine.task(f.task.task_id).status === 'succeeded',
+      1000
+    )
+    f.result.resolve({
+      text: 'execution succeeded',
+      outcome: { kind: 'returned', status: 'succeeded' }
+    })
+    await bounded(runtime.done)
+    assert.equal(await waking, true, 'internal waiters still observe execution settlement')
+    assert.equal(f.engine.task(f.task.task_id).status, 'succeeded')
+    assert.equal(JSON.parse(await readFile(f.engine.store.file, 'utf8')).tasks[0].status, 'running')
+    await assert.rejects(f.engine.query(), (error) => error === fault)
+    const progress = f.sent.filter(([message]) => message.customType === PROGRESS_TYPE)
+    assert.ok(progress.some(([message]) => message.details.status === 'running'))
+    assert.equal(
+      progress.some(([message]) => message.details.status === 'succeeded'),
+      false
+    )
+    assert.equal(
+      f.sent.some(([message]) => message.customType === RESULT_TYPE),
+      false
+    )
+    const directory = join(f.root, 'task-agents', 'logs')
+    const records = (
+      await Promise.all(
+        (await readdir(directory))
+          .filter((name) => name.endsWith('.jsonl'))
+          .map((name) => readFile(join(directory, name), 'utf8'))
+      )
+    )
+      .join('')
+      .trim()
+      .split('\n')
+      .map(JSON.parse)
+    const storageFailures = records.filter((record) => record.event === 'task_persistence_failed')
+    assert.equal(storageFailures.length, 1)
+    assert.equal(storageFailures[0].task_id, f.task.task_id)
+    assert.equal(storageFailures[0].error.code, 'EIO')
+  } finally {
+    f.engine.store.save = original
+  }
+})
+
+test('GUI clears cleanup_pending when a failed ordinary abort finally releases its runtime', async (t) => {
+  const f = await realProgressFixture(t)
+  const runtime = f.engine.runtimes.get(f.task.task_id)
+  const failure = 'native abort failed: ' + '🚧\u200B'.repeat(70_000)
+  f.child.abort = async () => {
+    throw new Error(failure)
+  }
+  const stopped = await f.engine.stop(f.task.task_id)
+  assert.equal(stopped.status, 'canceled')
+  assert.equal(stopped.stopError.code, 'TASK_STOP_FAILED')
+  assert.equal(stopped.cleanup_pending, true)
+  const progress = () =>
+    f.sent
+      .filter(([message]) => message.customType === PROGRESS_TYPE)
+      .map(([message]) => message.details)
+  assert.equal(progress().at(-1).cleanup_pending, true)
+  assert.ok(
+    f.sent
+      .filter(([message]) => message.customType === PROGRESS_TYPE)
+      .every(([message]) => message.content.length < 1100)
+  )
+  assert.equal(stopped.stopError.message, failure)
+  f.result.resolve({ text: 'settled later', outcome: { kind: 'returned', status: 'succeeded' } })
+  await bounded(runtime.done)
+  assert.equal(f.engine.runtimes.has(f.task.task_id), false)
+  const settled = await f.engine.query({ task_id: f.task.task_id })
+  assert.equal(settled.cleanup_pending, undefined)
+  assert.equal(settled.stopError.message, failure)
+  assert.equal(progress().at(-1).status, 'canceled')
+  assert.equal(progress().at(-1).cleanup_pending, false)
+  assert.equal(JSON.parse(await readFile(f.engine.store.file, 'utf8')).tasks[0].status, 'canceled')
+})
+
+for (const background of [false, true]) {
+  test(
+    `overlapping initialization terminal saves retain the latest write (${background ? 'background' : 'foreground'})`,
+    { timeout: 15000 },
+    async (t) => {
+      const root = await mkdtemp(join(tmpdir(), 'controller-initialization-overlap-'))
+      const factory = deferred(),
+        entered = deferred(),
+        firstEntered = deferred(),
+        firstAck = deferred(),
+        secondEntered = deferred(),
+        secondAck = deferred()
+      const changes = []
+      let prompts = 0,
+        terminalWrites = 0
+      class ObservedEngine extends TaskEngine {
+        constructor(options) {
+          super({
+            ...options,
+            onChange: (task, change) => {
+              changes.push({ task, change })
+              return options.onChange?.(task, change)
+            }
+          })
+        }
+      }
+      const f = fixture([], {}, root, {
+        Engine: ObservedEngine,
+        childFactory:
+          () =>
+          async ({ sessionPath }) => {
+            entered.resolve()
+            await factory.promise
+            await writeFile(sessionPath, '')
+            return {
+              sessionPath,
+              async prompt() {
+                prompts++
+                return {
+                  text: 'unexpected prompt',
+                  outcome: { kind: 'returned', status: 'succeeded' }
+                }
+              },
+              async steer() {},
+              async abort() {
+                throw new Error('late native abort failed')
+              },
+              async dispose() {}
+            }
+          }
+      })
+      Object.assign(f.ctx, {
+        cwd: root,
+        mode: 'rpc',
+        hasUI: true,
+        ui: { setStatus() {}, setWidget() {}, notify() {} }
+      })
+      const engine = await f.controller.ensure(f.ctx)
+      const signal = new AbortController()
+      const starting = engine.start(
+        {
+          description: 'overlapping initialization saves',
+          prompt: 'local mock',
+          run_in_background: background
+        },
+        { name: 'worker', instructions: '', tools: [], skills: [], timeoutMs: 0 },
+        { signal: signal.signal }
+      )
+      let receipt = starting.then(
+        (task) => ({ task }),
+        (error) => ({ error })
+      )
+      const original = engine.store.save.bind(engine.store)
+      t.after(async () => {
+        factory.resolve()
+        firstAck.resolve()
+        secondAck.resolve()
+        engine.store.save = original
+        await bounded(
+          Promise.all([...engine.runtimes.values()].map((runtime) => runtime.done)),
+          4000,
+          'overlapping initialization drain'
+        )
+        await bounded(f.controller.shutdown(), 10000, 'overlapping initialization shutdown')
+        await rm(root, { recursive: true, force: true })
+      })
+      await bounded(entered.promise, 3000, 'initialization factory entry')
+      const runtime = [...engine.runtimes.values()][0]
+      const fault = Object.assign(new Error('late terminal snapshot failed'), { code: 'EIO' })
+      engine.store.save = async (state) => {
+        const snapshot = structuredClone(state)
+        if (snapshot.tasks[0]?.status === 'canceled') {
+          terminalWrites++
+          if (terminalWrites === 1) {
+            await original(snapshot)
+            firstEntered.resolve()
+            await firstAck.promise
+            return
+          }
+          if (terminalWrites === 2) {
+            secondEntered.resolve()
+            await secondAck.promise
+          }
+          throw fault
+        }
+        return original(snapshot)
+      }
+      if (background) {
+        await starting
+        receipt = engine.stop(engine.state.tasks[0].task_id).then(
+          (task) => ({ task }),
+          (error) => ({ error })
+        )
+      } else {
+        signal.abort()
+      }
+      await bounded(firstEntered.promise, 3000, 'first terminal save')
+      factory.resolve()
+      await bounded(secondEntered.promise, 3000, 'late abort terminal save')
+      firstAck.resolve()
+      const response = await bounded(receipt, 3000, 'initialization stop report')
+      const disk = JSON.parse(await readFile(engine.store.file, 'utf8')).tasks[0]
+      assert.notEqual(disk.stopError.message, 'late native abort failed')
+      if (background) {
+        const progress = f.sent.filter(([message]) => message.customType === PROGRESS_TYPE)
+        assert.equal(
+          progress.some(([message]) => message.content.includes('late native abort failed')),
+          false
+        )
+      }
+      assert.equal(response.task, undefined, 'a newer terminal snapshot is still unconfirmed')
+      assert.match(response.error.message, /persistence is unconfirmed/)
+      assert.equal(changes.at(-1).change.terminalPersisted, false)
+      assert.equal(prompts, 0)
+      assert.equal(engine.runtimes.size, 1, 'unconfirmed cleanup still retains its runtime')
+      secondAck.resolve()
+      await bounded(runtime.done, 3000, 'failed late terminal save')
+      await assert.rejects(engine.query(), (error) => error === fault)
+      assert.equal(
+        changes.at(-1).change.terminalPersisted,
+        false,
+        'failed writes keep the gate closed'
+      )
+      assert.equal(engine.runtimes.size, 1)
+    }
+  )
+}
 
 test('real TaskEngine lifecycle releases the store and reopens persisted tasks after shutdown', async (t) => {
   const { mkdtemp, rm } = await import('node:fs/promises')

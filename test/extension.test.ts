@@ -196,6 +196,193 @@ function fixture() {
   }
 }
 
+test('expired task calls log a fixed diagnostic without admitting input', async () => {
+  const f = fixture()
+  try {
+    const reported = []
+    f.controller.reportError = (error, event) => reported.push({ error, event })
+    const params = { agent_name: 'worker', description: 'expired probe', prompt: 'PRIVATE_INPUT' }
+    f.handlers.get('tool_call')(
+      { toolName: 'task', toolCallId: 'expired-call', input: params },
+      f.ctx
+    )
+    const replaced = { ...f.ctx, sessionManager: { ...f.ctx.sessionManager } }
+    const result = await f.tools
+      .get('task')
+      .execute('expired-call', params, undefined, undefined, replaced)
+    assert.equal(result.isError, true)
+    assert.equal(result.details.code, 'TASK_CALL_EXPIRED')
+    assert.equal(f.engines.length, 0)
+    assert.equal(reported.length, 1)
+    assert.equal(reported[0].event, 'task_failed')
+    assert.equal(reported[0].error.code, 'TASK_CALL_EXPIRED')
+    assert.doesNotMatch(JSON.stringify(reported), /PRIVATE_INPUT|expired probe/)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('large errors stay complete in final results but bounded in progress updates', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    f.controller.reportError = () => {}
+    const error = '🧪\u0301'.repeat(100000)
+    const task = {
+      task_id: 'bounded-task',
+      session_id: 'bounded-session',
+      parent_id: 'parent-tools',
+      agent_name: 'worker',
+      description: 'Inspect bounded progress',
+      status: 'failed',
+      error
+    }
+    f.engines[0].start = async (_input, _profile, options) => {
+      options.onProgress(task)
+      return task
+    }
+    const updates = []
+    const result = await f.tools.get('task').execute(
+      'bounded-call',
+      {
+        agent_name: 'worker',
+        description: 'Inspect bounded progress',
+        prompt: ''
+      },
+      undefined,
+      (update) => updates.push(update),
+      f.ctx
+    )
+    assert.equal(updates.length, 1)
+    const text = updates[0].content[0].text
+    assert.ok(text.length <= 1000)
+    assert.ok(text.isWellFormed())
+    assert.match(text, /^failed · worker · bounded-/)
+    assert.ok(text.endsWith('…'))
+    assert.ok(Buffer.byteLength(JSON.stringify(updates[0])) < 8192)
+    assert.equal(result.isError, true)
+    assert.equal(result.details.error_message, error)
+    assert.ok(result.text.includes(error))
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('converted send and append errors still emit exactly one operation diagnostic', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    const reported = []
+    f.controller.reportError = (error, event) => reported.push({ error, event })
+    f.engines[0].send = async () => {
+      throw Object.assign(new Error('disk unavailable'), { code: 'EIO' })
+    }
+    const sent = await f.execute('task_send', { task_id: 't1', content: 'continue' }, undefined)
+    assert.equal(sent.isError, true)
+    assert.deepEqual(reported, [
+      {
+        event: 'task_send_failed',
+        error: { code: 'EIO', message: 'disk unavailable' }
+      }
+    ])
+    f.engines[0].append = async () => {
+      throw Object.assign(new Error('persistence unavailable'), {
+        code: 'TASK_APPEND_REJECTED',
+        status: 409
+      })
+    }
+    const appended = await f.execute(
+      'task_append',
+      { task_id: 't1', content: 'continue' },
+      undefined
+    )
+    assert.equal(appended.isError, true)
+    assert.equal(reported.length, 2)
+    assert.deepEqual(reported[1], {
+      event: 'task_append_failed',
+      error: { code: 'TASK_APPEND_REJECTED', message: 'persistence unavailable' }
+    })
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('GUI progress messages are excluded from model context and completion notices are retained', async () => {
+  const f = fixture()
+  try {
+    const user = { role: 'user', content: 'Inspect' }
+    const result = { role: 'custom', customType: 'pi-task-agents:result', content: 'Read result' }
+    const progress = { role: 'custom', customType: 'pi-task-agents:progress', content: 'Running' }
+    const messages = [user, progress, result]
+    assert.deepEqual(f.handlers.get('context')({ messages }).messages, [user, result])
+    assert.equal(messages.length, 3)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
+test('task and task_send expose bounded plain progress through the native tool callback', async () => {
+  const f = fixture()
+  try {
+    await f.controller.ensure(f.ctx)
+    const engine = f.engines[0]
+    const task = {
+      task_id: 'live-task',
+      session_id: 'live-session',
+      parent_id: 'parent-tools',
+      agent_name: 'worker',
+      description: 'Inspect progress',
+      status: 'running',
+      activity: '\x1B[31mread: running\x1B[0m',
+      output: 'private output',
+      input: { prompt: 'private prompt' }
+    }
+    const run = async (options) => {
+      options.onProgress(task)
+      options.onProgress(task)
+      return { ...task, status: 'succeeded', final_text: 'done' }
+    }
+    engine.start = async (_input, _profile, options) => run(options)
+    engine.send = async (_id, _content, options) => run(options)
+    const initial = []
+    await f.tools.get('task').execute(
+      'progress-call',
+      {
+        agent_name: 'worker',
+        description: 'Inspect progress',
+        prompt: ''
+      },
+      undefined,
+      (value) => initial.push(value),
+      f.ctx
+    )
+    assert.equal(initial.length, 1)
+    assert.match(initial[0].content[0].text, /worker.*live-tas.*read: running/)
+    assert.doesNotMatch(JSON.stringify(initial), /private output|private prompt|\\u001b/i)
+    assert.deepEqual(initial[0].details, {
+      task_id: 'live-task',
+      session_id: 'live-session',
+      agent_name: 'worker',
+      status: 'running'
+    })
+    const continued = []
+    await f.tools.get('task_send').execute(
+      'send-progress',
+      {
+        task_id: 'live-session',
+        content: 'continue'
+      },
+      undefined,
+      (value) => continued.push(value),
+      f.ctx
+    )
+    assert.equal(continued.length, 1)
+    assert.match(continued[0].content[0].text, /read: running/)
+  } finally {
+    await f.controller.shutdown()
+  }
+})
+
 test('task declaration and parent guidance describe foreground default and allow empty prompt', async () => {
   const f = fixture()
   try {

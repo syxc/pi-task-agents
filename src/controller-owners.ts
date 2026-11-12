@@ -1,4 +1,4 @@
-import type { CreateChild, TaskAgentsConfig, TaskService } from './types.ts'
+import type { CreateChild, TaskAgentsConfig, TaskService, TaskSummary } from './types.ts'
 import type { ParentRuntimeSnapshot } from './parent-runtime.ts'
 
 export interface ControllerOwner {
@@ -11,7 +11,7 @@ export interface ControllerOwner {
   readonly createChild: CreateChild
   attached?: object
   notify?: () => void
-  onChange?: () => void
+  onChange?: (task: TaskSummary) => void
   codemodeEnabled?: boolean
   readCodemodeEnabled?: () => boolean
   hostRuntime?: ParentRuntimeSnapshot

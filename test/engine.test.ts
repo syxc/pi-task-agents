@@ -196,6 +196,153 @@ async function finish(engine: TaskEngine, child: MockChild, text = 'done'): Prom
   await engine.runtimes.get(task.task_id)?.done
 }
 
+test('foreground progress follows only its task and stops after return, including send', async (t) => {
+  const { engine, children } = await setup(t)
+  const updates: TaskSummary[] = []
+  const running = engine.start({ ...input(), run_in_background: false }, profile, {
+    onProgress: (task) => updates.push(task)
+  })
+  await waitFor(() => children[0]?.calls.length === 1)
+  children[0].onActivity?.('read: running')
+  assert.ok(updates.some((task) => task.status === 'running' && task.activity === 'read: running'))
+  await finish(engine, children[0], 'private child report')
+  const first = await running
+  assert.ok(updates.every((task) => task.task_id === first.task_id && !('output' in task)))
+  const count = updates.length
+  engine.changed(engine.task(first.task_id))
+  assert.equal(updates.length, count)
+
+  const continued: TaskSummary[] = []
+  const sending = engine.send(first.session_id, 'continue', {
+    onProgress: (task) => continued.push(task)
+  })
+  await waitFor(() => children[0]?.calls.length === 2)
+  children[0].onActivity?.('bash: running')
+  assert.ok(continued.some((task) => task.activity === 'bash: running'))
+  await finish(engine, children[0])
+  const second = await sending
+  assert.notEqual(second.task_id, first.task_id)
+  assert.ok(continued.every((task) => task.task_id === second.task_id))
+  assert.equal(updates.length, count)
+})
+
+test('progress observer failures cannot fail a task and cancellation releases observers', async (t) => {
+  const { engine, children } = await setup(t)
+  const signal = new AbortController()
+  let updates = 0
+  const running = engine.start({ ...input(), run_in_background: false }, profile, {
+    signal: signal.signal,
+    onProgress: () => {
+      updates++
+      throw new Error('GUI disconnected')
+    }
+  })
+  await waitFor(() => children[0]?.calls.length === 1)
+  assert.ok(updates > 0)
+  signal.abort()
+  const stopped = await running
+  assert.equal(stopped.status, 'canceled')
+  const count = updates
+  engine.changed(engine.task(stopped.task_id))
+  assert.equal(updates, count)
+})
+
+test('async progress rejections cannot terminate an engine embedding process', async (t) => {
+  const rootDir = await mkdtemp(fileURLToPath(new URL('../.engine-test-', import.meta.url)))
+  t.after(() => rm(rootDir, { recursive: true, force: true }))
+  const script = `
+    import { writeFile } from 'node:fs/promises'
+    import { TaskEngine } from ${JSON.stringify(new URL('../src/engine.ts', import.meta.url).href)}
+    const timer = setTimeout(() => process.exit(2), 4000)
+    const engine = new TaskEngine({
+      rootDir: ${JSON.stringify(rootDir)}, parentId: 'async-progress', cwd: ${JSON.stringify(rootDir)},
+      createChild: async ({ sessionPath }) => {
+        await writeFile(sessionPath, '')
+        return {
+          sessionPath,
+          prompt: async () => ({ text: 'done', outcome: { kind: 'returned', status: 'succeeded' } }),
+          async steer() {}, async abort() {}, async dispose() {}
+        }
+      }
+    })
+    await engine.init()
+    const task = await engine.start(${JSON.stringify({ ...input(), run_in_background: false })},
+      ${JSON.stringify(profile)}, {
+        onProgress: async () => { await Promise.resolve(); throw new Error('GUI disconnected asynchronously') }
+      })
+    if (task.status !== 'succeeded') throw new Error('Execution did not succeed')
+    await engine.close()
+    await new Promise(resolve => setImmediate(resolve))
+    clearTimeout(timer)
+    console.log('engine embedding survived')
+  `
+  const child = spawnSync(
+    process.execPath,
+    ['--unhandled-rejections=strict', '--input-type=module', '-e', script],
+    {
+      encoding: 'utf8',
+      timeout: 8000,
+      killSignal: 'SIGKILL'
+    }
+  )
+  assert.equal(child.error, undefined)
+  assert.equal(child.status, 0, child.stderr)
+  assert.match(child.stdout, /engine embedding survived/)
+})
+
+test('duplicate foreground waiters independently release a shared progress callback', async (t) => {
+  const { engine, children } = await setup(t)
+  const signal = new AbortController()
+  const updates: TaskSummary[] = []
+  const onProgress = (task: TaskSummary) => {
+    updates.push(task)
+  }
+  const options = { requestId: 'same-foreground', onProgress }
+  const first = engine.start({ ...input(), run_in_background: false }, profile, {
+    ...options,
+    signal: signal.signal
+  })
+  const fault = Object.assign(new Error('stopping save failed'), { code: 'EIO' })
+  const rejected = assert.rejects(first, (error) => error === fault)
+  const second = engine.start({ ...input(), run_in_background: false }, profile, options)
+  second.catch(() => {})
+  await waitFor(() => children[0]?.calls.length === 1 && updates.length >= 2)
+  const task = engine.state!.tasks[0]
+  const runtime = engine.runtimes.get(task.task_id)!
+  const original = engine.store.save.bind(engine.store)
+  const writing = deferred()
+  engine.store.save = async (state) => {
+    if (state.tasks.some((entry) => entry.status === 'stopping')) {
+      await writing.promise
+    }
+    return original(state)
+  }
+  children[0].abort = async () => {
+    throw new Error('abort failed')
+  }
+  try {
+    signal.abort()
+    await waitFor(() => task.status === 'canceled')
+    await stopOf(runtime.phase)?.aborting
+    writing.reject(fault)
+    await rejected
+    const count = updates.length
+    children[0].onOutput('late activity while the other waiter still owns its observer')
+    assert.equal(updates.length, count + 1)
+    children[0].calls[0].resolve(terminalResult('succeeded', 'late result'))
+    assert.equal((await bounded(second)).status, 'canceled')
+    const settled = updates.length
+    children[0].onOutput('after both waiters returned')
+    assert.equal(updates.length, settled)
+  } finally {
+    writing.resolve()
+    engine.store.save = original
+    children[0].calls[0].resolve(terminalResult('succeeded', 'cleanup'))
+    await bounded(runtime.done!)
+    await second.catch(() => {})
+  }
+})
+
 test('ACK, bounded admission, duplicate starts and frozen effective profiles', async (t) => {
   const { engine, children } = await setup(t, { maxConcurrency: 1 })
   const [a, duplicate] = await Promise.all([

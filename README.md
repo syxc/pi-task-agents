@@ -74,13 +74,35 @@ pi install git:github.com/syxc/pi-task-agents
 - 停止：`/tasks stop <id>`、`/tasks stop-all`。
 - 恢复通知：`/tasks resume`。
 
-TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任务行。图形客户端可选择不显示这些信息，此时通过 `/tasks list` 或 `task_query` 查询。
+TUI 使用 Pi 的主题和终端组件；RPC 模式发送纯文本状态与任务行。前台 `task` 和 `task_send` 还通过原生工具进度回调显示状态、任务身份和当前活动；长诊断文本会截断，完整内容保留在最终结果和持久输出中。后台任务在 GUI 中通过可见时间线消息报告排队、运行、终态和清理状态变化，终态须先确认持久化，同一状态不随活动刷新重复发送，也不主动唤醒模型；这些消息从普通模型请求上下文中过滤。Pi 会在当前工具 Turn 结束后追加运行期间产生的时间线消息，因此前台实时进度依赖客户端支持工具更新。时间线提示采用尽力发送；父会话写入失败时可能缺失，恢复后不保证补播。具体显示样式由客户端决定，可通过 `/tasks list` 或 `task_query` 查询当前状态。
 
 ### 清理与恢复
 
 - 停止或关闭未及时确认时报告 `cleanup_pending` 或错误，并保留并发名额；带未确认标记的 owner 重启后仍可读取历史和输出，但不能继续派工，也没有人工解除入口。隔离按 owner 生效，切换 owner 不会清除旧标记。
 - 初始化在派发提示前超时且清理未确认时，父会话会收到失败通知；迟到的纯清理回执不重复追加失败文本。
 - 插件不能强制终止不配合的 SDK 初始化；机制与恢复语义见[设计不变量](docs/design.md#准入所有权与恢复)。
+
+### 诊断日志
+
+插件自动把警告、任务失败、清理异常和工具操作异常写入 `<agentDir>/task-agents/logs/YYYY-MM-DD.N.jsonl`，默认目录为 `~/.pi/agent/task-agents/logs/`。每条记录包含时间、进程 ID、级别、事件名，以及适用的父会话、子会话、任务和角色标识。错误只选取经过凭据脱敏的 message、code、stack，不主动记录简报、子任务输出、工具参数或认证配置。
+
+日志目录权限为 `0700`，文件为 `0600`。每天最多 4 个 1 MiB 分片，达到容量后停止追加；并发追加可能使分片略超上限。下次写入时清理超过 7 个 UTC 日期的分片。写入失败不会影响派工、停止或授权校验；它不替代 `sessions/` 下的任务状态和输出记录。
+
+初始 Skill 被拒绝时，`initial_skill_rejected` 事件记录请求数量、可用数量和被拒绝的名称及原因，错误 code 为 `INITIAL_SKILL_UNAVAILABLE`：
+
+| 原因 | 当前证据 |
+| --- | --- |
+| `disabled_model_invocation` | Skill 禁止模型自动调用 |
+| `outside_role_scope` | 父会话有该 Skill，但角色范围未包含它 |
+| `project_untrusted` | 同名 Skill 仅来自未信任项目 |
+| `not_available` | 当前加载清单中不可用，无法据此判断此前是否存在 |
+
+安装 `jq` 后，可按事件统计或查看 Skill 拒绝记录：
+
+```sh
+jq -s 'group_by([.level,.event]) | map({level:.[0].level,event:.[0].event,count:length})' ~/.pi/agent/task-agents/logs/*.jsonl
+jq -c 'select(.event == "initial_skill_rejected") | {timestamp,session_id,agent_name,rejected_skills}' ~/.pi/agent/task-agents/logs/*.jsonl
+```
 
 ## 角色与权限
 

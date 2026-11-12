@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdir, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Skill } from '@earendil-works/pi-coding-agent'
+import { createAgentSession, type Skill } from '@earendil-works/pi-coding-agent'
 import type { AgentProfile } from '../src/types.ts'
 import { answer, fixture, tool } from './pi-backend-test-helpers.ts'
 
@@ -212,6 +212,114 @@ test('unauthorized initial Skill names fail before a model turn', async (t) => {
     f.child({ skills: [], initialSkills: ['not-authorized'] }),
     /not authorized or no longer available/
   )
+})
+
+test('initial Skill diagnostics identify current rejection reasons without persisting resource bodies', async (t) => {
+  const project = skill('project-only', '/private/project/SKILL.md')
+  project.sourceInfo.scope = 'project'
+  const fixtureSkills = [
+    skill('enabled', '/private/enabled/SKILL.md'),
+    skill('disabled', '/private/disabled/SKILL.md', true),
+    skill('outside', '/private/outside/SKILL.md'),
+    project
+  ]
+  const f = await fixture(t, {
+    resourceLoader: {
+      getExtensions: () => ({ extensions: [] }),
+      getSkills: () => ({ skills: fixtureSkills })
+    }
+  })
+  await assert.rejects(
+    f.child({
+      skills: ['enabled', 'disabled', 'project-only'],
+      initialSkills: ['disabled', 'outside', 'project-only', 'missing']
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error)
+      assert.equal((error as Error & { code: string }).code, 'INITIAL_SKILL_UNAVAILABLE')
+      assert.match(error.message, /not authorized or no longer available/)
+      for (const [name, reason] of [
+        ['disabled', 'disabled_model_invocation'],
+        ['outside', 'outside_role_scope'],
+        ['project-only', 'project_untrusted'],
+        ['missing', 'not_available']
+      ]) {
+        assert.ok(error.message.includes(`"${name}" (${reason})`))
+      }
+      return true
+    }
+  )
+  const directory = join(f.agentDir, 'task-agents', 'logs')
+  const [name] = await readdir(directory)
+  const text = await readFile(join(directory, name!), 'utf8')
+  const record = JSON.parse(text.trim())
+  assert.equal(record.event, 'initial_skill_rejected')
+  assert.equal(record.level, 'error')
+  assert.equal(record.agent_name, 'worker')
+  assert.equal(record.session_id, 'owned')
+  assert.equal(record.requested_count, 4)
+  assert.equal(record.available_count, 1)
+  assert.equal(record.error.code, 'INITIAL_SKILL_UNAVAILABLE')
+  assert.deepEqual(record.rejected_skills, [
+    { name: 'disabled', reason: 'disabled_model_invocation' },
+    { name: 'outside', reason: 'outside_role_scope' },
+    { name: 'project-only', reason: 'project_untrusted' },
+    { name: 'missing', reason: 'not_available' }
+  ])
+  assert.doesNotMatch(text, /\/private\/|description|filePath|baseDir/)
+  assert.ok(!text.includes(f.root))
+})
+
+test('diagnostics failure preserves initial Skill rejection and its stable code', async (t) => {
+  const f = await fixture(t)
+  await mkdir(join(f.agentDir, 'task-agents'))
+  await writeFile(join(f.agentDir, 'task-agents', 'logs'), 'not a directory')
+  await assert.rejects(f.child({ skills: [], initialSkills: ['missing'] }), {
+    code: 'INITIAL_SKILL_UNAVAILABLE',
+    message:
+      'Requested initial Skill is not authorized or no longer available: "missing" (not_available)'
+  })
+})
+
+test('initial validation preserves loaded Skill admission when the host changes during startup', async (t) => {
+  let current = [skill('revoked', '/private/revoked/SKILL.md')]
+  const f = await fixture(t, {
+    resourceLoader: {
+      getExtensions: () => ({ extensions: [] }),
+      getSkills: () => ({ skills: current })
+    },
+    sdk: {
+      async createAgentSession(options: Parameters<typeof createAgentSession>[0]) {
+        const result = await createAgentSession(options)
+        current = []
+        return result
+      }
+    }
+  })
+  let resolved: AgentProfile | undefined
+  const child = await f.child(
+    { skills: undefined, initialSkills: ['revoked'] },
+    undefined,
+    async (profile) => {
+      resolved = profile
+    }
+  )
+  assert.deepEqual(resolved?.skillSnapshot, ['revoked'])
+  await child.dispose()
+  await assert.rejects(readdir(join(f.agentDir, 'task-agents', 'logs')), { code: 'ENOENT' })
+})
+
+test('successful initial selections and restored snapshots do not create failure logs', async (t) => {
+  const f = await fixture(t, {
+    resourceLoader: {
+      getExtensions: () => ({ extensions: [] }),
+      getSkills: () => ({ skills: [skill('enabled', '/private/enabled/SKILL.md')] })
+    }
+  })
+  const child = await f.child({ skills: undefined, initialSkills: ['enabled'] })
+  await child.dispose()
+  await f.child({ skills: undefined, skillSnapshot: ['enabled'], initialSkills: ['disappeared'] })
+  await assert.rejects(readdir(join(f.agentDir, 'task-agents', 'logs')), { code: 'ENOENT' })
 })
 
 test('restored Skill snapshots cap search and tolerate an initial Skill disappearing', async (t) => {

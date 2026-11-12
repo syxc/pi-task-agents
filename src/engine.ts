@@ -106,12 +106,13 @@ export class TaskEngine {
     ReturnType<typeof captureTaskExecutionContext>
   >()
   private readonly outputReads: TaskOutputReads
+  private readonly progress = new Map<string, Set<(task: TaskSummary) => void>>()
   private closed = false
   private closing?: Promise<void>
   private closingError: unknown
   private disposing?: Promise<Set<string>>
   private storageError: unknown
-  private readonly uncommittedTerminals = new Set<string>()
+  private readonly uncommittedTerminals = new Map<string, symbol>()
   private uncommittedCleanup = false
 
   constructor({
@@ -228,19 +229,40 @@ export class TaskEngine {
     }
   }
 
+  private beginTerminalWrite(taskId: string): symbol {
+    const token = Symbol()
+    this.uncommittedTerminals.set(taskId, token)
+    return token
+  }
+
+  private confirmTerminalWrite(taskId: string, token: symbol): void {
+    // An older save cannot acknowledge a newer terminal snapshot.
+    if (this.uncommittedTerminals.get(taskId) === token) {
+      this.uncommittedTerminals.delete(taskId)
+    }
+  }
+
   changed(task: TaskRecord): void {
+    for (const listener of this.progress.get(task.task_id) ?? []) {
+      this.reportProgress(listener, task)
+    }
     for (const wake of this.waiters) {
       wake()
     }
     try {
-      Promise.resolve(this.onChange?.(this.summary(task))).catch(() => {})
+      Promise.resolve(
+        this.onChange?.(this.summary(task), {
+          terminalPersisted: !this.uncommittedTerminals.has(task.task_id),
+          ...(this.storageError ? { storageError: this.storageError } : {})
+        })
+      ).catch(() => {})
     } catch {
       // Ignore synchronous callback failures; async failures are already contained.
     }
   }
 
   private notifyCompletion(task: TaskRecord): void {
-    if (!task.notification_pending) {
+    if (!task.notification_pending || this.uncommittedTerminals.has(task.task_id)) {
       return
     }
     try {
@@ -310,7 +332,7 @@ export class TaskEngine {
   async start(
     input: TaskInput,
     profile: AgentProfile,
-    { requestId, signal, nestedToolCall }: TaskRequestOptions = {}
+    { requestId, signal, nestedToolCall, onProgress }: TaskRequestOptions = {}
   ): Promise<TaskSummary> {
     aborted(signal)
     input = normalizeTaskInput(input)
@@ -330,11 +352,37 @@ export class TaskEngine {
       }
       return this.enqueue(input, effective, undefined, key, nestedToolCall)
     })
-    return input.run_in_background === true ? result : this.foreground(result, signal)
+    return input.run_in_background === true ? result : this.foreground(result, signal, onProgress)
   }
 
-  private async foreground(result: TaskSummary, signal?: AbortSignal): Promise<TaskSummary> {
+  private reportProgress(listener: (task: TaskSummary) => void, task: TaskRecord): void {
+    if (this.uncommittedTerminals.has(task.task_id)) {
+      return
+    }
+    try {
+      Promise.resolve(listener(this.summary(task))).catch(() => {})
+    } catch {
+      // Presentation cannot change execution or cleanup ownership.
+    }
+  }
+
+  private async foreground(
+    result: TaskSummary,
+    signal?: AbortSignal,
+    onProgress?: (task: TaskSummary) => void
+  ): Promise<TaskSummary> {
     const task = this.task(result.task_id)
+    // Each waiter owns its registration even when callers reuse the same callback.
+    const listener = onProgress ? (snapshot: TaskSummary) => onProgress(snapshot) : undefined
+    if (listener) {
+      let listeners = this.progress.get(task.task_id)
+      if (!listeners) {
+        listeners = new Set()
+        this.progress.set(task.task_id, listeners)
+      }
+      listeners.add(listener)
+      this.reportProgress(listener, task)
+    }
     let cancellation: Promise<TaskSummary> | undefined
     let rejectCancellation!: (error: unknown) => void
     const cancellationFailed = new Promise<never>((_, reject) => {
@@ -372,6 +420,13 @@ export class TaskEngine {
     } finally {
       waiting.abort()
       signal?.removeEventListener('abort', onAbort)
+      if (listener) {
+        const listeners = this.progress.get(task.task_id)
+        listeners?.delete(listener)
+        if (listeners?.size === 0) {
+          this.progress.delete(task.task_id)
+        }
+      }
     }
   }
 
@@ -534,7 +589,7 @@ export class TaskEngine {
       },
       (receipt): AdmissionReceipt => ({ ...receipt, mode: 'duplicate', accepted: true })
     )
-    const settled = await this.foreground(result, options.signal)
+    const settled = await this.foreground(result, options.signal, options.onProgress)
     return { ...settled, mode: result.mode, accepted: result.accepted }
   }
 
@@ -772,12 +827,12 @@ export class TaskEngine {
         if (pending.has(task.status) && task.error === undefined && terminal.lastError) {
           task.error = terminal.lastError.message
         }
+        const terminalWrite = this.beginTerminalWrite(task.task_id)
         await this.domain.finish(task, runtime.terminalStatus ?? stop?.status ?? terminal.status)
         task.notification_pending =
           (task.status !== 'canceled' || !stop) && task.notify_completion !== false
-        this.uncommittedTerminals.add(task.task_id)
         await this.persist()
-        this.uncommittedTerminals.delete(task.task_id)
+        this.confirmTerminalWrite(task.task_id, terminalWrite)
         this.changed(task)
         this.notifyCompletion(task)
       } catch (error) {
@@ -786,6 +841,9 @@ export class TaskEngine {
       }
       if (!this.safety.retains(task.session_id)) {
         this.runtimes.delete(task.task_id)
+        if (task.stopError) {
+          this.changed(task)
+        }
       }
       this.pump()
     }
@@ -865,11 +923,11 @@ export class TaskEngine {
           task.notification_pending = stop.status !== 'canceled' && task.notify_completion !== false
         }
         this.recordInitializationStopOutput(task, stop)
-        this.uncommittedTerminals.add(task.task_id)
+        const terminalWrite = this.beginTerminalWrite(task.task_id)
         this.changed(task)
         const marker = this.persist()
           .then(() => {
-            this.uncommittedTerminals.delete(task.task_id)
+            this.confirmTerminalWrite(task.task_id, terminalWrite)
             this.notifyCompletion(task)
           })
           .catch((error) => {
@@ -949,8 +1007,9 @@ export class TaskEngine {
         await runtime?.done
       }
       if (this.uncommittedTerminals.has(task.task_id)) {
+        const terminalWrite = this.beginTerminalWrite(task.task_id)
         await this.persist()
-        this.uncommittedTerminals.delete(task.task_id)
+        this.confirmTerminalWrite(task.task_id, terminalWrite)
         this.changed(task)
       }
       return this.summary(task)
@@ -968,9 +1027,9 @@ export class TaskEngine {
         task.error = terminal.lastError.message
       }
       // A failed save may have committed; retain the terminal producer and retry only the write.
-      this.uncommittedTerminals.add(task.task_id)
+      const terminalWrite = this.beginTerminalWrite(task.task_id)
       await this.persist()
-      this.uncommittedTerminals.delete(task.task_id)
+      this.confirmTerminalWrite(task.task_id, terminalWrite)
       this.changed(task)
       return this.summary(task)
     }
@@ -1014,8 +1073,10 @@ export class TaskEngine {
           if (initialization) {
             this.recordInitializationStopOutput(task, stop)
           }
+          const terminalWrite = this.beginTerminalWrite(task.task_id)
           try {
             await this.persist()
+            this.confirmTerminalWrite(task.task_id, terminalWrite)
             if (initialization) {
               this.notifyCompletion(task)
             }
@@ -1284,9 +1345,14 @@ export class TaskEngine {
       // A failed receipt write must still be retried after in-memory cleanup is confirmed.
       this.uncommittedCleanup ||= hadCleanupFailure || recovered
       if (this.uncommittedTerminals.size || this.uncommittedCleanup || this.safety.quarantined) {
+        const terminals = [...this.uncommittedTerminals.keys()].map(
+          (id) => [id, this.beginTerminalWrite(id)] as const
+        )
         try {
           await this.persist()
-          this.uncommittedTerminals.clear()
+          for (const [id, token] of terminals) {
+            this.confirmTerminalWrite(id, token)
+          }
           this.uncommittedCleanup = false
         } catch (error) {
           this.latchStorageError(error)
