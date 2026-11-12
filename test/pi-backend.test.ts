@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
-import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type * as sdk from '@earendil-works/pi-coding-agent'
 import { answer, tool, deferred, profile, fixture } from './pi-backend-test-helpers.ts'
 import { seedInheritedProvider } from '../src/model-providers.ts'
 import { TaskEngine } from '../src/engine.ts'
-import type { AgentProfile, ChildFailure, ChildSession } from '../src/types.ts'
+import type { AgentProfile, ChildFailure, ChildSession, TaskRecord } from '../src/types.ts'
+import { DiagnosticLog } from '../src/diagnostics.ts'
+import { recordChildFailure } from '../src/engine-facts.ts'
+import { taskTurnId } from '../src/vendor/mcode-adapters/task-turn-id.ts'
 
 test('default SDK native Bash writes an owned file; facts come from real messages/events', async (t) => {
   const f = await fixture(t)
@@ -41,6 +44,149 @@ test('default SDK native Bash writes an owned file; facts come from real message
   assert.equal(Object.isFrozen(resolved.nativeToolSnapshot), true)
   assert.equal((await stat(child.sessionPath)).mode & 0o777, 0o600)
   assert.equal((await stat(join(f.root, 'sessions'))).mode & 0o777, 0o700)
+})
+
+test('successful reports preserve ordinary Basic and token text with the original credential protection', async (t) => {
+  const f = await fixture(t)
+  const ordinary =
+    'Basic arithmetic is supported. Basic checks passed.\ntoken: identifier\n{"token":"field-name"}'
+  const credentials = [
+    'Bearer bearer-credential',
+    'api-key=api-credential',
+    'access_token=access-credential',
+    'refresh_token=refresh-credential',
+    'authorization=auth-credential',
+    'password=password-credential',
+    'secret=secret-credential',
+    'sk_syntheticcredential'
+  ].join('\n')
+  f.script(() => answer(ordinary + '\n' + credentials))
+  const child = await f.child()
+  const result = await child.prompt(
+    'Return the offline report with ordinary words and credentials.'
+  )
+  assert.deepEqual(result.outcome, { kind: 'returned', status: 'succeeded' })
+  assert.equal(
+    result.text,
+    ordinary +
+      '\n' +
+      [
+        'Bearer [redacted]',
+        'api-key=[redacted]',
+        'access_token=[redacted]',
+        'refresh_token=[redacted]',
+        'authorization=[redacted]',
+        'password=[redacted]',
+        'secret=[redacted]',
+        '[redacted]'
+      ].join('\n')
+  )
+  assert.doesNotMatch(result.text, /credential/)
+})
+
+test('error pipelines redact escaped credentials before terminal facts reach diagnostic JSONL', async (t) => {
+  const raw = JSON.stringify({ password: 'prefix\\"tail-secret-round2' })
+  /* oxlint-disable no-await-in-loop -- SDK fixtures and cleanup ownership must settle before the next failure path. */
+  for (const mode of [
+    'model',
+    'extension',
+    'cleanup',
+    'initialization',
+    'uninitialized-shutdown'
+  ]) {
+    await t.test(mode, async (t) => {
+      const f = await fixture(
+        t,
+        mode === 'uninitialized-shutdown'
+          ? {
+              sdk: {
+                createAgentSession: async () => {
+                  throw new Error('Offline constructor failure')
+                }
+              }
+            }
+          : {}
+      )
+      const taskId = 'error-pipeline-' + mode
+      const turnId = taskTurnId(taskId)
+      const extension = join(f.root, 'error-pipeline.mjs')
+      if (mode === 'extension' || mode === 'uninitialized-shutdown') {
+        await writeFile(
+          extension,
+          'export default pi => { let first = true; pi.on(' +
+            JSON.stringify(mode === 'extension' ? 'input' : 'session_shutdown') +
+            ', () => { if (first) { first = false; throw Error(' +
+            JSON.stringify(raw) +
+            '); } }); };'
+        )
+      }
+      const operation = async () => {
+        if (mode === 'initialization') {
+          return f.child({}, undefined, async () => {
+            throw new Error(raw)
+          })
+        }
+        const child = await f.child(
+          mode === 'extension' || mode === 'uninitialized-shutdown'
+            ? { extensions: [extension] }
+            : {}
+        )
+        if (mode === 'cleanup') {
+          const session = f.session()
+          const original = session.dispose.bind(session)
+          session.dispose = () => {
+            session.dispose = original
+            throw Object.assign(new Error(raw), { code: raw })
+          }
+          return child.dispose()
+        }
+        f.script(() => answer('', { stopReason: 'error', errorMessage: raw }))
+        return child.prompt('Return the offline failure.', { turnId })
+      }
+      let failure: ChildFailure | undefined
+      await assert.rejects(operation(), (error: ChildFailure) => {
+        failure = error
+        return true
+      })
+      assert.ok(failure)
+      await failure.cleanupChild?.dispose()
+      const task: TaskRecord = {
+        task_id: taskId,
+        sub_turn_id: turnId,
+        session_id: 'pipeline-session',
+        parent_id: 'pipeline-parent',
+        childSessionPath: join(f.root, 'sessions', 'owned.jsonl'),
+        profile,
+        input: { prompt: 'Return the offline failure.' },
+        status: 'failed',
+        description: 'Offline error redaction',
+        agent_name: profile.name,
+        created_at: new Date().toISOString(),
+        output: '',
+        cursor: 0,
+        notification_pending: false,
+        notify_completion: false
+      }
+      const terminal = recordChildFailure(task, failure).message
+      new DiagnosticLog(f.agentDir).write('error', 'task_failed', {
+        task_id: taskId,
+        status: 'failed',
+        error: terminal
+      })
+      const directory = join(f.agentDir, 'task-agents', 'logs')
+      const files = await readdir(directory)
+      const persisted = await Promise.all(
+        files.map((name) => readFile(join(directory, name), 'utf8'))
+      )
+      assert.doesNotMatch(persisted.join(''), /prefix|tail-secret-round2/)
+      const record = JSON.parse(persisted.join('').trim())
+      assert.equal(record.error.message, terminal)
+      assert.match(terminal, /\[redacted\]/)
+      assert.doesNotMatch(failure.message, /prefix|tail-secret-round2/)
+      assert.doesNotMatch(terminal, /prefix|tail-secret-round2/)
+    })
+  }
+  /* oxlint-enable no-await-in-loop */
 })
 
 test('independent sessions and continuation retain only their own history', async (t) => {

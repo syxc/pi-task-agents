@@ -52,6 +52,8 @@ export interface TaskQuery {
 export interface TaskRequestOptions {
   requestId?: string
   signal?: AbortSignal
+  /** Live foreground presentation only; never persisted or retained after the caller returns. */
+  onProgress?: (task: TaskSummary) => void
   /** True for nested or unverified SDK origin; full-capacity foreground admission must not wait. */
   nestedToolCall?: boolean
 }
@@ -214,6 +216,12 @@ export interface TaskState {
   cleanupConfirmed?: string[]
 }
 
+export interface TaskChangeContext {
+  /** Confirmation of the terminal snapshot, derived from the engine's pending terminal writes. */
+  terminalPersisted: boolean
+  storageError?: unknown
+}
+
 export interface TaskEngineOptions {
   rootDir: string
   parentId: string
@@ -222,7 +230,7 @@ export interface TaskEngineOptions {
   maxConcurrency?: number
   createChild: CreateChild
   notify?: (task: TaskSummary) => void | Promise<void>
-  onChange?: (task: TaskSummary) => void | Promise<void>
+  onChange?: (task: TaskSummary, context: TaskChangeContext) => void | Promise<void>
 }
 
 export interface TaskService {

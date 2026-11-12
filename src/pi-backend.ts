@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { chmod } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type * as PiSdkModule from '@earendil-works/pi-coding-agent'
 import { Type, type Static } from 'typebox'
@@ -53,6 +53,11 @@ import { createChildCommands } from './child-commands.ts'
 import type { ParentRuntimeSnapshot } from './parent-runtime.ts'
 import { selectParentTools } from './child-parent-tools.ts'
 import { searchAuthorizedSkills } from './skill-context.ts'
+import {
+  DiagnosticLog,
+  redactDiagnosticText,
+  type InitialSkillRejectionReason
+} from './diagnostics.ts'
 
 type PiSdk = Pick<
   typeof PiSdkModule,
@@ -125,8 +130,8 @@ interface ChildError extends Error {
 const abortError = (): Error =>
   Object.assign(new Error('Child session aborted'), { name: 'AbortError' })
 
-// Do not forward provider diagnostics, thinking blocks, tool inputs, or tool results.
-function redact(text: unknown): string {
+// Reports retain their original output policy; diagnostic Basic/token rules also match prose.
+function redactReport(text: unknown): string {
   return String(text)
     .replace(/\bBearer\s+[^\s"'<>]+/gi, 'Bearer [redacted]')
     .replace(/\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}/g, '[redacted]')
@@ -139,8 +144,14 @@ function skillIdentity(skill: Pick<Skill, 'name' | 'filePath'>): string {
   return `${skill.name.trim().normalize('NFKC')}\0${resolve(skill.filePath)}`
 }
 
+function skillMatchesName(skill: Skill, name: string): boolean {
+  return skill.name.trim().normalize('NFKC') === name
+}
+
 function safeError(error: unknown): ChildError {
-  const result: ChildError = new Error(redact(error instanceof Error ? error.message : error))
+  const result: ChildError = new Error(
+    redactDiagnosticText(error instanceof Error ? error.message : error)
+  )
   if (isRecord(error) && typeof error.name === 'string' && error.name) {
     result.name = error.name
   }
@@ -154,7 +165,7 @@ function cleanupFailure(error: unknown): ChildError {
     const safe = safeError(value)
     const code =
       typeof safe.code === 'string' || typeof safe.code === 'number'
-        ? ` [${redact(safe.code)}]`
+        ? ` [${redactDiagnosticText(safe.code)}]`
         : ''
     const head = `${safe.name}${code}: ${safe.message}`
     return value instanceof AggregateError && depth < 8
@@ -191,6 +202,7 @@ export function createPiChildFactory({
     throw new Error('agentDir is required')
   }
   const configDir = resolve(agentDir)
+  const diagnostics = new DiagnosticLog(configDir)
   let sdkPromise: Promise<PiSdk> | undefined
   let runtimePromise: Promise<ModelRuntime> | undefined
   const seededProviders = new Set<string>()
@@ -896,7 +908,11 @@ export function createPiChildFactory({
                   ? abortError()
                   : (extensionError ??
                     (run.last?.stopReason === 'error'
-                      ? new Error(redact(run.last.errorMessage ?? 'Child model request failed'))
+                      ? new Error(
+                          redactDiagnosticText(
+                            run.last.errorMessage ?? 'Child model request failed'
+                          )
+                        )
                       : undefined)))
               returnedStatus = run.failure
                 ? 'failed'
@@ -946,7 +962,7 @@ export function createPiChildFactory({
                 : undefined
             const verification = { ...observation, ...(modelVerdict ? { modelVerdict } : {}) }
             const result: ChildResult = {
-              text: redact(committed.text),
+              text: redactReport(committed.text),
               usage: run.usage,
               eventCount: run.eventCount,
               ...(verification ? { verification } : {}),
@@ -1041,7 +1057,9 @@ export function createPiChildFactory({
           },
           onError: (error) => {
             if (!steering.staleInput()) {
-              extensionError = new Error(`Child extension failed: ${redact(error.error)}`)
+              extensionError = new Error(
+                `Child extension failed: ${redactDiagnosticText(error.error)}`
+              )
             }
           }
         })
@@ -1084,18 +1102,63 @@ export function createPiChildFactory({
         }
         const loadedSkills = loader.getSkills().skills
         const names = [...new Set(loadedSkills.map((skill) => skill.name))]
-        if (
-          profile.initialSkills !== undefined &&
-          profile.skillSnapshot === undefined &&
-          profile.initialSkills.some(
-            (name) =>
-              !loadedSkills.some(
-                (skill) =>
-                  skill.name.trim().normalize('NFKC') === name && !skill.disableModelInvocation
-              )
+        if (profile.initialSkills !== undefined && profile.skillSnapshot === undefined) {
+          const available = loadedSkills.filter((skill) => !skill.disableModelInvocation)
+          const rejected = profile.initialSkills.filter(
+            (name) => !available.some((skill) => skillMatchesName(skill, name))
           )
-        ) {
-          throw new Error('Requested initial Skill is not authorized or no longer available')
+          if (rejected.length) {
+            const hostSkills = resourceHost?.getSkills().skills ?? []
+            const rejectedSkills = rejected.map((name) => {
+              const hostMatches = hostSkills.filter((skill) => skillMatchesName(skill, name))
+              const trusted = hostMatches.filter(
+                (skill) => projectTrusted || skill.sourceInfo.scope !== 'project'
+              )
+              let reason: InitialSkillRejectionReason = 'not_available'
+              if (hostMatches.length && !trusted.length) {
+                reason = 'project_untrusted'
+              } else if (
+                [...trusted, ...loadedSkills.filter((skill) => skillMatchesName(skill, name))].some(
+                  (skill) => skill.disableModelInvocation
+                )
+              ) {
+                reason = 'disabled_model_invocation'
+              } else if (
+                trusted.length &&
+                !resources.skills.inherit &&
+                !resources.skills.names.includes(normalizedSelectorName(name)) &&
+                !trusted.some((skill) =>
+                  resources.skills.selectedPaths.some((entry) =>
+                    within(entry, resolve(skill.filePath))
+                  )
+                )
+              ) {
+                reason = 'outside_role_scope'
+              }
+              return { name, reason }
+            })
+            const error = Object.assign(
+              new Error(
+                'Requested initial Skill is not authorized or no longer available: ' +
+                  rejectedSkills
+                    .map(
+                      ({ name, reason }) =>
+                        `${JSON.stringify(redactDiagnosticText(name))} (${reason})`
+                    )
+                    .join(', ')
+              ),
+              { code: 'INITIAL_SKILL_UNAVAILABLE' }
+            )
+            diagnostics.write('error', 'initial_skill_rejected', {
+              agent_name: profile.name,
+              session_id: basename(path, '.jsonl'),
+              requested_count: profile.initialSkills.length,
+              available_count: available.length,
+              rejected_skills: rejectedSkills,
+              error
+            })
+            throw error
+          }
         }
         skillCeiling = normalizeSelector(names)
         const facts = observedToolFacts(session, allow, extraTools)
@@ -1208,7 +1271,9 @@ export function createPiChildFactory({
                 }
                 let shutdownError: Error | undefined
                 const unsubscribe = runner.onError((failure) => {
-                  shutdownError = new Error(`Child extension failed: ${redact(failure.error)}`)
+                  shutdownError = new Error(
+                    `Child extension failed: ${redactDiagnosticText(failure.error)}`
+                  )
                 })
                 try {
                   await runner.emit({ type: 'session_shutdown', reason: 'quit' })

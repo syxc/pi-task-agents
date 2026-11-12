@@ -7,6 +7,17 @@ import {
   type TaskToolResult
 } from './tool-result-common.ts'
 import { verificationText } from './task-verification.ts'
+import { taskProgressText } from './task-presentation.ts'
+
+export function taskProgressResult(task: TaskSummary): TaskToolResult {
+  return projectedResult('task', taskProgressText(task), {
+    task_id: task.task_id,
+    session_id: task.session_id,
+    agent_name: task.agent_name,
+    status: task.status,
+    ...(task.cleanup_pending ? { cleanup_pending: true } : {})
+  })
+}
 
 // Project persisted source facts only; legacy records may omit newer fields.
 export type TaskRunFacts = Pick<

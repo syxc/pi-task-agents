@@ -251,6 +251,13 @@ export function taskProgress(task: TaskSummary, now = Date.now()): string {
   return taskRow(task, now, Infinity)
 }
 
+export function taskProgressText(task: TaskSummary, now = Date.now()): string {
+  const text = widgetText(taskProgress(widgetTask(task), now))
+  const limit = 1000
+  // Bound transport size even when zero-width text bypasses display-column limits.
+  return text.length <= limit ? text : `${Array.from(text.slice(0, limit)).slice(0, -1).join('')}…`
+}
+
 export function taskWidget(
   tasks: readonly TaskSummary[],
   hidden: number,

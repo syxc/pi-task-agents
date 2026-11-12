@@ -29,6 +29,7 @@ const task = (patch = {}) => ({
 // This engine controls presentation only; the real Pi process owns the RPC adapter.
 const engineSource = `class Engine {
   tasks = []
+  constructor(options) { this.options = options }
   async init() {}
   async close() {}
   async query() { return this.tasks }
@@ -74,6 +75,18 @@ async function rpcFixture(t) {
         }
         if (args === 'warn') { controller.warn(new Error('fixture warning')); return }
         const engine = await controller.ensure(ctx)
+        if (args === 'progress-probe') {
+          const task = {
+            task_id: 'background-probe', session_id: 'child-probe',
+            parent_id: ctx.sessionManager.getSessionId(),
+            execution_mode: 'background', agent_name: 'worker',
+            description: 'Inspect background progress', status: 'queued'
+          }
+          for (const status of ['queued', 'running', 'running', 'succeeded']) {
+            engine.options.onChange({ ...task, status })
+          }
+          return
+        }
         engine.tasks = JSON.parse(args)
         await controller.updateUI()
       } })
@@ -332,6 +345,28 @@ test(
     )
   }
 )
+
+test('real RPC exposes background state changes as visible messages without waking a model', async (t) => {
+  const rpc = await rpcFixture(t)
+  const events = await rpc.command('prompt', { message: '/widget-fixture progress-probe' })
+  const progress = events.filter(
+    (event) =>
+      event.type === 'message_end' && event.message?.customType === 'pi-task-agents:progress'
+  )
+  assert.deepEqual(
+    progress.map((event) => event.message.details.status),
+    ['queued', 'running', 'succeeded']
+  )
+  assert.ok(progress.every((event) => event.message.display === true))
+  assert.match(
+    progress[1].message.content,
+    /Child task running:.*worker.*background-probe|Child task running:.*worker.*backgrou/
+  )
+  assert.equal(
+    rpc.events.some((event) => event.type === 'agent_start'),
+    false
+  )
+})
 
 function controllerFixture(mode = 'tui', hasUI = true) {
   const writes = [],

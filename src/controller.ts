@@ -3,10 +3,12 @@ import { join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { TaskEngine } from './engine.ts'
+import { DiagnosticLog } from './diagnostics.ts'
 import {
   taskCompletionBatchNotice,
   taskCompletionNotice,
   taskProgress,
+  taskProgressText,
   taskWidget,
   widgetTask,
   widgetText
@@ -30,11 +32,13 @@ import type {
   TaskAgentsConfig,
   TaskEngineConstructor,
   TaskInput,
+  TaskRequestOptions,
   TaskService,
   TaskSummary
 } from './types.ts'
 
 export const RESULT_TYPE = 'pi-task-agents:result'
+export const PROGRESS_TYPE = 'pi-task-agents:progress'
 const FAILURE_NOTICE_TYPE = 'pi-task-agents:failure-notice'
 const DELIVERY_RETRY_DELAYS_MS = [1000, 2000, 5000] as const
 const DELIVERY_RECOVERY_INITIAL_MS = 60_000
@@ -106,6 +110,7 @@ function rpcTaskWidget(tasks: readonly TaskSummary[], hidden: number): string[] 
 export class TaskController {
   private readonly pi: ParentAPI
   private readonly agentDir: string
+  private readonly diagnostics: DiagnosticLog
   private readonly Engine: TaskEngineConstructor
   private readonly configLoader: ConfigLoader
   private readonly childFactory: (options: PiChildFactoryOptions) => CreateChild
@@ -116,6 +121,7 @@ export class TaskController {
   private readonly retryAt = new Map<string, number>()
   private readonly recoveryDelay = new Map<string, number>()
   private readonly admissions = new Set<AbortController>()
+  private readonly publishedProgress = new Map<string, string>()
   private burstStartedAt = 0
   private burstDelivered = 0
   private generation = 0
@@ -146,6 +152,7 @@ export class TaskController {
   constructor(pi: ParentAPI, options: TaskControllerOptions) {
     this.pi = pi
     this.agentDir = resolve(options.agentDir)
+    this.diagnostics = new DiagnosticLog(this.agentDir)
     this.Engine = options.Engine ?? TaskEngine
     this.configLoader = options.configLoader ?? loadConfig
     this.childFactory = options.childFactory ?? createPiChildFactory
@@ -214,6 +221,9 @@ export class TaskController {
         // The engine constructor receives callbacks that run only after this handle
         // exists, so the owner is constructed once and published through the holder.
         const ref: { current?: ControllerOwner } = {}
+        const diagnostics = this.diagnostics
+        const recordedFailures = new Map<string, string>()
+        let storageFailureRecorded = false
         const engine = new this.Engine({
           rootDir,
           parentId: id,
@@ -227,7 +237,36 @@ export class TaskController {
             return current.createChild(options)
           },
           notify: () => ref.current?.notify?.(),
-          onChange: () => ref.current?.onChange?.()
+          onChange: (task, change) => {
+            if (change?.storageError && !storageFailureRecorded) {
+              storageFailureRecorded = true
+              diagnostics.write('error', 'task_persistence_failed', {
+                parent_id: task.parent_id,
+                task_id: task.task_id,
+                session_id: task.session_id,
+                agent_name: task.agent_name,
+                status: task.status,
+                error: change.storageError
+              })
+            }
+            if (task.status === 'failed' || task.status === 'lost' || task.stopError) {
+              const signature = JSON.stringify([task.status, task.error, task.stopError])
+              if (recordedFailures.get(task.task_id) !== signature) {
+                recordedFailures.set(task.task_id, signature)
+                diagnostics.write('error', task.stopError ? 'task_cleanup_failed' : 'task_failed', {
+                  parent_id: task.parent_id,
+                  task_id: task.task_id,
+                  session_id: task.session_id,
+                  agent_name: task.agent_name,
+                  status: task.status,
+                  error: task.stopError ?? task.error
+                })
+              }
+            }
+            if (change?.terminalPersisted !== false) {
+              ref.current?.onChange?.(task)
+            }
+          }
         })
         const handle: ControllerOwner = {
           rootDir,
@@ -286,7 +325,8 @@ export class TaskController {
       owner.notify = () => {
         this.flush().catch((error: unknown) => this.warn(error))
       }
-      owner.onChange = () => {
+      owner.onChange = (task) => {
+        this.publishProgress(task)
         this.updateUI().catch(() => {})
       }
       this.owner = owner
@@ -332,7 +372,52 @@ export class TaskController {
     })
   }
 
+  private publishProgress(task: TaskSummary): void {
+    const ctx = this.ctx
+    if (
+      !ctx?.hasUI ||
+      ctx.mode === 'tui' ||
+      this.closing ||
+      task.parent_id !== this.parentId ||
+      ctx.sessionManager.getSessionId() !== this.parentId ||
+      (task.execution_mode !== 'background' && task.execution_mode !== 'append')
+    ) {
+      return
+    }
+    const signature = JSON.stringify([task.status, task.cleanup_pending, task.stopError?.code])
+    if (this.publishedProgress.get(task.task_id) === signature) {
+      return
+    }
+    try {
+      // Common GUI clients display custom messages even when they ignore RPC widgets.
+      this.pi.sendMessage(
+        {
+          customType: PROGRESS_TYPE,
+          display: true,
+          content: `Child task ${task.status}: ${taskProgressText(task)}`,
+          details: {
+            parent_id: task.parent_id,
+            task_id: task.task_id,
+            session_id: task.session_id,
+            agent_name: task.agent_name,
+            status: task.status,
+            cleanup_pending: task.cleanup_pending === true
+          }
+        },
+        { triggerTurn: false }
+      )
+      this.publishedProgress.set(task.task_id, signature)
+    } catch (error) {
+      this.reportError(error, 'progress_delivery_failed')
+    }
+  }
+
+  reportError(error: unknown, event = 'operation_failed'): void {
+    this.diagnostics.write('error', event, { parent_id: this.parentId, error })
+  }
+
   warn(error: unknown): void {
+    this.diagnostics.write('warning', 'controller_warning', { parent_id: this.parentId, error })
     try {
       if (this.ctx?.hasUI) {
         const message = error instanceof Error ? error.message : String(error)
@@ -561,7 +646,8 @@ export class TaskController {
     toolCallId: string,
     signal: AbortSignal | undefined,
     ctx: ExtensionContext,
-    nestedToolCall = false
+    nestedToolCall = false,
+    onProgress?: TaskRequestOptions['onProgress']
   ): Promise<TaskSummary> {
     return this.admit(ctx, signal, (engine, combined) => {
       const selected = resolveProfile(this.config, input)
@@ -583,6 +669,7 @@ export class TaskController {
       return engine.start(input, profile, {
         requestId: toolCallId,
         signal: combined,
+        onProgress,
         ...(nestedToolCall ? { nestedToolCall: true } : {})
       })
     })
@@ -604,12 +691,14 @@ export class TaskController {
     toolCallId: string,
     signal: AbortSignal | undefined,
     ctx: ExtensionContext,
-    nestedToolCall = false
+    nestedToolCall = false,
+    onProgress?: TaskRequestOptions['onProgress']
   ): Promise<AdmissionReceipt> {
     return this.admit(ctx, signal, (engine, combined) =>
       engine.send(input.task_id, input.content, {
         requestId: toolCallId,
         signal: combined,
+        onProgress,
         ...(nestedToolCall ? { nestedToolCall: true } : {})
       })
     )
@@ -981,6 +1070,7 @@ export class TaskController {
         }
       }
       this.owner = undefined
+      this.publishedProgress.clear()
       this.inFlight.clear()
       this.attempts.clear()
       this.retryAt.clear()
